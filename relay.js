@@ -11,6 +11,14 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// Register global error handlers to prevent process crashes under network drops
+process.on('uncaughtException', (err) => {
+    console.error("CRITICAL: Uncaught Exception:", err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error("CRITICAL: Unhandled Rejection at:", promise, "reason:", reason);
+});
+
 const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
 const SUB_CACHE_PATH = path.join(__dirname, 'subscription_blocklist.txt');
 const AI_LEARNED_PATH = path.join(__dirname, 'ai_learned_examples.json');
@@ -188,7 +196,12 @@ function broadcastUpdate() {
         const data = JSON.stringify(payload);
         for (const ws of wsClients) {
             if (ws.readyState === WebSocket.OPEN) {
-                ws.send(data);
+                ws.send(data, (err) => {
+                    if (err) {
+                        console.error("WS write error, removing client:", err);
+                        wsClients.delete(ws);
+                    }
+                });
             }
         }
     } catch (e) {
@@ -363,6 +376,21 @@ function loadConfig() {
     if (!Array.isArray(config.groqApiKeys)) {
         config.groqApiKeys = [];
     }
+    
+    // Load keys from environment variable GROQ_API_KEYS (comma separated)
+    if (process.env.GROQ_API_KEYS) {
+        const envKeys = process.env.GROQ_API_KEYS.split(',')
+            .map(k => k.trim())
+            .filter(k => k.length > 0);
+        
+        envKeys.forEach(k => {
+            if (!config.groqApiKeys.includes(k)) {
+                config.groqApiKeys.push(k);
+            }
+        });
+        console.log(`Loaded ${envKeys.length} Groq API keys from environment variable.`);
+    }
+
     config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
     if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
         config.subscriptionURLs = defaultSubs;

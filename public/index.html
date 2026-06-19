@@ -844,12 +844,66 @@
     };
     let isConfigLoaded = false;
 
+    function keyMatchesMask(rawKey, maskedKey) {
+        if (!maskedKey || maskedKey.length < 10) return false;
+        const prefix = maskedKey.substring(0, 8);
+        const dotIndex = maskedKey.indexOf('...');
+        if (dotIndex === -1) return false;
+        const suffix = maskedKey.substring(dotIndex + 3);
+        return rawKey.startsWith(prefix) && rawKey.endsWith(suffix);
+    }
+
+    let isSyncingKeys = false;
+    function syncKeysWithServer() {
+        if (isSyncingKeys) return;
+        
+        let localKeys = [];
+        try {
+            localKeys = JSON.parse(localStorage.getItem('groq_api_keys') || '[]');
+        } catch (e) {}
+        if (!Array.isArray(localKeys) || localKeys.length === 0) return;
+        
+        const serverMaskedKeys = dnsConfig.groqApiKeys || [];
+        
+        // Find local keys that are not present on the server
+        const missingKeys = localKeys.filter(localKey => {
+            return !serverMaskedKeys.some(maskedKey => keyMatchesMask(localKey, maskedKey));
+        });
+        
+        if (missingKeys.length > 0) {
+            isSyncingKeys = true;
+            console.log(`Syncing ${missingKeys.length} missing keys from localStorage to server...`);
+            showToast(`Khôi phục ${missingKeys.length} API Key tự động từ trình duyệt...`, 'info');
+            
+            // Add them sequentially to avoid concurrency collisions
+            let promiseChain = Promise.resolve();
+            missingKeys.forEach(key => {
+                promiseChain = promiseChain.then(() => {
+                    return fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.error) console.error("Sync key error:", data.error);
+                        });
+                });
+            });
+            
+            promiseChain.then(() => {
+                isSyncingKeys = false;
+                fetchDNSConfig();
+            }).catch(err => {
+                isSyncingKeys = false;
+                console.error("Error syncing keys:", err);
+            });
+        }
+    }
+
     function fetchDNSConfig() {
         fetch('/dns/config')
             .then(res => res.json())
             .then(data => {
                 dnsConfig = data;
                 updateDNSUI();
+                syncKeysWithServer();
             })
             .catch(err => {
                 console.error("Lỗi cấu hình DNS:", err);
@@ -1236,6 +1290,17 @@
                 } else {
                     input.value = '';
                     showToast(`Đã thêm API Key! Tổng: ${data.count} key (${data.maxConcurrent} luồng song song)`);
+                    
+                    // Save to localStorage
+                    let localKeys = [];
+                    try {
+                        localKeys = JSON.parse(localStorage.getItem('groq_api_keys') || '[]');
+                    } catch (e) {}
+                    if (!localKeys.includes(key)) {
+                        localKeys.push(key);
+                        localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
+                    }
+                    
                     fetchDNSConfig();
                 }
             })
@@ -1248,6 +1313,9 @@
     function removeGroqKey(index) {
         if (!confirm('Bạn có muốn xóa API Key này không?')) return;
         
+        const serverMaskedKeys = dnsConfig.groqApiKeys || [];
+        const maskedKeyToDelete = serverMaskedKeys[index];
+        
         fetch(`/dns/groq/keys/remove?index=${index}`, { method: 'POST' })
             .then(res => res.json())
             .then(data => {
@@ -1255,6 +1323,18 @@
                     showToast(data.error, 'error');
                 } else {
                     showToast(`Đã xóa API Key! Còn lại: ${data.count} key`);
+                    
+                    // Remove matching key from localStorage
+                    let localKeys = [];
+                    try {
+                        localKeys = JSON.parse(localStorage.getItem('groq_api_keys') || '[]');
+                    } catch (e) {}
+                    
+                    if (maskedKeyToDelete) {
+                        localKeys = localKeys.filter(localKey => !keyMatchesMask(localKey, maskedKeyToDelete));
+                        localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
+                    }
+                    
                     fetchDNSConfig();
                 }
             })
