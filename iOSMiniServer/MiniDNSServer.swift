@@ -24,7 +24,8 @@ class MiniDNSServer: ObservableObject {
     private let queue = DispatchQueue(label: "com.antigravity.dnsserver.queue", qos: .userInitiated)
     private let port: UInt16 = 53
     
-    var blockedDomains: Set<String> = []
+    var customBlockedDomains: Set<String> = []
+    var subscriptionBlockedDomains: Set<String> = []
     
     init() {
         loadConfig()
@@ -183,25 +184,44 @@ class MiniDNSServer: ObservableObject {
     private func shouldBlock(domain: String) -> Bool {
         let lowercaseDomain = domain.lowercased()
         
-        // Whitelist checks (exact or subdomain)
+        // 1. Whitelist check (exact or parent subdomain)
         if whitelistDomains.contains(lowercaseDomain) {
             return false
         }
-        for whitelisted in whitelistDomains {
-            if lowercaseDomain.hasSuffix("." + whitelisted) {
-                return false
+        
+        let parts = lowercaseDomain.split(separator: ".")
+        if parts.count > 1 {
+            for i in 1..<parts.count {
+                let parent = parts[i..<parts.count].joined(separator: ".")
+                if whitelistDomains.contains(parent) {
+                    return false
+                }
             }
         }
         
-        // Exact match in blocklist
-        if blockedDomains.contains(lowercaseDomain) {
+        // 2. Custom Blocklist check (exact or parent subdomain)
+        if customBlockedDomains.contains(lowercaseDomain) {
             return true
         }
+        if parts.count > 1 {
+            for i in 1..<parts.count {
+                let parent = parts[i..<parts.count].joined(separator: ".")
+                if customBlockedDomains.contains(parent) {
+                    return true
+                }
+            }
+        }
         
-        // Subdomain match (e.g. ad.doubleclick.net should be blocked if doubleclick.net is blocked)
-        for blocked in blockedDomains {
-            if lowercaseDomain.hasSuffix("." + blocked) {
-                return true
+        // 3. Subscription Blocklist check (exact or parent subdomain)
+        if subscriptionBlockedDomains.contains(lowercaseDomain) {
+            return true
+        }
+        if parts.count > 1 {
+            for i in 1..<parts.count {
+                let parent = parts[i..<parts.count].joined(separator: ".")
+                if subscriptionBlockedDomains.contains(parent) {
+                    return true
+                }
             }
         }
         
@@ -312,17 +332,37 @@ class MiniDNSServer: ObservableObject {
     
     // MARK: - DNS Configuration & Lists
     
+    private func getSubscriptionBlocklistFilePath() -> URL? {
+        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        return paths.first?.appendingPathComponent("subscription_blocklist.txt")
+    }
+    
+    private func saveSubscriptionBlocklistToDisk(domains: Set<String>) {
+        guard let url = getSubscriptionBlocklistFilePath() else { return }
+        let content = domains.joined(separator: "\n")
+        try? content.write(to: url, atomically: true, encoding: .utf8)
+    }
+    
+    private func loadSubscriptionBlocklistFromDisk() -> Set<String> {
+        guard let url = getSubscriptionBlocklistFilePath(),
+              let content = try? String(contentsOf: url, encoding: .utf8) else {
+            return []
+        }
+        let lines = content.components(separatedBy: .newlines)
+        return Set(lines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    }
+    
     func block(domain: String) {
         let d = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !d.isEmpty else { return }
-        blockedDomains.insert(d)
+        customBlockedDomains.insert(d)
         saveConfig()
         log("Chặn tên miền: \(d)")
     }
     
     func unblock(domain: String) {
         let d = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        blockedDomains.remove(d)
+        customBlockedDomains.remove(d)
         saveConfig()
         log("Bỏ chặn tên miền: \(d)")
     }
@@ -379,7 +419,8 @@ class MiniDNSServer: ObservableObject {
         log("Bắt đầu cập nhật danh sách chặn từ các nguồn...")
         
         let urls = self.subscriptionURLs
-        DispatchQueue.global(qos: .background).async {
+        DispatchQueue.global(qos: .background).async { [weak self] in
+            guard let self = self else { return }
             var newBlocked = Set<String>()
             let group = DispatchGroup()
             
@@ -387,8 +428,9 @@ class MiniDNSServer: ObservableObject {
                 guard let url = URL(string: urlString) else { continue }
                 group.enter()
                 
-                let task = URLSession.shared.dataTask(with: url) { data, response, error in
+                let task = URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
                     defer { group.leave() }
+                    guard let self = self else { return }
                     
                     if let error = error {
                         self.log("Lỗi tải \(urlString): \(error.localizedDescription)")
@@ -435,11 +477,15 @@ class MiniDNSServer: ObservableObject {
             
             group.wait()
             
+            if !newBlocked.isEmpty {
+                self.saveSubscriptionBlocklistToDisk(domains: newBlocked)
+            }
+            
             DispatchQueue.main.async {
                 if !newBlocked.isEmpty {
-                    self.blockedDomains = newBlocked
+                    self.subscriptionBlockedDomains = newBlocked
                     self.saveConfig()
-                    self.log("Cập nhật thành công! Tổng số tên miền chặn: \(self.blockedDomains.count)")
+                    self.log("Cập nhật thành công! Tổng số tên miền chặn: \(self.customBlockedDomains.count + self.subscriptionBlockedDomains.count)")
                 } else {
                     self.log("Không có tên miền mới nào được tải về.")
                 }
@@ -455,15 +501,27 @@ class MiniDNSServer: ObservableObject {
     }
     
     func loadConfig() {
-        let saved = UserDefaults.standard.stringArray(forKey: "BlockedDomains") ?? [
-            "doubleclick.net",
-            "pagead2.googlesyndication.com",
-            "adservice.google.com",
-            "ads.youtube.com",
-            "telemetry.apple.com",
-            "app-measurement.com"
-        ]
-        self.blockedDomains = Set(saved)
+        let savedCustom = UserDefaults.standard.stringArray(forKey: "CustomBlockedDomains") ?? []
+        self.customBlockedDomains = Set(savedCustom)
+        
+        // Backward compatibility and default list initialization
+        if savedCustom.isEmpty {
+            let savedOld = UserDefaults.standard.stringArray(forKey: "BlockedDomains") ?? []
+            if savedOld.count < 1000 && !savedOld.isEmpty {
+                self.customBlockedDomains = Set(savedOld)
+            } else {
+                self.customBlockedDomains = [
+                    "doubleclick.net",
+                    "pagead2.googlesyndication.com",
+                    "adservice.google.com",
+                    "ads.youtube.com",
+                    "telemetry.apple.com",
+                    "app-measurement.com"
+                ]
+            }
+        }
+        
+        self.subscriptionBlockedDomains = loadSubscriptionBlocklistFromDisk()
         
         let savedWhitelist = UserDefaults.standard.stringArray(forKey: "WhitelistDomains") ?? []
         self.whitelistDomains = Set(savedWhitelist)
@@ -478,25 +536,32 @@ class MiniDNSServer: ObservableObject {
         self.blockedQueries = UserDefaults.standard.integer(forKey: "DNSBlockedQueries")
         self.allowedQueries = UserDefaults.standard.integer(forKey: "DNSAllowedQueries")
         
+        updateBlockedCount()
+    }
+    
+    private func updateBlockedCount() {
         DispatchQueue.main.async {
-            self.blockedCount = self.blockedDomains.count
+            self.blockedCount = self.customBlockedDomains.count + self.subscriptionBlockedDomains.count
         }
     }
     
     func saveConfig() {
-        UserDefaults.standard.set(Array(blockedDomains), forKey: "BlockedDomains")
+        UserDefaults.standard.set(Array(customBlockedDomains), forKey: "CustomBlockedDomains")
         UserDefaults.standard.set(Array(whitelistDomains), forKey: "WhitelistDomains")
         UserDefaults.standard.set(subscriptionURLs, forKey: "SubscriptionURLs")
         UserDefaults.standard.set(upstreamDNS, forKey: "UpstreamDNS")
+        
+        // Clean up old BlockedDomains key to reduce plist bloat
+        UserDefaults.standard.removeObject(forKey: "BlockedDomains")
         
         UserDefaults.standard.set(totalQueries, forKey: "DNSTotalQueries")
         UserDefaults.standard.set(blockedQueries, forKey: "DNSBlockedQueries")
         UserDefaults.standard.set(allowedQueries, forKey: "DNSAllowedQueries")
         
-        DispatchQueue.main.async {
-            self.blockedCount = self.blockedDomains.count
-        }
+        updateBlockedCount()
     }
+    
+    private var lastStatsSaveTime: Date = Date()
     
     func incrementStats(blocked: Bool) {
         totalQueries += 1
@@ -506,9 +571,13 @@ class MiniDNSServer: ObservableObject {
             allowedQueries += 1
         }
         
-        UserDefaults.standard.set(totalQueries, forKey: "DNSTotalQueries")
-        UserDefaults.standard.set(blockedQueries, forKey: "DNSBlockedQueries")
-        UserDefaults.standard.set(allowedQueries, forKey: "DNSAllowedQueries")
+        let now = Date()
+        if now.timeIntervalSince(lastStatsSaveTime) > 5.0 {
+            lastStatsSaveTime = now
+            UserDefaults.standard.set(totalQueries, forKey: "DNSTotalQueries")
+            UserDefaults.standard.set(blockedQueries, forKey: "DNSBlockedQueries")
+            UserDefaults.standard.set(allowedQueries, forKey: "DNSAllowedQueries")
+        }
         
         DispatchQueue.main.async {
             self.objectWillChange.send()

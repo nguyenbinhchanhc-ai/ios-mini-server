@@ -194,7 +194,8 @@ class MiniHTTPServer: ObservableObject {
             }
         } else if method == "GET" && path == "/dns/config" {
             let running = dnsServer?.isRunning ?? false
-            let blocked = Array(dnsServer?.blockedDomains ?? [])
+            let blocked = Array(dnsServer?.customBlockedDomains ?? [])
+            let blockedCount = dnsServer?.blockedCount ?? 0
             let whitelist = Array(dnsServer?.whitelistDomains ?? [])
             let subscriptions = dnsServer?.subscriptionURLs ?? []
             let upstream = dnsServer?.upstreamDNS ?? "1.1.1.1"
@@ -209,6 +210,7 @@ class MiniHTTPServer: ObservableObject {
             let responseObj: [String: Any] = [
                 "running": running,
                 "blocked": blocked,
+                "blockedCount": blockedCount,
                 "whitelist": whitelist,
                 "subscriptions": subscriptions,
                 "upstream": upstream,
@@ -354,7 +356,8 @@ class MiniHTTPServer: ObservableObject {
             }
         } else if method == "GET" && path == "/dns/config" {
             let running = dnsServer?.isRunning ?? false
-            let blocked = Array(dnsServer?.blockedDomains ?? [])
+            let blocked = Array(dnsServer?.customBlockedDomains ?? [])
+            let blockedCount = dnsServer?.blockedCount ?? 0
             let whitelist = Array(dnsServer?.whitelistDomains ?? [])
             let subscriptions = dnsServer?.subscriptionURLs ?? []
             let upstream = dnsServer?.upstreamDNS ?? "1.1.1.1"
@@ -369,6 +372,7 @@ class MiniHTTPServer: ObservableObject {
             let responseObj: [String: Any] = [
                 "running": running,
                 "blocked": blocked,
+                "blockedCount": blockedCount,
                 "whitelist": whitelist,
                 "subscriptions": subscriptions,
                 "upstream": upstream,
@@ -1862,7 +1866,7 @@ class MiniHTTPServer: ObservableObject {
                     document.getElementById('dnsStatTotal').innerText = dnsConfig.stats.total;
                     document.getElementById('dnsStatBlocked').innerText = dnsConfig.stats.blocked;
                     document.getElementById('dnsStatPercent').innerText = dnsConfig.stats.blockedPercent.toFixed(1) + '%';
-                    document.getElementById('dnsStatActive').innerText = (dnsConfig.blocked ? dnsConfig.blocked.length : 0) + ' tên miền';
+                    document.getElementById('dnsStatActive').innerText = (dnsConfig.blockedCount !== undefined ? dnsConfig.blockedCount : (dnsConfig.blocked ? dnsConfig.blocked.length : 0)) + ' tên miền';
                     
                     if(document.activeElement !== document.getElementById('upstreamInput')) {
                         document.getElementById('upstreamInput').value = dnsConfig.upstream;
