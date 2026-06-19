@@ -156,8 +156,6 @@ const IGNORED_DOMAINS = new Set([
     "0.0.0.0", "127.0.0.1", "::1", "local.host"
 ]);
 
-let cacheHits = 0;
-let cacheMisses = 0;
 let totalLatency = 0;
 let latencyCount = 0;
 
@@ -234,7 +232,7 @@ function getWSUpdatePayload() {
         blocked: config.stats.blocked,
         allowed: config.stats.allowed,
         blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0,
-        cacheHitRate: (cacheHits + cacheMisses) > 0 ? (cacheHits / (cacheHits + cacheMisses) * 100) : 0,
+        cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
         avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
     return {
@@ -320,7 +318,7 @@ function loadConfig() {
                 whitelistDomains: [],
                 subscriptionURLs: defaultSubs,
                 upstreamDNS: "1.1.1.1",
-                stats: { total: 0, blocked: 0, allowed: 0 },
+                stats: { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 },
                 aiEnabled: false,
                 groqApiKeys: [],
                 groqModel: "llama-3.1-8b-instant"
@@ -341,7 +339,7 @@ function loadConfig() {
             whitelistDomains: [],
             subscriptionURLs: defaultSubs,
             upstreamDNS: "1.1.1.1",
-            stats: { total: 0, blocked: 0, allowed: 0 },
+            stats: { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 },
             aiEnabled: false,
             groqApiKeys: [],
             groqModel: "llama-3.1-8b-instant"
@@ -349,6 +347,12 @@ function loadConfig() {
     }
     
     // Ensure all variables are fully seeded
+    config.stats = config.stats || {};
+    config.stats.total = config.stats.total || 0;
+    config.stats.blocked = config.stats.blocked || 0;
+    config.stats.allowed = config.stats.allowed || 0;
+    config.stats.cacheHits = config.stats.cacheHits || 0;
+    config.stats.cacheMisses = config.stats.cacheMisses || 0;
     config.aiEnabled = config.aiEnabled || false;
     config.groqModel = "llama-3.1-8b-instant"; // Enforce 8B model only to avoid 429 rate limits
     // Migrate legacy single key to array
@@ -415,7 +419,7 @@ function checkCache(domain, qtype) {
     const cached = dnsCache.get(key);
     if (cached) {
         if (Date.now() < cached.expiresAt) {
-            cacheHits++;
+            config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
             // Move to end of Map (most recently used) to preserve LRU order
             dnsCache.delete(key);
             dnsCache.set(key, cached);
@@ -424,13 +428,14 @@ function checkCache(domain, qtype) {
             dnsCache.delete(key);
         }
     }
-    cacheMisses++;
+    config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
     return null;
 }
 
 function setCache(domain, qtype, responseBuffer, ttl) {
     const minTtl = 60; // Enforce 60 seconds minimum cache TTL
-    const finalTtl = ttl < minTtl ? minTtl : ttl;
+    const parsedTtl = Number(ttl);
+    const finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
     const key = `${domain.toLowerCase()}_${qtype}`;
     if (dnsCache.has(key)) {
         dnsCache.delete(key);
@@ -1278,7 +1283,7 @@ app.get('/dns/config', (req, res) => {
         blocked: config.stats.blocked,
         allowed: config.stats.allowed,
         blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0,
-        cacheHitRate: (cacheHits + cacheMisses) > 0 ? (cacheHits / (cacheHits + cacheMisses) * 100) : 0,
+        cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
         avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
     
@@ -1399,16 +1404,6 @@ app.post('/dns/sub/remove', (req, res) => {
 app.post('/dns/sub/refresh', (req, res) => {
     updateBlocklists(() => {
         res.send("Refreshed");
-    });
-});
-
-app.get('/dns/cache-debug', (req, res) => {
-    const keys = Array.from(dnsCache.keys());
-    res.json({
-        cacheHits,
-        cacheMisses,
-        cacheSize: dnsCache.size,
-        keys: keys.slice(0, 100)
     });
 });
 
@@ -1610,9 +1605,7 @@ app.post('/dns/ai/cache/clear', (req, res) => {
 });
 
 app.post('/dns/stats/reset', (req, res) => {
-    config.stats = { total: 0, blocked: 0, allowed: 0 };
-    cacheHits = 0;
-    cacheMisses = 0;
+    config.stats = { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 };
     totalLatency = 0;
     latencyCount = 0;
     saveConfig();
