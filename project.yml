@@ -7,9 +7,10 @@ targets:
     platform: iOS
     deploymentTarget: "15.0"
     sources:
-      - path: iOSMiniServer
+      - iOSMiniServer
     info:
-      plist:
+      path: iOSMiniServer/Info.plist
+      properties:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
