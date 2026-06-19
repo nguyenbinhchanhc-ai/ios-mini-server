@@ -28,7 +28,8 @@ const aiDecisionCache = new Map(); // Key: domain, Value: true/false
 // Groq AI Guard Queue Variables
 const groqQueue = [];
 let activeGroqRequests = 0;
-const MAX_CONCURRENT_GROQ = 2;
+const GROQ_CONCURRENCY_PER_KEY = 3;
+let groqKeyIndex = 0;
 
 // Shared Upstream UDP Client Sockets
 let upstreamSocket = null;
@@ -104,7 +105,7 @@ function loadConfig() {
                 upstreamDNS: "1.1.1.1",
                 stats: { total: 0, blocked: 0, allowed: 0 },
                 aiEnabled: false,
-                groqApiKey: "",
+                groqApiKeys: [],
                 groqModel: "llama-3.1-8b-instant"
             };
             saveConfig();
@@ -125,15 +126,23 @@ function loadConfig() {
             upstreamDNS: "1.1.1.1",
             stats: { total: 0, blocked: 0, allowed: 0 },
             aiEnabled: false,
-            groqApiKey: "",
+            groqApiKeys: [],
             groqModel: "llama-3.1-8b-instant"
         };
     }
     
     // Ensure all variables are fully seeded
     config.aiEnabled = config.aiEnabled || false;
-    config.groqApiKey = config.groqApiKey || "";
     config.groqModel = config.groqModel || "llama-3.1-8b-instant";
+    // Migrate legacy single key to array
+    if (config.groqApiKey && !config.groqApiKeys) {
+        config.groqApiKeys = [config.groqApiKey];
+        delete config.groqApiKey;
+    }
+    if (!Array.isArray(config.groqApiKeys)) {
+        config.groqApiKeys = [];
+    }
+    config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
     if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
         config.subscriptionURLs = defaultSubs;
     }
@@ -468,6 +477,20 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
 
 // MARK: - Groq AI Security Guard
 
+function getNextGroqKey() {
+    const keys = config.groqApiKeys;
+    if (!keys || keys.length === 0) return null;
+    const key = keys[groqKeyIndex % keys.length];
+    groqKeyIndex = (groqKeyIndex + 1) % keys.length;
+    return key;
+}
+
+function getMaxConcurrentGroq() {
+    const keys = config.groqApiKeys;
+    if (!keys || keys.length === 0) return 0;
+    return keys.length * GROQ_CONCURRENCY_PER_KEY;
+}
+
 function enqueueGroqCheck(domain) {
     const d = domain.trim().toLowerCase();
     if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
@@ -475,8 +498,7 @@ function enqueueGroqCheck(domain) {
     if (aiDecisionCache.has(d)) return;
     if (whitelistSet.has(d)) return;
     
-    const apiKey = config.groqApiKey;
-    if (!apiKey) return;
+    if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
     
     // Mark as scanned immediately to avoid duplicate queue insertions
     aiDecisionCache.set(d, false);
@@ -486,21 +508,25 @@ function enqueueGroqCheck(domain) {
 }
 
 function processGroqQueue() {
-    if (activeGroqRequests >= MAX_CONCURRENT_GROQ || groqQueue.length === 0) {
-        return;
+    const maxConcurrent = getMaxConcurrentGroq();
+    while (activeGroqRequests < maxConcurrent && groqQueue.length > 0) {
+        const domain = groqQueue.shift();
+        activeGroqRequests++;
+        
+        const apiKey = getNextGroqKey();
+        checkDomainWithGroq(domain, apiKey, () => {
+            activeGroqRequests--;
+            processGroqQueue();
+        });
     }
-    
-    const domain = groqQueue.shift();
-    activeGroqRequests++;
-    
-    checkDomainWithGroq(domain, () => {
-        activeGroqRequests--;
-        processGroqQueue();
-    });
 }
 
-function checkDomainWithGroq(domain, callback) {
-    const apiKey = config.groqApiKey;
+function checkDomainWithGroq(domain, apiKey, callback) {
+    if (!apiKey) {
+        aiDecisionCache.delete(domain);
+        if (callback) callback();
+        return;
+    }
     const model = config.groqModel || "llama-3.1-8b-instant";
     
     console.log(`[AI Guard] Scanning domain: ${domain} via Groq (${model})...`);
@@ -882,8 +908,10 @@ app.get('/dns/config', (req, res) => {
         stats: stats,
         isUpdating: isUpdating,
         aiEnabled: !!config.aiEnabled,
-        groqApiKey: config.groqApiKey || "",
-        groqModel: config.groqModel || "llama-3.1-8b-instant"
+        groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqApiKeysCount: (config.groqApiKeys || []).length,
+        groqModel: config.groqModel || "llama-3.1-8b-instant",
+        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY
     });
 });
 
@@ -1000,17 +1028,41 @@ app.post('/dns/upstream', (req, res) => {
 
 app.post('/dns/groq', (req, res) => {
     const enabled = req.query.enabled === 'true';
-    const apiKey = req.query.apiKey;
     const model = req.query.model || "llama-3.1-8b-instant";
     
     config.aiEnabled = enabled;
-    if (apiKey !== undefined) {
-        config.groqApiKey = apiKey.trim();
-    }
     config.groqModel = model;
     
     saveConfig();
     res.send("Groq configuration updated");
+});
+
+app.post('/dns/groq/keys/add', (req, res) => {
+    const key = req.query.key;
+    if (!key || !key.trim()) {
+        return res.status(400).json({ error: 'Missing key parameter' });
+    }
+    const trimmedKey = key.trim();
+    if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
+    if (config.groqApiKeys.includes(trimmedKey)) {
+        return res.status(400).json({ error: 'Key already exists' });
+    }
+    config.groqApiKeys.push(trimmedKey);
+    saveConfig();
+    res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
+});
+
+app.post('/dns/groq/keys/remove', (req, res) => {
+    const index = parseInt(req.query.index, 10);
+    if (isNaN(index) || index < 0) {
+        return res.status(400).json({ error: 'Invalid index' });
+    }
+    if (!Array.isArray(config.groqApiKeys) || index >= config.groqApiKeys.length) {
+        return res.status(400).json({ error: 'Index out of range' });
+    }
+    config.groqApiKeys.splice(index, 1);
+    saveConfig();
+    res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
 app.get('/dns/groq/test', (req, res) => {
@@ -1018,9 +1070,9 @@ app.get('/dns/groq/test', (req, res) => {
     if (!domain) {
         return res.status(400).json({ error: "Missing domain parameter" });
     }
-    const apiKey = config.groqApiKey;
+    const apiKey = getNextGroqKey();
     if (!apiKey) {
-        return res.status(400).json({ error: "API Key not configured" });
+        return res.status(400).json({ error: "No API Keys configured. Add at least one Groq API Key." });
     }
     
     const model = config.groqModel || "llama-3.1-8b-instant";

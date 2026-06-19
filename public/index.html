@@ -689,7 +689,7 @@
                                     <h4 style="font-size: 0.9rem; color: var(--text-muted);">Trí tuệ nhân tạo Groq AI Guard</h4>
                                 </div>
                                 <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.4;">
-                                    Groq AI Guard tự động phân tích tên miền mới chưa có trong danh sách chặn ở chế độ chạy ngầm (độ trễ 0ms). Nếu phát hiện tên miền là quảng cáo, mã độc hoặc lừa đảo, nó sẽ tự động thêm vào danh sách chặn.
+                                    Groq AI Guard tự động phân tích tên miền mới chưa có trong danh sách chặn ở chế độ chạy ngầm (độ trễ 0ms). Thêm nhiều API Key để xử lý song song — mỗi key hỗ trợ <strong style="color:#a78bfa;">3 luồng đồng thời</strong>.
                                 </p>
                                 
                                 <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
@@ -699,19 +699,29 @@
                                     </div>
                                     
                                     <div style="display: flex; flex-direction: column; gap: 0.25rem;">
-                                        <label for="groqApiKey" style="font-size: 0.8rem; color: var(--text-muted);">Groq API Key:</label>
-                                        <input type="password" id="groqApiKey" placeholder="Nhập gsk_..." style="padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                    </div>
-                                    
-                                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
                                         <label for="groqModel" style="font-size: 0.8rem; color: var(--text-muted);">Mô hình AI:</label>
                                         <select id="groqModel" style="padding: 0.6rem; border-radius: 8px; background: #131926; border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
                                             <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant (Siêu nhanh - Khuyên dùng)</option>
                                             <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile (Thông minh)</option>
+                                            <option value="llama-4-scout">Llama 4 Scout (Mới nhất)</option>
                                         </select>
                                     </div>
                                 </div>
                                 <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
+                                
+                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                                        <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq API Keys <span id="groqKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
+                                        <span id="groqConcurrencyInfo" style="font-size: 0.75rem; color: var(--text-muted);">0 luồng xử lý song song</span>
+                                    </div>
+                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Mỗi API Key sẽ được luân phiên sử dụng (Round-Robin) để xử lý các yêu cầu AI Guard đồng thời. Hãy thêm nhiều key để mở rộng khả năng xử lý!</p>
+                                    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+                                        <input type="password" id="newGroqKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                        <button onclick="addGroqKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
+                                    </div>
+                                    <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;">
+                                    </div>
+                                </div>
                                 
                                 <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
                                     <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử AI Guard</h4>
@@ -851,10 +861,15 @@
         if (!isConfigLoaded) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
-            document.getElementById('groqApiKey').value = dnsConfig.groqApiKey || "";
             document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.1-8b-instant";
             isConfigLoaded = true;
         }
+        
+        // Always update key counter and concurrency info
+        const keyCount = dnsConfig.groqApiKeysCount || 0;
+        document.getElementById('groqKeyCount').innerText = keyCount;
+        document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
+        renderGroqKeys(dnsConfig.groqApiKeys || []);
         
         // Log table rows
         const logsList = document.getElementById('dnsLogsList');
@@ -1081,10 +1096,9 @@
 
     function saveGroqConfig() {
         const enabled = document.getElementById('aiEnabled').checked;
-        const apiKey = document.getElementById('groqApiKey').value.trim();
         const model = document.getElementById('groqModel').value;
         
-        fetch(`/dns/groq?enabled=${enabled}&apiKey=${encodeURIComponent(apiKey)}&model=${encodeURIComponent(model)}`, { method: 'POST' })
+        fetch(`/dns/groq?enabled=${enabled}&model=${encodeURIComponent(model)}`, { method: 'POST' })
             .then(res => {
                 if (res.ok) {
                     showToast('Đã lưu cấu hình Groq AI');
@@ -1098,6 +1112,67 @@
                 console.error(err);
                 showToast('Lỗi mạng', 'error');
             });
+    }
+
+    function addGroqKey() {
+        const input = document.getElementById('newGroqKey');
+        const key = input.value.trim();
+        if (!key) {
+            showToast('Vui lòng nhập API Key', 'error');
+            return;
+        }
+        
+        fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast(data.error, 'error');
+                } else {
+                    input.value = '';
+                    showToast(`Đã thêm API Key! Tổng: ${data.count} key (${data.maxConcurrent} luồng song song)`);
+                    fetchDNSConfig();
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
+            });
+    }
+
+    function removeGroqKey(index) {
+        if (!confirm('Bạn có muốn xóa API Key này không?')) return;
+        
+        fetch(`/dns/groq/keys/remove?index=${index}`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast(data.error, 'error');
+                } else {
+                    showToast(`Đã xóa API Key! Còn lại: ${data.count} key`);
+                    fetchDNSConfig();
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
+            });
+    }
+
+    function renderGroqKeys(maskedKeys) {
+        const container = document.getElementById('groqKeysList');
+        if (!maskedKeys || maskedKeys.length === 0) {
+            container.innerHTML = '<div style="text-align: center; padding: 0.75rem; color: var(--text-muted); font-size: 0.8rem;">Chưa có API Key nào. Hãy thêm ít nhất 1 key để kích hoạt AI Guard.</div>';
+            return;
+        }
+        container.innerHTML = maskedKeys.map((key, i) => `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px;">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="font-size: 0.7rem; background: var(--primary); color: #fff; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold;">#${i + 1}</span>
+                    <code style="font-size: 0.8rem; color: #a78bfa;">${key}</code>
+                </div>
+                <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 1rem; padding: 0 0.3rem;" title="Xóa key này">✕</button>
+            </div>
+        `).join('');
     }
 
     function testGroqAI() {
