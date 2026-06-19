@@ -681,388 +681,349 @@
             <div class="toast-container" id="toastContainer"></div>
 
             <script>
-                
-                
-                
-                
-                
-                
-                
-                
-                
-                const toastContainer = document.getElementById('toastContainer');
+    const toastContainer = document.getElementById('toastContainer');
 
-                fetchDNSConfig();
-
-                
-                
-                    dropzone.classList.add('dragover');
-                });
-                
-                });
-                
-                    dropzone.classList.remove('dragover');
-                    if (e.dataTransfer.files.length > 0) {
-                        uploadFile(e.dataTransfer.files[0]);
-                    }
-                });
-
-                
-                    }
-                });
-
-                function showToast(message, type = 'success') {
-                    const toast = document.createElement('div');
-                    toast.className = `toast ${type}`;
-                    let icon = '✔️';
-                    if (type === 'error') icon = '❌';
-                    if (type === 'info') icon = 'ℹ️';
-                    
-                    toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
-                    toastContainer.appendChild(toast);
-                    
-                    setTimeout(() => {
-                        toast.style.animation = 'slideIn 0.3s reverse forwards';
-                        setTimeout(() => toast.remove(), 300);
-                    }, 3000);
-                }
-
-                function formatBytes(bytes, decimals = 2) {
-                    if (bytes === 0) return '0 Bytes';
-                    const k = 1024;
-                    const dm = decimals < 0 ? 0 : decimals;
-                    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-                    const i = Math.floor(Math.log(bytes) / Math.log(k));
-                    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-                }
-
-                                                                // DNS Tab Logic
-                                function switchSubTab(type) {
-                    document.querySelectorAll('.subtab-content').forEach(el => el.style.display = 'none');
-                    document.querySelectorAll('.tab-content .tabs > .tab').forEach(el => {
-                        if(el.id.startsWith('subtab-')) el.classList.remove('active');
-                    });
-                    
-                    if (type === 'logs') {
-                        document.getElementById('subtab-logs').classList.add('active');
-                        document.getElementById('dns-logs-panel').style.display = 'block';
-                    } else if (type === 'subs') {
-                        document.getElementById('subtab-subs').classList.add('active');
-                        document.getElementById('dns-subs-panel').style.display = 'block';
-                    } else if (type === 'list') {
-                        document.getElementById('subtab-list').classList.add('active');
-                        document.getElementById('dns-list-panel').style.display = 'block';
-                    } else if (type === 'white') {
-                        document.getElementById('subtab-white').classList.add('active');
-                        document.getElementById('dns-white-panel').style.display = 'block';
-                    }
-                }
-
-                let dnsConfig = { running: false, blocked: [], whitelist: [], subscriptions: [], upstream: "1.1.1.1", logs: [], stats: { total: 0, blocked: 0, allowed: 0, blockedPercent: 0.0 }, isUpdating: false };
-
-                function fetchDNSConfig() {
-                    fetch('/dns/config')
-                        .then(res => res.json())
-                        .then(data => {
-                            dnsConfig = data;
-                            updateDNSUI();
-                        })
-                        .catch(err => {
-                            console.error("Lỗi cấu hình DNS:", err);
-                        });
-                }
-
-                function parseDNSLog(line) {
-                    // Expect format: [HH:mm:ss] [ClientIP] Status - Domain
-                    const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(ALLOW.*?|BLOCKED.*?|✅ ALLOWED|❌ BLOCKED)\s+-\s+(.*?)$/);
-                    if (match) {
-                        const time = match[1];
-                        const ip = match[2];
-                        const status = match[3];
-                        const domain = match[4];
-                        const isBlocked = status.includes('BLOCKED') || status.includes('❌');
-                        return { time, ip, domain, isBlocked, textStatus: isBlocked ? 'BLOCKED' : 'ALLOWED' };
-                    }
-                    
-                    // Fallback for general logs: [HH:mm:ss] message
-                    const fallbackMatch = line.match(/^\[(.*?)\]\s+(.*?)$/);
-                    if (fallbackMatch) {
-                        return { time: fallbackMatch[1], ip: 'System', domain: fallbackMatch[2], isBlocked: false, textStatus: 'INFO' };
-                    }
-                    
-                    return { time: '', ip: 'System', domain: line, isBlocked: false, textStatus: 'INFO' };
-                }
-
-                function updateDNSUI() {
-                    const runningBadge = document.getElementById('dnsRunningBadge');
-                    const btnToggle = document.getElementById('btnToggleDNS');
-                    const btnRefreshSubs = document.getElementById('btnRefreshSubs');
-                    
-                    if (dnsConfig.running) {
-                        runningBadge.className = 'badge success';
-                        runningBadge.innerText = 'Đang hoạt động';
-                        btnToggle.className = 'btn-toggle running';
-                        btnToggle.innerText = 'Dừng DNS Server';
-                    } else {
-                        runningBadge.className = 'badge danger';
-                        runningBadge.innerText = 'Đã dừng';
-                        btnToggle.className = 'btn-toggle';
-                        btnToggle.innerText = 'Khởi động DNS Server';
-                    }
-                    
-                    btnRefreshSubs.innerText = dnsConfig.isUpdating ? 'Đang cập nhật...' : 'Cập nhật bộ lọc';
-                    btnRefreshSubs.disabled = dnsConfig.isUpdating;
-                    
-                    // Update stats
-                    document.getElementById('dnsStatTotal').innerText = dnsConfig.stats.total;
-                    document.getElementById('dnsStatBlocked').innerText = dnsConfig.stats.blocked;
-                    document.getElementById('dnsStatPercent').innerText = dnsConfig.stats.blockedPercent.toFixed(1) + '%';
-                    document.getElementById('dnsStatActive').innerText = (dnsConfig.blockedCount !== undefined ? dnsConfig.blockedCount : (dnsConfig.blocked ? dnsConfig.blocked.length : 0)) + ' tên miền';
-                    
-                    if(document.activeElement !== document.getElementById('upstreamInput')) {
-                        document.getElementById('upstreamInput').value = dnsConfig.upstream;
-                    }
-                    
-                    // Log table rows
-                    const logsList = document.getElementById('dnsLogsList');
-                    if (!dnsConfig.logs || dnsConfig.logs.length === 0) {
-                        logsList.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có truy vấn nào được ghi nhận.</td></tr>';
-                    } else {
-                        logsList.innerHTML = dnsConfig.logs.map(logLine => {
-                            const parsed = parseDNSLog(logLine);
-                            const badgeClass = parsed.textStatus === 'BLOCKED' ? 'blocked' : (parsed.textStatus === 'ALLOWED' ? 'allowed' : '');
-                            return `
-                                <tr>
-                                    <td>${parsed.time}</td>
-                                    <td>${parsed.ip}</td>
-                                    <td style="white-space: normal; word-break: break-all;">${parsed.domain}</td>
-                                    <td><span class="dns-status-badge ${badgeClass}">${parsed.textStatus}</span></td>
-                                </tr>
-                            `;
-                        }).reverse().join('');
-                    }
-                    
-                    // Subscription source list
-                    const subsList = document.getElementById('dnsSubsList');
-                    if (!dnsConfig.subscriptions || dnsConfig.subscriptions.length === 0) {
-                        subsList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa có nguồn bộ lọc nào.</div>';
-                    } else {
-                        subsList.innerHTML = dnsConfig.subscriptions.map(url => `
-                            <div class="dns-list-item">
-                                <span title="${url}">${url}</span>
-                                <button class="btn-unblock" onclick="removeSubscription('${url}')">Xóa</button>
-                            </div>
-                        `).join('');
-                    }
-                    
-                    // Custom blocked list
-                    const blockedList = document.getElementById('dnsBlockedList');
-                    if (!dnsConfig.blocked || dnsConfig.blocked.length === 0) {
-                        blockedList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa chặn thủ công tên miền nào.</div>';
-                    } else {
-                        // Max show 100 manual domains to prevent browser freezing
-                        const displayBlocked = dnsConfig.blocked.slice(0, 100);
-                        blockedList.innerHTML = displayBlocked.map(domain => `
-                            <div class="dns-list-item">
-                                <span>${domain}</span>
-                                <button class="btn-unblock" onclick="unblockDomain('${domain}')">Xóa</button>
-                            </div>
-                        `).join('') + (dnsConfig.blocked.length > 100 ? `<div style="text-align: center; font-size: 0.75rem; color: var(--text-muted);">...và ${dnsConfig.blocked.length - 100} tên miền khác</div>` : '');
-                    }
-                    
-                    // Whitelist
-                    const whitelistContainer = document.getElementById('dnsWhiteList');
-                    if (!dnsConfig.whitelist || dnsConfig.whitelist.length === 0) {
-                        whitelistContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa cấu hình danh sách trắng.</div>';
-                    } else {
-                        whitelistContainer.innerHTML = dnsConfig.whitelist.map(domain => `
-                            <div class="dns-list-item">
-                                <span>${domain}</span>
-                                <button class="btn-unblock" onclick="removeWhitelist('${domain}')">Xóa</button>
-                            </div>
-                        `).join('');
-                    }
-                }
-
-                function toggleDNSServer() {
-                    fetch('/dns/toggle', { method: 'POST' })
-                        .then(res => res.json())
-                        .then(data => {
-                            dnsConfig.running = data.running;
-                            showToast(data.running ? 'Đã khởi động DNS Server' : 'Đã dừng DNS Server', 'info');
-                            fetchDNSConfig();
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Không thể thay đổi trạng thái DNS', 'error');
-                        });
-                }
-
-                function blockDomain() {
-                    const input = document.getElementById('domainInput');
-                    const domain = input.value.trim();
-                    if (!domain) return;
-                    
-                    fetch(`/dns/block?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast(`Đã chặn: ${domain}`);
-                                input.value = '';
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Chặn thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-
-                function unblockDomain(domain) {
-                    fetch(`/dns/unblock?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast(`Đã bỏ chặn: ${domain}`);
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Bỏ chặn thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-                
-                function addWhitelist() {
-                    const input = document.getElementById('whiteInput');
-                    const domain = input.value.trim();
-                    if (!domain) return;
-                    
-                    fetch(`/dns/whitelist/add?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast(`Đã thêm whitelist: ${domain}`);
-                                input.value = '';
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Thêm whitelist thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-                
-                function removeWhitelist(domain) {
-                    fetch(`/dns/whitelist/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast(`Đã xóa whitelist: ${domain}`);
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Xóa whitelist thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-
-                function addSubscription() {
-                    const input = document.getElementById('subInput');
-                    const url = input.value.trim();
-                    if (!url) return;
-                    
-                    fetch(`/dns/sub/add?url=${encodeURIComponent(url)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast('Đã thêm nguồn bộ lọc thành công');
-                                input.value = '';
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Thêm nguồn thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-
-                function removeSubscription(url) {
-                    if (!confirm('Bạn có muốn xóa nguồn bộ lọc này không?')) return;
-                    fetch(`/dns/sub/remove?url=${encodeURIComponent(url)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast('Đã xóa nguồn bộ lọc');
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Xóa nguồn thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-
-                function refreshSubscriptions() {
-                    showToast('Đang tải và cập nhật các nguồn bộ lọc...', 'info');
-                    fetch('/dns/sub/refresh', { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Cập nhật thất bại', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi kết nối mạng', 'error');
-                        });
-                }
-
-                function setUpstreamDNS() {
-                    const ip = document.getElementById('upstreamInput').value.trim();
-                    if (!ip) return;
-                    fetch(`/dns/upstream?ip=${encodeURIComponent(ip)}`, { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast('Đã lưu DNS thượng nguồn');
-                                fetchDNSConfig();
-                            } else {
-                                showToast('Lỗi cấu hình Upstream', 'error');
-                            }
-                        })
-                        .catch(err => {
-                            console.error(err);
-                            showToast('Lỗi mạng', 'error');
-                        });
-                }
-
-                function resetDNSStats() {
-                    if (!confirm('Bạn có muốn reset các số liệu thống kê không?')) return;
-                    fetch('/dns/stats/reset', { method: 'POST' })
-                        .then(res => {
-                            if (res.ok) {
-                                showToast('Đã reset thống kê');
-                                fetchDNSConfig();
-                            }
-                        });
-                }
-
-                // Auto refresh DNS config/logs every 3 seconds if DNS tab active
-                setInterval(() => {
-                    const dnsTab = document.getElementById('dns-tab');
-                    if (dnsTab && dnsTab.classList.contains('active')) {
-                        fetchDNSConfig();
-                    }
-                }, 3000);
-            </script>
-        </body>
-        </html>
+    function showToast(message, type = 'success') {
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        let icon = '✔️';
+        if (type === 'error') icon = '❌';
+        if (type === 'info') icon = 'ℹ️';
         
+        toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
+        toastContainer.appendChild(toast);
+        
+        setTimeout(() => {
+            toast.style.animation = 'slideIn 0.3s reverse forwards';
+            setTimeout(() => toast.remove(), 300);
+        }, 3000);
+    }
+
+    // DNS Tab Logic
+    function switchSubTab(type) {
+        document.querySelectorAll('.subtab-content').forEach(el => el.style.display = 'none');
+        document.querySelectorAll('.tab-content .tabs > .tab').forEach(el => {
+            if(el.id && el.id.startsWith('subtab-')) el.classList.remove('active');
+        });
+        
+        if (type === 'logs') {
+            document.getElementById('subtab-logs').classList.add('active');
+            document.getElementById('dns-logs-panel').style.display = 'block';
+        } else if (type === 'subs') {
+            document.getElementById('subtab-subs').classList.add('active');
+            document.getElementById('dns-subs-panel').style.display = 'block';
+        } else if (type === 'list') {
+            document.getElementById('subtab-list').classList.add('active');
+            document.getElementById('dns-list-panel').style.display = 'block';
+        } else if (type === 'white') {
+            document.getElementById('subtab-white').classList.add('active');
+            document.getElementById('dns-white-panel').style.display = 'block';
+        }
+    }
+
+    let dnsConfig = { 
+        running: true, 
+        blocked: [], 
+        whitelist: [], 
+        subscriptions: [], 
+        upstream: "1.1.1.1", 
+        logs: [], 
+        stats: { total: 0, blocked: 0, allowed: 0, blockedPercent: 0.0 }, 
+        isUpdating: false 
+    };
+
+    function fetchDNSConfig() {
+        fetch('/dns/config')
+            .then(res => res.json())
+            .then(data => {
+                dnsConfig = data;
+                updateDNSUI();
+            })
+            .catch(err => {
+                console.error("Lỗi cấu hình DNS:", err);
+            });
+    }
+
+    function parseDNSLog(line) {
+        // Expect format: [HH:mm:ss] [ClientIP] Status - Domain
+        const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(ALLOW.*?|BLOCKED.*?|✅ ALLOWED|❌ BLOCKED)\s+-\s+(.*?)$/);
+        if (match) {
+            const time = match[1];
+            const ip = match[2];
+            const status = match[3];
+            const domain = match[4];
+            const isBlocked = status.includes('BLOCKED') || status.includes('❌');
+            return { time, ip, domain, isBlocked, textStatus: isBlocked ? 'BLOCKED' : 'ALLOWED' };
+        }
+        
+        // Fallback for general logs: [HH:mm:ss] message
+        const fallbackMatch = line.match(/^\[(.*?)\]\s+(.*?)$/);
+        if (fallbackMatch) {
+            return { time: fallbackMatch[1], ip: 'System', domain: fallbackMatch[2], isBlocked: false, textStatus: 'INFO' };
+        }
+        
+        return { time: '', ip: 'System', domain: line, isBlocked: false, textStatus: 'INFO' };
+    }
+
+    function updateDNSUI() {
+        const runningBadge = document.getElementById('dnsRunningBadge');
+        const btnToggle = document.getElementById('btnToggleDNS');
+        const btnRefreshSubs = document.getElementById('btnRefreshSubs');
+        
+        if (dnsConfig.running) {
+            runningBadge.className = 'badge success';
+            runningBadge.innerText = 'Đang hoạt động';
+            btnToggle.className = 'btn-toggle running';
+            btnToggle.innerText = 'Dừng DNS Server';
+        } else {
+            runningBadge.className = 'badge danger';
+            runningBadge.innerText = 'Đã dừng';
+            btnToggle.className = 'btn-toggle';
+            btnToggle.innerText = 'Khởi động DNS Server';
+        }
+        
+        btnRefreshSubs.innerText = dnsConfig.isUpdating ? 'Đang cập nhật...' : 'Cập nhật bộ lọc';
+        btnRefreshSubs.disabled = dnsConfig.isUpdating;
+        
+        // Update stats
+        document.getElementById('dnsStatTotal').innerText = dnsConfig.stats.total;
+        document.getElementById('dnsStatBlocked').innerText = dnsConfig.stats.blocked;
+        document.getElementById('dnsStatPercent').innerText = dnsConfig.stats.blockedPercent.toFixed(1) + '%';
+        document.getElementById('dnsStatActive').innerText = (dnsConfig.blockedCount !== undefined ? dnsConfig.blockedCount : (dnsConfig.blocked ? dnsConfig.blocked.length : 0)) + ' tên miền';
+        
+        if(document.activeElement !== document.getElementById('upstreamInput')) {
+            document.getElementById('upstreamInput').value = dnsConfig.upstream;
+        }
+        
+        // Log table rows
+        const logsList = document.getElementById('dnsLogsList');
+        if (!dnsConfig.logs || dnsConfig.logs.length === 0) {
+            logsList.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có truy vấn nào được ghi nhận.</td></tr>';
+        } else {
+            logsList.innerHTML = dnsConfig.logs.map(logLine => {
+                const parsed = parseDNSLog(logLine);
+                const badgeClass = parsed.textStatus === 'BLOCKED' ? 'blocked' : (parsed.textStatus === 'ALLOWED' ? 'allowed' : '');
+                return `
+                    <tr>
+                        <td>${parsed.time}</td>
+                        <td>${parsed.ip}</td>
+                        <td style="white-space: normal; word-break: break-all;">${parsed.domain}</td>
+                        <td><span class="dns-status-badge ${badgeClass}">${parsed.textStatus}</span></td>
+                    </tr>
+                `;
+            }).reverse().join('');
+        }
+        
+        // Subscription source list
+        const subsList = document.getElementById('dnsSubsList');
+        if (!dnsConfig.subscriptions || dnsConfig.subscriptions.length === 0) {
+            subsList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa có nguồn bộ lọc nào.</div>';
+        } else {
+            subsList.innerHTML = dnsConfig.subscriptions.map(url => `
+                <div class="dns-list-item">
+                    <span title="${url}">${url}</span>
+                    <button class="btn-unblock" onclick="removeSubscription('${url}')">Xóa</button>
+                </div>
+            `).join('');
+        }
+        
+        // Custom blocked list
+        const blockedList = document.getElementById('dnsBlockedList');
+        if (!dnsConfig.blocked || dnsConfig.blocked.length === 0) {
+            blockedList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa chặn thủ công tên miền nào.</div>';
+        } else {
+            const displayBlocked = dnsConfig.blocked.slice(0, 100);
+            blockedList.innerHTML = displayBlocked.map(domain => `
+                <div class="dns-list-item">
+                    <span>${domain}</span>
+                    <button class="btn-unblock" onclick="unblockDomain('${domain}')">Xóa</button>
+                </div>
+            `).join('') + (dnsConfig.blocked.length > 100 ? `<div style="text-align: center; font-size: 0.75rem; color: var(--text-muted); padding-top: 0.5rem;">...và ${dnsConfig.blocked.length - 100} tên miền khác</div>` : '');
+        }
+        
+        // Whitelist
+        const whitelistContainer = document.getElementById('dnsWhiteList');
+        if (!dnsConfig.whitelist || dnsConfig.whitelist.length === 0) {
+            whitelistContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa cấu hình danh sách trắng.</div>';
+        } else {
+            whitelistContainer.innerHTML = dnsConfig.whitelist.map(domain => `
+                <div class="dns-list-item">
+                    <span>${domain}</span>
+                    <button class="btn-unblock" onclick="removeWhitelist('${domain}')">Xóa</button>
+                </div>
+            `).join('');
+        }
+    }
+
+    function toggleDNSServer() {
+        showToast('Đám mây DNS Server hoạt động 24/7 và không thể dừng.', 'info');
+    }
+
+    function blockDomain() {
+        const input = document.getElementById('domainInput');
+        const domain = input.value.trim();
+        if (!domain) return;
+        
+        fetch(`/dns/block?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast(`Đã thêm chặn: ${domain}`);
+                    input.value = '';
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi khi chặn tên miền', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function unblockDomain(domain) {
+        fetch(`/dns/unblock?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast(`Đã bỏ chặn: ${domain}`);
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi khi bỏ chặn', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function addWhitelist() {
+        const input = document.getElementById('whiteInput');
+        const domain = input.value.trim();
+        if (!domain) return;
+        
+        fetch(`/dns/whitelist/add?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast(`Đã bỏ qua chặn cho: ${domain}`);
+                    input.value = '';
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi thêm danh sách trắng', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function removeWhitelist(domain) {
+        fetch(`/dns/whitelist/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast(`Đã xóa khỏi danh sách trắng: ${domain}`);
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi khi xóa', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function addSubscription() {
+        const input = document.getElementById('subInput');
+        const url = input.value.trim();
+        if (!url) return;
+        
+        fetch(`/dns/sub/add?url=${encodeURIComponent(url)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã thêm nguồn bộ lọc thành công');
+                    input.value = '';
+                    fetchDNSConfig();
+                } else {
+                    showToast('Thêm nguồn thất bại', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function removeSubscription(url) {
+        if (!confirm('Bạn có muốn xóa nguồn bộ lọc này không?')) return;
+        fetch(`/dns/sub/remove?url=${encodeURIComponent(url)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã xóa nguồn bộ lọc');
+                    fetchDNSConfig();
+                } else {
+                    showToast('Xóa nguồn thất bại', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function refreshSubscriptions() {
+        showToast('Đang tải và cập nhật các nguồn bộ lọc...', 'info');
+        fetch('/dns/sub/refresh', { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Cập nhật bộ lọc hoàn tất');
+                    fetchDNSConfig();
+                } else {
+                    showToast('Cập nhật thất bại', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối mạng', 'error');
+            });
+    }
+
+    function setUpstreamDNS() {
+        const ip = document.getElementById('upstreamInput').value.trim();
+        if (!ip) return;
+        fetch(`/dns/upstream?ip=${encodeURIComponent(ip)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã lưu DNS thượng nguồn');
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi cấu hình Upstream', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
+            });
+    }
+
+    function resetDNSStats() {
+        if (!confirm('Bạn có muốn reset các số liệu thống kê không?')) return;
+        fetch('/dns/stats/reset', { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã reset thống kê');
+                    fetchDNSConfig();
+                }
+            });
+    }
+
+    // Initialize UI on load
+    fetchDNSConfig();
+
+    // Auto-refresh config/logs every 3 seconds
+    setInterval(() => {
+        fetchDNSConfig();
+    }, 3000);
+</script>
+</body>
+</html>
