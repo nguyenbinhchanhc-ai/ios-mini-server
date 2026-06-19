@@ -1402,6 +1402,16 @@ app.post('/dns/sub/refresh', (req, res) => {
     });
 });
 
+app.get('/dns/cache-debug', (req, res) => {
+    const keys = Array.from(dnsCache.keys());
+    res.json({
+        cacheHits,
+        cacheMisses,
+        cacheSize: dnsCache.size,
+        keys: keys.slice(0, 100)
+    });
+});
+
 app.post('/dns/upstream', (req, res) => {
     const ip = req.query.ip;
     if (ip) {
