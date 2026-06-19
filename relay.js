@@ -1013,6 +1013,75 @@ app.post('/dns/groq', (req, res) => {
     res.send("Groq configuration updated");
 });
 
+app.get('/dns/groq/test', (req, res) => {
+    const domain = req.query.domain;
+    if (!domain) {
+        return res.status(400).json({ error: "Missing domain parameter" });
+    }
+    const apiKey = config.groqApiKey;
+    if (!apiKey) {
+        return res.status(400).json({ error: "API Key not configured" });
+    }
+    
+    const model = config.groqModel || "llama-3.1-8b-instant";
+    const postData = JSON.stringify({
+        model: model,
+        messages: [
+            {
+                role: "system",
+                content: "You are a DNS Firewall security expert. Classify the domain name. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"brief explanation in Vietnamese\" }."
+            },
+            {
+                role: "user",
+                content: `Analyze this domain: ${domain}`
+            }
+        ],
+        response_format: { type: "json_object" }
+    });
+    
+    const options = {
+        hostname: 'api.groq.com',
+        port: 443,
+        path: '/openai/v1/chat/completions',
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Length': Buffer.byteLength(postData)
+        }
+    };
+    
+    const request = https.request(options, (response) => {
+        let body = [];
+        response.on('data', chunk => body.push(chunk));
+        response.on('end', () => {
+            try {
+                const responseString = Buffer.concat(body).toString('utf8');
+                if (response.statusCode !== 200) {
+                    return res.status(500).json({ error: `Groq returned status ${response.statusCode}`, raw: responseString });
+                }
+                const resData = JSON.parse(responseString);
+                const replyStr = resData.choices?.[0]?.message?.content;
+                if (replyStr) {
+                    const decision = JSON.parse(replyStr);
+                    return res.json(decision);
+                } else {
+                    return res.status(500).json({ error: "Empty response from Groq", raw: responseString });
+                }
+            } catch (e) {
+                return res.status(500).json({ error: "Failed to parse Groq response", details: e.message });
+            }
+        });
+    });
+    
+    request.on('error', (e) => {
+        res.status(500).json({ error: "Groq API request error", details: e.message });
+    });
+    
+    request.write(postData);
+    request.end();
+});
+
 app.post('/dns/stats/reset', (req, res) => {
     config.stats = { total: 0, blocked: 0, allowed: 0 };
     cacheHits = 0;
