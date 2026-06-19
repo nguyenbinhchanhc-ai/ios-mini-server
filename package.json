@@ -1,0 +1,13 @@
+{
+  "name": "ios-mini-server-relay",
+  "version": "1.0.0",
+  "description": "Public WebSocket relay tunnel proxy for iOS Mini Server",
+  "main": "relay.js",
+  "scripts": {
+    "start": "node relay.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.13.0"
+  }
+}
