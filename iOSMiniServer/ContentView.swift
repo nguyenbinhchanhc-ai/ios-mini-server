@@ -100,8 +100,7 @@ struct ContentView: View {
                             .shadow(color: server.isRunning ? Color.green : Color.red, radius: 4)
                         
                         Text(server.isRunning ? "ĐANG HOẠT ĐỘNG" : "ĐÃ DỪNG")
-                            .font(.footnote)
-                            .fontWeight(.bold)
+                            .font(.footnote.bold())
                             .foregroundColor(server.isRunning ? Color.green : Color.red)
                     }
                 }
@@ -123,8 +122,7 @@ struct ContentView: View {
                     }
                 }) {
                     Text(server.isRunning ? "Dừng Server" : "Khởi Động")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(Color.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
@@ -145,8 +143,7 @@ struct ContentView: View {
                     
                     HStack {
                         Text(serverURLString)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
+                            .font(.subheadline.weight(.medium))
                             .foregroundColor(Color.cyan)
                             .textSelection(.enabled)
                         
@@ -186,8 +183,7 @@ struct ContentView: View {
                                 .shadow(color: tunnelClient.isConnected ? Color.green : Color.orange, radius: 4)
                             
                             Text(tunnelClient.isConnected ? "ĐẠT KẾT NỐI" : "CHƯA KẾT NỐI")
-                                .font(.footnote)
-                                .fontWeight(.bold)
+                                .font(.footnote.bold())
                                 .foregroundColor(tunnelClient.isConnected ? Color.green : Color.orange)
                         }
                     }
@@ -210,8 +206,7 @@ struct ContentView: View {
                         }
                     }) {
                         Text(tunnelClient.isConnected ? "Ngắt Kết Nối" : "Kết Nối Cloud")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
+                            .font(.subheadline.weight(.semibold))
                             .foregroundColor(Color.white)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 8)
@@ -247,8 +242,7 @@ struct ContentView: View {
                         
                         HStack {
                             Text(tunnelClient.publicURL)
-                                .font(.subheadline)
-                                .fontWeight(.medium)
+                                .font(.subheadline.weight(.medium))
                                 .foregroundColor(Color.purple)
                                 .textSelection(.enabled)
                             
@@ -296,8 +290,7 @@ struct ContentView: View {
                             .shadow(color: dnsServer.isRunning ? Color.green : Color.red, radius: 4)
                         
                         Text(dnsServer.isRunning ? "ĐANG BẬT" : "ĐÃ TẮT")
-                            .font(.footnote)
-                            .fontWeight(.bold)
+                            .font(.footnote.bold())
                             .foregroundColor(dnsServer.isRunning ? Color.green : Color.red)
                     }
                 }
@@ -314,8 +307,7 @@ struct ContentView: View {
                     }
                 }) {
                     Text(dnsServer.isRunning ? "Tắt DNS" : "Bật DNS")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(Color.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
@@ -331,12 +323,10 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .center, spacing: 4) {
                     Text("TRUY VẤN")
-                        .font(.system(size: 9))
-                        .fontWeight(.bold)
+                        .font(.system(size: 9).bold())
                         .foregroundColor(Color.gray)
                     Text("\(dnsServer.totalQueries)")
-                        .font(.subheadline)
-                        .fontWeight(.bold)
+                        .font(.subheadline.bold())
                         .foregroundColor(Color.white)
                 }
                 .frame(maxWidth: .infinity)
@@ -347,12 +337,10 @@ struct ContentView: View {
                 
                 VStack(alignment: .center, spacing: 4) {
                     Text("ĐÃ CHẶN")
-                        .font(.system(size: 9))
-                        .fontWeight(.bold)
+                        .font(.system(size: 9).bold())
                         .foregroundColor(Color.gray)
                     Text("\(dnsServer.blockedQueries)")
-                        .font(.subheadline)
-                        .fontWeight(.bold)
+                        .font(.subheadline.bold())
                         .foregroundColor(Color.red)
                 }
                 .frame(maxWidth: .infinity)
@@ -363,12 +351,10 @@ struct ContentView: View {
                 
                 VStack(alignment: .center, spacing: 4) {
                     Text("BỘ LỌC")
-                        .font(.system(size: 9))
-                        .fontWeight(.bold)
+                        .font(.system(size: 9).bold())
                         .foregroundColor(Color.gray)
                     Text("\(dnsServer.blockedCount)")
-                        .font(.subheadline)
-                        .fontWeight(.bold)
+                        .font(.subheadline.bold())
                         .foregroundColor(Color.purple)
                 }
                 .frame(maxWidth: .infinity)
@@ -386,8 +372,7 @@ struct ContentView: View {
                     
                     HStack {
                         Text(localIP ?? "Cần kết nối Wi-Fi")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
+                            .font(.subheadline.weight(.medium))
                             .foregroundColor(Color.cyan)
                             .textSelection(.enabled)
                         
@@ -426,8 +411,7 @@ struct ContentView: View {
                         dnsServer.setUpstream(ip: upstreamText)
                     }) {
                         Text("Lưu DNS")
-                            .font(.footnote)
-                            .fontWeight(.semibold)
+                            .font(.footnote.weight(.semibold))
                             .foregroundColor(Color.white)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
@@ -448,8 +432,7 @@ struct ContentView: View {
                                     .padding(.trailing, 4)
                             }
                             Text(dnsServer.isUpdatingList ? "Đang đồng bộ..." : "Đồng bộ danh sách chặn")
-                                .font(.footnote)
-                                .fontWeight(.semibold)
+                                .font(.footnote.weight(.semibold))
                         }
                         .foregroundColor(Color.white)
                         .padding(.vertical, 10)
@@ -463,8 +446,7 @@ struct ContentView: View {
                         dnsServer.resetStats()
                     }) {
                         Text("Reset Stats")
-                            .font(.footnote)
-                            .fontWeight(.semibold)
+                            .font(.footnote.weight(.semibold))
                             .foregroundColor(Color.white)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 10)
@@ -480,8 +462,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Label("Nhật ký DNS", systemImage: "shield.text.feed")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(Color.white)
                     
                     Spacer()
@@ -631,8 +612,7 @@ struct ContentView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(file.name)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
+                                    .font(.subheadline.weight(.medium))
                                     .foregroundColor(Color.white)
                                     .lineLimit(1)
                                 

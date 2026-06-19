@@ -36,9 +36,9 @@ class MiniDNSServer: ObservableObject {
         
         do {
             let parameters = NWParameters.udp
-            let listener = try NWListener(using: parameters, on: NWPort(rawValue: self.port)!)
+            let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: self.port)!)
             
-            listener.stateUpdateHandler = { [weak self] state in
+            listener.stateUpdateHandler = { [weak self] (state: NWListener.State) in
                 guard let self = self else { return }
                 switch state {
                 case .ready:
@@ -117,7 +117,16 @@ class MiniDNSServer: ObservableObject {
         // Extract client IP address
         var clientIP = "Unknown"
         if case .hostPort(let host, _) = connection.endpoint {
-            clientIP = host.name
+            switch host {
+            case .name(let name, _):
+                clientIP = name
+            case .ipv4(let ipv4Address):
+                clientIP = "\(ipv4Address)"
+            case .ipv6(let ipv6Address):
+                clientIP = "\(ipv6Address)"
+            @unknown default:
+                clientIP = "\(host)"
+            }
         }
         
         logQuery(domain: domain, blocked: isBlocked, clientIP: clientIP)
