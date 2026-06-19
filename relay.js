@@ -782,7 +782,7 @@ function isValidDomain(domain) {
 
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
 
-function handleDoH(queryData, clientIP, callback) {
+function handleDoH(queryData, clientIP, hostHeader, callback) {
     const startTime = Date.now();
     
     const parsed = parseDNSQuery(queryData);
@@ -791,8 +791,28 @@ function handleDoH(queryData, clientIP, callback) {
         return;
     }
     
-    const domain = parsed.domain;
+    const originalDomain = parsed.domain;
     const qtype = parsed.qtype;
+    
+    // Clean domain by removing local and host-header search suffixes
+    let domain = originalDomain.trim().toLowerCase();
+    if (hostHeader) {
+        const host = hostHeader.toLowerCase().split(':')[0];
+        if (host && host !== 'localhost' && host !== '127.0.0.1') {
+            const suffix = '.' + host;
+            if (domain.endsWith(suffix) && domain.length > suffix.length) {
+                domain = domain.substring(0, domain.length - suffix.length);
+            }
+        }
+    }
+    const commonSuffixes = ['.onrender.com', '.lan', '.localdomain', '.home', '.corp', '.internal', '.home.arpa'];
+    for (const suf of commonSuffixes) {
+        if (domain.endsWith(suf) && domain.length > suf.length) {
+            domain = domain.substring(0, domain.length - suf.length);
+            break;
+        }
+    }
+    
     const isBlocked = shouldBlock(domain);
     
     const completeQuery = (responseBuffer, fromCache = false, isBlockedQuery = false) => {
@@ -800,7 +820,9 @@ function handleDoH(queryData, clientIP, callback) {
         totalLatency += latency;
         latencyCount++;
         
-        logQuery(domain, isBlockedQuery, clientIP);
+        // Log both clean and original domain for better transparency
+        const logDomain = (domain !== originalDomain) ? `${domain} (${originalDomain})` : domain;
+        logQuery(logDomain, isBlockedQuery, clientIP);
         incrementStats(isBlockedQuery);
         
         callback(responseBuffer);
@@ -815,8 +837,8 @@ function handleDoH(queryData, clientIP, callback) {
         const blockResponse = buildBlockResponse(queryData, parsed.questionEndOffset);
         completeQuery(blockResponse, false, true);
     } else {
-        // 1. Check local memory DNS Cache
-        const cachedResponse = checkCache(domain, qtype);
+        // 1. Check local memory DNS Cache using originalDomain to ensure matching transaction name
+        const cachedResponse = checkCache(originalDomain, qtype);
         if (cachedResponse) {
             // Rewrite transaction ID
             const clientResponse = Buffer.from(cachedResponse);
@@ -825,10 +847,10 @@ function handleDoH(queryData, clientIP, callback) {
             completeQuery(clientResponse, true, false);
         } else {
             // 2. Fetch using Upstream request coalescing
-            fetchFromUpstreamDeduplicated(queryData, domain, qtype, config.upstreamDNS, (response) => {
+            fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, config.upstreamDNS, (response) => {
                 if (response) {
                     const ttl = extractTTL(response, parsed.questionEndOffset);
-                    setCache(domain, qtype, response, ttl);
+                    setCache(originalDomain, qtype, response, ttl);
                     completeQuery(response, false, false);
                 } else {
                     completeQuery(Buffer.alloc(0), false, false);
@@ -847,7 +869,7 @@ app.post('/dns-query', (req, res) => {
         return;
     }
     
-    handleDoH(queryData, clientIP, (responseData) => {
+    handleDoH(queryData, clientIP, req.headers.host, (responseData) => {
         res.setHeader('Content-Type', 'application/dns-message');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(responseData);
@@ -874,7 +896,7 @@ app.get('/dns-query', (req, res) => {
     
     const queryData = Buffer.from(base64, 'base64');
     
-    handleDoH(queryData, clientIP, (responseData) => {
+    handleDoH(queryData, clientIP, req.headers.host, (responseData) => {
         res.setHeader('Content-Type', 'application/dns-message');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(responseData);
