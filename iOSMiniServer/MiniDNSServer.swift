@@ -27,6 +27,13 @@ class MiniDNSServer: ObservableObject {
     var customBlockedDomains: Set<String> = []
     var subscriptionBlockedDomains: Set<String> = []
     
+    // Upstream Persistent Connection
+    private var upstreamConnection: NWConnection?
+    private var pendingQueries: [UInt16: (originalID: UInt16, completion: (Data?) -> Void, timestamp: Date)] = [:]
+    private var queryCounter: UInt16 = 0
+    private let pendingQueriesLock = NSLock()
+    private var upstreamTimer: Timer?
+    
     init() {
         loadConfig()
     }
@@ -34,6 +41,9 @@ class MiniDNSServer: ObservableObject {
     /// Starts the DNS server on UDP port 53.
     func start() {
         guard !isRunning else { return }
+        
+        // Start persistent upstream connection
+        startUpstreamConnection()
         
         do {
             let parameters = NWParameters.udp
@@ -78,6 +88,10 @@ class MiniDNSServer: ObservableObject {
     func stop() {
         listener?.cancel()
         listener = nil
+        
+        // Stop persistent upstream connection
+        stopUpstreamConnection()
+        
         DispatchQueue.main.async {
             self.isRunning = false
         }
@@ -228,36 +242,154 @@ class MiniDNSServer: ObservableObject {
         return false
     }
     
-    private func forwardToUpstream(queryData: Data, completion: @escaping (Data?) -> Void) {
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(self.upstreamDNS), port: 53)
-        let connection = NWConnection(to: endpoint, using: .udp)
+    // MARK: - Persistent Upstream DNS Multiplexer
+    
+    private func startUpstreamConnection() {
+        stopUpstreamConnection()
         
-        connection.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
-                print("Upstream DNS connection failed: \(error.localizedDescription)")
-                completion(nil)
-                connection.cancel()
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(self.upstreamDNS), port: 53)
+        let parameters = NWParameters.udp
+        
+        let connection = NWConnection(to: endpoint, using: parameters)
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .ready:
+                self.log("Persistent Upstream DNS connection ready.")
+                self.receiveUpstreamResponses()
+            case .failed(let error):
+                self.log("Persistent Upstream DNS connection failed: \(error.localizedDescription)")
+                // Try reconnecting after 3 seconds
+                DispatchQueue.global().asyncAfter(deadline: .now() + 3) { [weak self] in
+                    self?.startUpstreamConnection()
+                }
+            default:
+                break
             }
         }
         
+        self.upstreamConnection = connection
         connection.start(queue: queue)
         
-        connection.send(content: queryData, completion: .contentProcessed { error in
+        // Start cleanup timer for timed out queries (run every 5 seconds)
+        DispatchQueue.main.async { [weak self] in
+            self?.upstreamTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+                self?.cleanupPendingQueries()
+            }
+        }
+    }
+    
+    private func stopUpstreamConnection() {
+        upstreamTimer?.invalidate()
+        upstreamTimer = nil
+        
+        upstreamConnection?.cancel()
+        upstreamConnection = nil
+        
+        pendingQueriesLock.lock()
+        for (_, query) in pendingQueries {
+            query.completion(nil)
+        }
+        pendingQueries.removeAll()
+        pendingQueriesLock.unlock()
+    }
+    
+    private func receiveUpstreamResponses() {
+        guard let connection = upstreamConnection else { return }
+        
+        connection.receiveMessage { [weak self] content, context, isComplete, error in
+            guard let self = self else { return }
+            
             if let error = error {
-                print("Failed to send DNS to upstream: \(error.localizedDescription)")
-                completion(nil)
-                connection.cancel()
+                print("Upstream receive error: \(error.localizedDescription)")
                 return
             }
             
-            connection.receiveMessage { content, context, isComplete, error in
-                if let error = error {
-                    print("Failed to receive DNS response: \(error.localizedDescription)")
-                    completion(nil)
+            if let data = content, data.count >= 2 {
+                // Extract temporary Transaction ID (first 2 bytes) in big-endian safe manner
+                let tempID = UInt16(data[0]) << 8 | UInt16(data[1])
+                
+                self.pendingQueriesLock.lock()
+                if let pending = self.pendingQueries.removeValue(forKey: tempID) {
+                    self.pendingQueriesLock.unlock()
+                    
+                    // Restore the original Transaction ID in the first 2 bytes of the response
+                    var responseData = data
+                    responseData[0] = UInt8((pending.originalID >> 8) & 0xFF)
+                    responseData[1] = UInt8(pending.originalID & 0xFF)
+                    
+                    pending.completion(responseData)
                 } else {
-                    completion(content)
+                    self.pendingQueriesLock.unlock()
                 }
-                connection.cancel()
+            }
+            
+            // Continue receive loop if the connection is still active
+            self.receiveUpstreamResponses()
+        }
+    }
+    
+    private func cleanupPendingQueries() {
+        let now = Date()
+        var timedOut: [((Data?) -> Void)] = []
+        
+        pendingQueriesLock.lock()
+        for (tempID, query) in pendingQueries {
+            if now.timeIntervalSince(query.timestamp) > 5.0 { // 5 seconds timeout
+                timedOut.append(query.completion)
+                pendingQueries.removeValue(forKey: tempID)
+            }
+        }
+        pendingQueriesLock.unlock()
+        
+        for completion in timedOut {
+            completion(nil)
+        }
+    }
+    
+    private func forwardToUpstream(queryData: Data, completion: @escaping (Data?) -> Void) {
+        guard queryData.count >= 2 else {
+            completion(nil)
+            return
+        }
+        
+        if upstreamConnection == nil || upstreamConnection?.state != .ready {
+            startUpstreamConnection()
+        }
+        
+        guard let connection = upstreamConnection else {
+            completion(nil)
+            return
+        }
+        
+        // Extract original ID (first 2 bytes) in big-endian safe manner
+        let originalID = UInt16(queryData[0]) << 8 | UInt16(queryData[1])
+        
+        // Generate new unique temp ID
+        pendingQueriesLock.lock()
+        queryCounter = (queryCounter == UInt16.max) ? 0 : (queryCounter + 1)
+        let tempID = queryCounter
+        
+        // Store client callback
+        pendingQueries[tempID] = (originalID: originalID, completion: completion, timestamp: Date())
+        pendingQueriesLock.unlock()
+        
+        // Prepare query with temp ID
+        var modifiedQuery = queryData
+        modifiedQuery[0] = UInt8((tempID >> 8) & 0xFF)
+        modifiedQuery[1] = UInt8(tempID & 0xFF)
+        
+        // Send to upstream DNS
+        connection.send(content: modifiedQuery, completion: .contentProcessed { [weak self] error in
+            if let error = error {
+                print("Failed to send query to upstream: \(error.localizedDescription)")
+                self?.pendingQueriesLock.lock()
+                if let pending = self?.pendingQueries.removeValue(forKey: tempID) {
+                    self?.pendingQueriesLock.unlock()
+                    pending.completion(nil)
+                } else {
+                    self?.pendingQueriesLock.unlock()
+                }
             }
         })
     }
@@ -408,6 +540,11 @@ class MiniDNSServer: ObservableObject {
             self.upstreamDNS = trimmed
             saveConfig()
             log("Đã đổi DNS thượng nguồn thành: \(trimmed)")
+            
+            // Restart upstream connection with new IP if server is running
+            if isRunning {
+                startUpstreamConnection()
+            }
         } else {
             log("IP DNS thượng nguồn không hợp lệ: \(trimmed)")
         }
