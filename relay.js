@@ -19,6 +19,33 @@ let subscriptionBlockedSet = new Set();
 let isUpdatingList = false;
 let logs = [];
 
+// Performance Metrics & Local DNS Cache
+const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, expiresAt }
+const MAX_CACHE_SIZE = 15000;
+const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
+const aiDecisionCache = new Map(); // Key: domain, Value: true/false
+
+// Groq AI Guard Queue Variables
+const groqQueue = [];
+let activeGroqRequests = 0;
+const MAX_CONCURRENT_GROQ = 2;
+
+// Shared Upstream UDP Client Sockets
+let upstreamSocket = null;
+const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
+let nextTxId = 0;
+
+// Local/Internal Domain Safeguard
+const IGNORED_DOMAINS = new Set([
+    "localhost", "localhost.localdomain", "local", "broadcasthost",
+    "0.0.0.0", "127.0.0.1", "::1", "local.host"
+]);
+
+let cacheHits = 0;
+let cacheMisses = 0;
+let totalLatency = 0;
+let latencyCount = 0;
+
 // Load config and caches
 loadConfig();
 
@@ -45,6 +72,19 @@ app.use(express.static(path.join(__dirname, 'public')));
 // MARK: - DNS Configuration & Cache Load/Save
 
 function loadConfig() {
+    const defaultSubs = [
+        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt",
+        "https://v.firebog.net/hosts/AdguardDNS.txt",
+        "https://v.firebog.net/hosts/Easyprivacy.txt",
+        "https://raw.githubusercontent.com/Spam404/lists/master/main-blacklist.txt",
+        "https://urlhaus.abuse.ch/downloads/hostfile/",
+        "https://raw.githubusercontent.com/FadeMind/hosts.extras/master/add.Spam/hosts",
+        "https://v.firebog.net/hosts/Prigent-Crypto.txt",
+        "https://raw.githubusercontent.com/PolishFiltersTeam/KADhosts/master/KADhosts.txt",
+        "https://small.oisd.nl"
+    ];
+
     try {
         if (fs.existsSync(CONFIG_PATH)) {
             const data = fs.readFileSync(CONFIG_PATH, 'utf8');
@@ -60,11 +100,12 @@ function loadConfig() {
                     "app-measurement.com"
                 ],
                 whitelistDomains: [],
-                subscriptionURLs: [
-                    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-                ],
+                subscriptionURLs: defaultSubs,
                 upstreamDNS: "1.1.1.1",
-                stats: { total: 0, blocked: 0, allowed: 0 }
+                stats: { total: 0, blocked: 0, allowed: 0 },
+                aiEnabled: false,
+                groqApiKey: "",
+                groqModel: "llama-3.1-8b-instant"
             };
             saveConfig();
         }
@@ -80,12 +121,21 @@ function loadConfig() {
                 "app-measurement.com"
             ],
             whitelistDomains: [],
-            subscriptionURLs: [
-                "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-            ],
+            subscriptionURLs: defaultSubs,
             upstreamDNS: "1.1.1.1",
-            stats: { total: 0, blocked: 0, allowed: 0 }
+            stats: { total: 0, blocked: 0, allowed: 0 },
+            aiEnabled: false,
+            groqApiKey: "",
+            groqModel: "llama-3.1-8b-instant"
         };
+    }
+    
+    // Ensure all variables are fully seeded
+    config.aiEnabled = config.aiEnabled || false;
+    config.groqApiKey = config.groqApiKey || "";
+    config.groqModel = config.groqModel || "llama-3.1-8b-instant";
+    if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
+        config.subscriptionURLs = defaultSubs;
     }
     
     customBlockedSet = new Set(config.customBlockedDomains.map(d => d.toLowerCase()));
@@ -125,6 +175,42 @@ function loadSubscriptionBlocklistFromDisk() {
     }
 }
 
+// MARK: - Local DNS Cache
+
+function checkCache(domain, qtype) {
+    const key = `${domain.toLowerCase()}_${qtype}`;
+    const cached = dnsCache.get(key);
+    if (cached) {
+        if (Date.now() < cached.expiresAt) {
+            cacheHits++;
+            // Move to end of Map (most recently used) to preserve LRU order
+            dnsCache.delete(key);
+            dnsCache.set(key, cached);
+            return cached.responseBuffer;
+        } else {
+            dnsCache.delete(key);
+        }
+    }
+    cacheMisses++;
+    return null;
+}
+
+function setCache(domain, qtype, responseBuffer, ttl) {
+    const key = `${domain.toLowerCase()}_${qtype}`;
+    if (dnsCache.has(key)) {
+        dnsCache.delete(key);
+    } else if (dnsCache.size >= MAX_CACHE_SIZE) {
+        const oldestKey = dnsCache.keys().next().value;
+        if (oldestKey) {
+            dnsCache.delete(oldestKey);
+        }
+    }
+    dnsCache.set(key, {
+        responseBuffer: responseBuffer,
+        expiresAt: Date.now() + (ttl * 1000)
+    });
+}
+
 // MARK: - DNS Packet Parsers & Builders
 
 function parseDNSQuery(buffer) {
@@ -157,8 +243,17 @@ function parseDNSQuery(buffer) {
     }
     
     const domain = domainParts.join('.');
+    if (offset + 4 > buffer.length) {
+        return null;
+    }
+    
+    const qtype = buffer.readUInt16BE(offset);
+    const qclass = buffer.readUInt16BE(offset + 2);
+    
     return {
         domain: domain,
+        qtype: qtype,
+        qclass: qclass,
         questionEndOffset: offset
     };
 }
@@ -192,81 +287,313 @@ function buildBlockResponse(queryBuffer, questionEndOffset) {
     return Buffer.concat([header, question, answer]);
 }
 
+function extractTTL(responseBuffer, questionEndOffset) {
+    try {
+        let offset = questionEndOffset + 4; // Start of Answer Section
+        if (offset + 10 > responseBuffer.length) return 300;
+        
+        let nameByte = responseBuffer[offset];
+        if ((nameByte & 0xC0) === 0xC0) {
+            offset += 2; // Pointer
+        } else {
+            while (offset < responseBuffer.length) {
+                let len = responseBuffer[offset];
+                if (len === 0) {
+                    offset += 1;
+                    break;
+                }
+                if ((len & 0xC0) === 0xC0) {
+                    offset += 2;
+                    break;
+                }
+                offset += 1 + len;
+            }
+        }
+        
+        if (offset + 8 > responseBuffer.length) return 300;
+        
+        const ttl = responseBuffer.readUInt32BE(offset + 4);
+        return ttl > 0 ? ttl : 300;
+    } catch (e) {
+        return 300;
+    }
+}
+
 // MARK: - Ad-Blocking Tra cứu (Optimized O(K))
+
+function hasDomainOrParent(set, domain) {
+    if (set.has(domain)) return true;
+    let idx = domain.indexOf('.');
+    while (idx !== -1) {
+        const parent = domain.substring(idx + 1);
+        if (set.has(parent)) return true;
+        idx = domain.indexOf('.', idx + 1);
+    }
+    return false;
+}
 
 function shouldBlock(domain) {
     const lowercaseDomain = domain.toLowerCase();
     
+    // 0. Safeguard: Local / internal networks are allowed
+    if (IGNORED_DOMAINS.has(lowercaseDomain)) return false;
+    if (lowercaseDomain.endsWith('.local') || lowercaseDomain.endsWith('.localhost')) return false;
+    
     // 1. Whitelist Check (exact or parent subdomain)
-    if (whitelistSet.has(lowercaseDomain)) return false;
-    let parts = lowercaseDomain.split('.');
-    if (parts.length > 1) {
-        for (let i = 1; i < parts.length; i++) {
-            let parent = parts.slice(i).join('.');
-            if (whitelistSet.has(parent)) return false;
-        }
-    }
+    if (hasDomainOrParent(whitelistSet, lowercaseDomain)) return false;
     
-    // 2. Custom Blocklist Check (exact or parent subdomain)
-    if (customBlockedSet.has(lowercaseDomain)) return true;
-    if (parts.length > 1) {
-        for (let i = 1; i < parts.length; i++) {
-            let parent = parts.slice(i).join('.');
-            if (customBlockedSet.has(parent)) return true;
-        }
-    }
+    // 2. Custom Blocklist Check
+    if (hasDomainOrParent(customBlockedSet, lowercaseDomain)) return true;
     
-    // 3. Subscription Blocklist Check (exact or parent subdomain)
-    if (subscriptionBlockedSet.has(lowercaseDomain)) return true;
-    if (parts.length > 1) {
-        for (let i = 1; i < parts.length; i++) {
-            let parent = parts.slice(i).join('.');
-            if (subscriptionBlockedSet.has(parent)) return true;
-        }
-    }
+    // 3. Subscription Blocklist Check
+    if (hasDomainOrParent(subscriptionBlockedSet, lowercaseDomain)) return true;
     
     return false;
 }
 
-// MARK: - Upstream DNS Resolver (UDP)
+// MARK: - Upstream DNS Resolver (UDP) and Deduplication
+
+function initUpstreamSocket() {
+    if (upstreamSocket) return;
+    
+    upstreamSocket = dgram.createSocket('udp4');
+    
+    upstreamSocket.on('message', (msg) => {
+        if (msg.length < 2) return;
+        const txId = msg.readUInt16BE(0);
+        const req = pendingRequests.get(txId);
+        if (req) {
+            pendingRequests.delete(txId);
+            if (req.timer) clearTimeout(req.timer);
+            
+            // Restore original client Transaction ID
+            const clientResponse = Buffer.from(msg);
+            clientResponse[0] = req.originalIDBytes[0];
+            clientResponse[1] = req.originalIDBytes[1];
+            
+            req.callback(clientResponse);
+        }
+    });
+    
+    upstreamSocket.on('error', (err) => {
+        console.error("Shared upstream UDP socket error:", err);
+        try {
+            upstreamSocket.close();
+        } catch (e) {}
+        upstreamSocket = null;
+        // Delay re-initialization slightly to avoid tight loop
+        setTimeout(initUpstreamSocket, 1000);
+    });
+}
 
 function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
-    const client = dgram.createSocket('udp4');
-    let closed = false;
+    initUpstreamSocket();
     
-    const safeClose = () => {
-        if (!closed) {
-            closed = true;
-            try { client.close(); } catch(e) {}
+    if (!upstreamSocket) {
+        callback(null);
+        return;
+    }
+    
+    // Find a free Tx ID
+    let txId = nextTxId;
+    let attempts = 0;
+    while (pendingRequests.has(txId) && attempts < 65536) {
+        txId = (txId + 1) % 65536;
+        attempts++;
+    }
+    nextTxId = (txId + 1) % 65536;
+    
+    const originalIDBytes = Buffer.from([dnsQueryBuffer[0], dnsQueryBuffer[1]]);
+    
+    // Clone the buffer so we don't modify the client's query buffer in-place
+    const upstreamQueryBuffer = Buffer.from(dnsQueryBuffer);
+    // Write the new transaction ID
+    upstreamQueryBuffer.writeUInt16BE(txId, 0);
+    
+    const timer = setTimeout(() => {
+        const req = pendingRequests.get(txId);
+        if (req) {
+            pendingRequests.delete(txId);
+            callback(null);
+        }
+    }, 4000); // 4 seconds query timeout
+    
+    pendingRequests.set(txId, {
+        callback,
+        originalIDBytes,
+        timer,
+        timestamp: Date.now()
+    });
+    
+    upstreamSocket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, 53, upstreamIP, (err) => {
+        if (err) {
+            console.error(`Failed to send DNS request to upstream ${upstreamIP}:`, err);
+            const req = pendingRequests.get(txId);
+            if (req) {
+                pendingRequests.delete(txId);
+                clearTimeout(timer);
+                callback(null);
+            }
+        }
+    });
+}
+
+function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, callback) {
+    const key = `${domain.toLowerCase()}_${qtype}`;
+    const originalIDBytes = Buffer.from([queryData[0], queryData[1]]);
+    
+    if (activeUpstreamQueries.has(key)) {
+        activeUpstreamQueries.get(key).push({ callback, originalIDBytes });
+        return;
+    }
+    
+    activeUpstreamQueries.set(key, [{ callback, originalIDBytes }]);
+    
+    queryUpstream(queryData, upstreamDNS, (response) => {
+        const queue = activeUpstreamQueries.get(key) || [];
+        activeUpstreamQueries.delete(key);
+        
+        queue.forEach(item => {
+            if (response && response.length >= 2) {
+                const clientResponse = Buffer.from(response);
+                clientResponse[0] = item.originalIDBytes[0];
+                clientResponse[1] = item.originalIDBytes[1];
+                item.callback(clientResponse);
+            } else {
+                item.callback(null);
+            }
+        });
+    });
+}
+
+// MARK: - Groq AI Security Guard
+
+function enqueueGroqCheck(domain) {
+    const d = domain.trim().toLowerCase();
+    if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
+    if (d.endsWith('.local') || d.endsWith('.localhost')) return;
+    if (aiDecisionCache.has(d)) return;
+    if (whitelistSet.has(d)) return;
+    
+    const apiKey = config.groqApiKey;
+    if (!apiKey) return;
+    
+    // Mark as scanned immediately to avoid duplicate queue insertions
+    aiDecisionCache.set(d, false);
+    
+    groqQueue.push(d);
+    processGroqQueue();
+}
+
+function processGroqQueue() {
+    if (activeGroqRequests >= MAX_CONCURRENT_GROQ || groqQueue.length === 0) {
+        return;
+    }
+    
+    const domain = groqQueue.shift();
+    activeGroqRequests++;
+    
+    checkDomainWithGroq(domain, () => {
+        activeGroqRequests--;
+        processGroqQueue();
+    });
+}
+
+function checkDomainWithGroq(domain, callback) {
+    const apiKey = config.groqApiKey;
+    const model = config.groqModel || "llama-3.1-8b-instant";
+    
+    console.log(`[AI Guard] Scanning domain: ${domain} via Groq (${model})...`);
+    
+    const postData = JSON.stringify({
+        model: model,
+        messages: [
+            {
+                role: "system",
+                content: "You are a DNS Firewall security expert. Classify the domain name. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"brief explanation in Vietnamese\" }."
+            },
+            {
+                role: "user",
+                content: `Analyze this domain: ${domain}`
+            }
+        ],
+        response_format: { type: "json_object" }
+    });
+    
+    const options = {
+        hostname: 'api.groq.com',
+        port: 443,
+        path: '/openai/v1/chat/completions',
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Length': Buffer.byteLength(postData)
         }
     };
     
-    let timer = setTimeout(() => {
-        safeClose();
-        callback(null);
-    }, 4000); // 4 seconds query timeout
-    
-    client.on('message', (msg) => {
-        clearTimeout(timer);
-        safeClose();
-        callback(msg);
-    });
-    
-    client.on('error', (err) => {
-        console.error("Upstream UDP Socket Error:", err);
-        clearTimeout(timer);
-        safeClose();
-        callback(null);
-    });
-    
-    client.send(dnsQueryBuffer, 0, dnsQueryBuffer.length, 53, upstreamIP, (err) => {
-        if (err) {
-            console.error("Failed to send DNS request to upstream:", err);
-            clearTimeout(timer);
-            safeClose();
-            callback(null);
+    let completed = false;
+    const done = () => {
+        if (!completed) {
+            completed = true;
+            callback();
         }
-    });
+    };
+    
+    try {
+        const req = https.request(options, (res) => {
+            let body = [];
+            res.on('data', chunk => body.push(chunk));
+            res.on('end', () => {
+                try {
+                    if (res.statusCode !== 200) {
+                        console.error(`[AI Guard] Groq returned status ${res.statusCode}`);
+                        aiDecisionCache.delete(domain);
+                        done();
+                        return;
+                    }
+                    
+                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
+                    const replyStr = resData.choices?.[0]?.message?.content;
+                    if (replyStr) {
+                        const decision = JSON.parse(replyStr);
+                        if (decision.blocked === true) {
+                            aiDecisionCache.set(domain, true);
+                            console.log(`[AI Guard] Groq classified ${domain} as BLOCKED. Reason: ${decision.reason}`);
+                            
+                            // Auto block the domain
+                            customBlockedSet.add(domain);
+                            config.customBlockedDomains = Array.from(customBlockedSet);
+                            saveConfig();
+                            logQuery(domain, true, "AI Guard (Auto Blocked)");
+                        } else {
+                            aiDecisionCache.set(domain, false);
+                            console.log(`[AI Guard] Groq classified ${domain} as ALLOWED.`);
+                        }
+                    } else {
+                        aiDecisionCache.delete(domain);
+                    }
+                } catch (e) {
+                    console.error("[AI Guard] Failed to parse Groq response:", e);
+                    aiDecisionCache.delete(domain);
+                }
+                done();
+            });
+        });
+        
+        req.on('error', (e) => {
+            console.error("[AI Guard] Groq API error:", e);
+            aiDecisionCache.delete(domain);
+            done();
+        });
+        
+        req.write(postData);
+        req.end();
+    } catch (e) {
+        console.error("[AI Guard] Groq API request exception:", e);
+        aiDecisionCache.delete(domain);
+        done();
+    }
 }
 
 // MARK: - Logs and Stats Logging
@@ -309,11 +636,11 @@ function updateBlocklists(callback) {
         return;
     }
     isUpdatingList = true;
-    console.log("Starting blocklist subscription sync...");
+    console.log("Starting blocklist subscription sync sequentially to preserve memory...");
     
     const urls = config.subscriptionURLs || [];
     let newBlocked = new Set();
-    let completed = 0;
+    let index = 0;
     
     if (urls.length === 0) {
         isUpdatingList = false;
@@ -321,7 +648,20 @@ function updateBlocklists(callback) {
         return;
     }
     
-    urls.forEach(urlString => {
+    function downloadNext() {
+        if (index >= urls.length) {
+            isUpdatingList = false;
+            if (newBlocked.size > 0) {
+                subscriptionBlockedSet = newBlocked;
+                saveSubscriptionBlocklistToDisk();
+            }
+            console.log(`Sync completed. Total active rules: ${subscriptionBlockedSet.size}`);
+            if (callback) callback();
+            return;
+        }
+        
+        const urlString = urls[index];
+        console.log(`[Sync] Downloading ${index + 1}/${urls.length}: ${urlString}...`);
         downloadURL(urlString, (content) => {
             if (content) {
                 const lines = content.split(/\r?\n/);
@@ -337,8 +677,10 @@ function updateBlocklists(callback) {
                         let ip = parts[0];
                         let domain = parts[1].toLowerCase();
                         if ((ip === "0.0.0.0" || ip === "127.0.0.1") && isValidDomain(domain)) {
-                            newBlocked.add(domain);
-                            parsedCount++;
+                            if (!IGNORED_DOMAINS.has(domain) && !domain.endsWith('.local') && !domain.endsWith('.localhost')) {
+                                newBlocked.add(domain);
+                                parsedCount++;
+                            }
                         }
                     } else if (parts.length === 1) {
                         let domain = parts[0].toLowerCase();
@@ -346,26 +688,25 @@ function updateBlocklists(callback) {
                             domain = domain.substring(2, domain.length - 1);
                         }
                         if (isValidDomain(domain)) {
-                            newBlocked.add(domain);
-                            parsedCount++;
+                            if (!IGNORED_DOMAINS.has(domain) && !domain.endsWith('.local') && !domain.endsWith('.localhost')) {
+                                newBlocked.add(domain);
+                                parsedCount++;
+                            }
                         }
                     }
                 });
-                console.log(`Successfully parsed ${parsedCount} domains from ${urlString}`);
+                console.log(`[Sync] Successfully parsed ${parsedCount} domains from ${urlString}`);
+            } else {
+                console.error(`[Sync] Failed to download or parse from ${urlString}`);
             }
             
-            completed++;
-            if (completed === urls.length) {
-                isUpdatingList = false;
-                if (newBlocked.size > 0) {
-                    subscriptionBlockedSet = newBlocked;
-                    saveSubscriptionBlocklistToDisk();
-                }
-                console.log(`Sync completed. Total active rules: ${subscriptionBlockedSet.size}`);
-                if (callback) callback();
-            }
+            index++;
+            // Yield execution to allow garbage collection and event processing
+            setTimeout(downloadNext, 100);
         });
-    });
+    }
+    
+    downloadNext();
 }
 
 function downloadURL(urlString, callback) {
@@ -414,6 +755,8 @@ function isValidDomain(domain) {
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
 
 function handleDoH(queryData, clientIP, callback) {
+    const startTime = Date.now();
+    
     const parsed = parseDNSQuery(queryData);
     if (!parsed) {
         callback(Buffer.alloc(0));
@@ -421,22 +764,49 @@ function handleDoH(queryData, clientIP, callback) {
     }
     
     const domain = parsed.domain;
+    const qtype = parsed.qtype;
     const isBlocked = shouldBlock(domain);
     
-    logQuery(domain, isBlocked, clientIP);
-    incrementStats(isBlocked);
+    const completeQuery = (responseBuffer, fromCache = false, isBlockedQuery = false) => {
+        const latency = Date.now() - startTime;
+        totalLatency += latency;
+        latencyCount++;
+        
+        logQuery(domain, isBlockedQuery, clientIP);
+        incrementStats(isBlockedQuery);
+        
+        callback(responseBuffer);
+        
+        // Trigger background AI Guard check for new allowed domains
+        if (!isBlockedQuery && !fromCache && config.aiEnabled && config.groqApiKey) {
+            enqueueGroqCheck(domain);
+        }
+    };
     
     if (isBlocked) {
         const blockResponse = buildBlockResponse(queryData, parsed.questionEndOffset);
-        callback(blockResponse);
+        completeQuery(blockResponse, false, true);
     } else {
-        queryUpstream(queryData, config.upstreamDNS, (response) => {
-            if (response) {
-                callback(response);
-            } else {
-                callback(Buffer.alloc(0));
-            }
-        });
+        // 1. Check local memory DNS Cache
+        const cachedResponse = checkCache(domain, qtype);
+        if (cachedResponse) {
+            // Rewrite transaction ID
+            const clientResponse = Buffer.from(cachedResponse);
+            clientResponse[0] = queryData[0];
+            clientResponse[1] = queryData[1];
+            completeQuery(clientResponse, true, false);
+        } else {
+            // 2. Fetch using Upstream request coalescing
+            fetchFromUpstreamDeduplicated(queryData, domain, qtype, config.upstreamDNS, (response) => {
+                if (response) {
+                    const ttl = extractTTL(response, parsed.questionEndOffset);
+                    setCache(domain, qtype, response, ttl);
+                    completeQuery(response, false, false);
+                } else {
+                    completeQuery(Buffer.alloc(0), false, false);
+                }
+            });
+        }
     }
 }
 
@@ -496,7 +866,9 @@ app.get('/dns/config', (req, res) => {
         total: config.stats.total,
         blocked: config.stats.blocked,
         allowed: config.stats.allowed,
-        blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0
+        blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0,
+        cacheHitRate: (cacheHits + cacheMisses) > 0 ? (cacheHits / (cacheHits + cacheMisses) * 100) : 0,
+        avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
     
     res.json({
@@ -508,7 +880,10 @@ app.get('/dns/config', (req, res) => {
         upstream: upstream,
         logs: logs,
         stats: stats,
-        isUpdating: isUpdating
+        isUpdating: isUpdating,
+        aiEnabled: !!config.aiEnabled,
+        groqApiKey: config.groqApiKey || "",
+        groqModel: config.groqModel || "llama-3.1-8b-instant"
     });
 });
 
@@ -623,8 +998,27 @@ app.post('/dns/upstream', (req, res) => {
     }
 });
 
+app.post('/dns/groq', (req, res) => {
+    const enabled = req.query.enabled === 'true';
+    const apiKey = req.query.apiKey;
+    const model = req.query.model || "llama-3.1-8b-instant";
+    
+    config.aiEnabled = enabled;
+    if (apiKey !== undefined) {
+        config.groqApiKey = apiKey.trim();
+    }
+    config.groqModel = model;
+    
+    saveConfig();
+    res.send("Groq configuration updated");
+});
+
 app.post('/dns/stats/reset', (req, res) => {
     config.stats = { total: 0, blocked: 0, allowed: 0 };
+    cacheHits = 0;
+    cacheMisses = 0;
+    totalLatency = 0;
+    latencyCount = 0;
     saveConfig();
     res.send("Stats reset");
 });

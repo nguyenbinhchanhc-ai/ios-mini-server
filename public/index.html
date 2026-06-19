@@ -578,6 +578,14 @@
                             <div class="stat-card-title">Bộ lọc đang hoạt động</div>
                             <div class="stat-card-val allowed-num" id="dnsStatActive">0</div>
                         </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Tỷ lệ Cache</div>
+                            <div class="stat-card-val allowed-num" id="dnsStatCacheHit">0%</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Độ trễ trung bình</div>
+                            <div class="stat-card-val" id="dnsStatLatency">0 ms</div>
+                        </div>
                     </div>
 
                     <div class="grid">
@@ -610,6 +618,7 @@
                                 <div class="tab" id="subtab-subs" onclick="switchSubTab('subs')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Bộ lọc URL</div>
                                 <div class="tab" id="subtab-list" onclick="switchSubTab('list')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Chặn tùy chỉnh</div>
                                 <div class="tab" id="subtab-white" onclick="switchSubTab('white')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Danh sách trắng</div>
+                                <div class="tab" id="subtab-ai" onclick="switchSubTab('ai')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Trí tuệ AI</div>
                             </div>
                             
                             <!-- Logs panel -->
@@ -673,6 +682,37 @@
                                     <button onclick="addWhitelist()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Thêm</button>
                                 </div>
                             </div>
+
+                            <!-- AI Configuration panel -->
+                            <div id="dns-ai-panel" class="subtab-content" style="display: none;">
+                                <div style="margin-bottom: 0.5rem; display: flex; gap: 0.5rem; justify-content: space-between;">
+                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Trí tuệ nhân tạo Groq AI Guard</h4>
+                                </div>
+                                <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.4;">
+                                    Groq AI Guard tự động phân tích tên miền mới chưa có trong danh sách chặn ở chế độ chạy ngầm (độ trễ 0ms). Nếu phát hiện tên miền là quảng cáo, mã độc hoặc lừa đảo, nó sẽ tự động thêm vào danh sách chặn.
+                                </p>
+                                
+                                <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
+                                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <input type="checkbox" id="aiEnabled" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
+                                        <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer;">Kích hoạt AI Security Guard</label>
+                                    </div>
+                                    
+                                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                                        <label for="groqApiKey" style="font-size: 0.8rem; color: var(--text-muted);">Groq API Key:</label>
+                                        <input type="password" id="groqApiKey" placeholder="Nhập gsk_..." style="padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                    </div>
+                                    
+                                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                                        <label for="groqModel" style="font-size: 0.8rem; color: var(--text-muted);">Mô hình AI:</label>
+                                        <select id="groqModel" style="padding: 0.6rem; border-radius: 8px; background: #131926; border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                            <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant (Siêu nhanh - Khuyên dùng)</option>
+                                            <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile (Thông minh)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -718,6 +758,9 @@
         } else if (type === 'white') {
             document.getElementById('subtab-white').classList.add('active');
             document.getElementById('dns-white-panel').style.display = 'block';
+        } else if (type === 'ai') {
+            document.getElementById('subtab-ai').classList.add('active');
+            document.getElementById('dns-ai-panel').style.display = 'block';
         }
     }
 
@@ -790,9 +833,20 @@
         document.getElementById('dnsStatBlocked').innerText = dnsConfig.stats.blocked;
         document.getElementById('dnsStatPercent').innerText = dnsConfig.stats.blockedPercent.toFixed(1) + '%';
         document.getElementById('dnsStatActive').innerText = (dnsConfig.blockedCount !== undefined ? dnsConfig.blockedCount : (dnsConfig.blocked ? dnsConfig.blocked.length : 0)) + ' tên miền';
+        document.getElementById('dnsStatCacheHit').innerText = (dnsConfig.stats.cacheHitRate !== undefined ? dnsConfig.stats.cacheHitRate.toFixed(1) : '0.0') + '%';
+        document.getElementById('dnsStatLatency').innerText = (dnsConfig.stats.avgLatency !== undefined ? dnsConfig.stats.avgLatency.toFixed(1) : '0.0') + ' ms';
         
         if(document.activeElement !== document.getElementById('upstreamInput')) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
+        }
+        
+        // Update Groq AI configs
+        document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
+        if(document.activeElement !== document.getElementById('groqApiKey')) {
+            document.getElementById('groqApiKey').value = dnsConfig.groqApiKey || "";
+        }
+        if(document.activeElement !== document.getElementById('groqModel')) {
+            document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.1-8b-instant";
         }
         
         // Log table rows
@@ -1014,6 +1068,26 @@
                     showToast('Đã reset thống kê');
                     fetchDNSConfig();
                 }
+            });
+    }
+
+    function saveGroqConfig() {
+        const enabled = document.getElementById('aiEnabled').checked;
+        const apiKey = document.getElementById('groqApiKey').value.trim();
+        const model = document.getElementById('groqModel').value;
+        
+        fetch(`/dns/groq?enabled=${enabled}&apiKey=${encodeURIComponent(apiKey)}&model=${encodeURIComponent(model)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã lưu cấu hình Groq AI');
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi khi lưu cấu hình', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi mạng', 'error');
             });
     }
 
