@@ -829,7 +829,7 @@ class MiniHTTPServer: ObservableObject {
     }
     
     private func getDashboardHTML() -> String {
-        return """
+        return #"""
         <!DOCTYPE html>
         <html lang="vi">
         <head>
@@ -1771,7 +1771,7 @@ class MiniHTTPServer: ObservableObject {
 
                 function parseDNSLog(line) {
                     // Expect format: [HH:mm:ss] [ClientIP] Status - Domain
-                    const match = line.match(/^\\\[(.*?)\\]\\s+\\\[(.*?)\\]\\s+(ALLOW.*?|BLOCKED.*?|✅ ALLOWED|❌ BLOCKED)\\s+-\\s+(.*?)$/);
+                    const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(ALLOW.*?|BLOCKED.*?|✅ ALLOWED|❌ BLOCKED)\s+-\s+(.*?)$/);
                     if (match) {
                         const time = match[1];
                         const ip = match[2];
@@ -1782,7 +1782,7 @@ class MiniHTTPServer: ObservableObject {
                     }
                     
                     // Fallback for general logs: [HH:mm:ss] message
-                    const fallbackMatch = line.match(/^\\\[(.*?)\\]\\s+(.*?)$/);
+                    const fallbackMatch = line.match(/^\[(.*?)\]\s+(.*?)$/);
                     if (fallbackMatch) {
                         return { time: fallbackMatch[1], ip: 'System', domain: fallbackMatch[2], isBlocked: false, textStatus: 'INFO' };
                     }
@@ -2062,6 +2062,6 @@ class MiniHTTPServer: ObservableObject {
             </script>
         </body>
         </html>
-        """
+        """#
     }
 }
