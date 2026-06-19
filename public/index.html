@@ -698,13 +698,13 @@
                                         <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer;">Kích hoạt AI Security Guard</label>
                                     </div>
                                     
-                                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
-                                        <label for="groqModel" style="font-size: 0.8rem; color: var(--text-muted);">Mô hình AI:</label>
-                                        <select id="groqModel" style="padding: 0.6rem; border-radius: 8px; background: #131926; border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                            <option value="llama-3.1-8b-instant">Llama 3.1 8B Instant (Siêu nhanh - Khuyên dùng)</option>
-                                            <option value="llama-3.3-70b-versatile">Llama 3.3 70B Versatile (Thông minh)</option>
-                                            <option value="llama-4-scout">Llama 4 Scout (Mới nhất)</option>
-                                        </select>
+                                    <div style="display: flex; flex-direction: column; gap: 0.35rem;">
+                                        <label style="font-size: 0.8rem; color: var(--text-muted);">Bộ não AI chính (Đã tối ưu hóa):</label>
+                                        <div style="padding: 0.65rem 0.8rem; border-radius: 8px; background: rgba(167, 139, 250, 0.05); border: 1px solid rgba(167, 139, 250, 0.2); color: #a78bfa; font-size: 0.85rem; font-weight: bold; display: flex; align-items: center; gap: 0.5rem;">
+                                            <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;"></span>
+                                            Llama 3.3 70B Versatile (Độ chính xác cao nhất)
+                                        </div>
+                                        <input type="hidden" id="groqModel" value="llama-3.3-70b-versatile">
                                     </div>
                                 </div>
                                 <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
@@ -1211,10 +1211,10 @@
     // Initialize UI on load
     fetchDNSConfig();
 
-    // Auto-refresh config/logs every 3 seconds
+    // Auto-refresh config/logs every 2 seconds (real-time tracking)
     setInterval(() => {
         fetchDNSConfig();
-    }, 3000);
+    }, 2000);
 </script>
 </body>
 </html>

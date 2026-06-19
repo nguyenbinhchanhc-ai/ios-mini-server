@@ -83,7 +83,8 @@ function loadConfig() {
         "https://raw.githubusercontent.com/FadeMind/hosts.extras/master/add.Spam/hosts",
         "https://v.firebog.net/hosts/Prigent-Crypto.txt",
         "https://raw.githubusercontent.com/PolishFiltersTeam/KADhosts/master/KADhosts.txt",
-        "https://small.oisd.nl"
+        "https://small.oisd.nl",
+        "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts"
     ];
 
     try {
@@ -106,7 +107,7 @@ function loadConfig() {
                 stats: { total: 0, blocked: 0, allowed: 0 },
                 aiEnabled: false,
                 groqApiKeys: [],
-                groqModel: "llama-3.1-8b-instant"
+                groqModel: "llama-3.3-70b-versatile"
             };
             saveConfig();
         }
@@ -127,13 +128,13 @@ function loadConfig() {
             stats: { total: 0, blocked: 0, allowed: 0 },
             aiEnabled: false,
             groqApiKeys: [],
-            groqModel: "llama-3.1-8b-instant"
+            groqModel: "llama-3.3-70b-versatile"
         };
     }
     
     // Ensure all variables are fully seeded
     config.aiEnabled = config.aiEnabled || false;
-    config.groqModel = config.groqModel || "llama-3.1-8b-instant";
+    config.groqModel = "llama-3.3-70b-versatile"; // Enforce 70B model only
     // Migrate legacy single key to array
     if (config.groqApiKey && !config.groqApiKeys) {
         config.groqApiKeys = [config.groqApiKey];
@@ -145,6 +146,13 @@ function loadConfig() {
     config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
     if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
         config.subscriptionURLs = defaultSubs;
+    }
+    
+    // Automatically inject BigDargon Vietnam host list if not present
+    const vnList = "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts";
+    if (!config.subscriptionURLs.includes(vnList)) {
+        config.subscriptionURLs.push(vnList);
+        saveConfig();
     }
     
     customBlockedSet = new Set(config.customBlockedDomains.map(d => d.toLowerCase()));
@@ -527,16 +535,16 @@ function checkDomainWithGroq(domain, apiKey, callback) {
         if (callback) callback();
         return;
     }
-    const model = config.groqModel || "llama-3.1-8b-instant";
+    const model = "llama-3.3-70b-versatile";
     
-    console.log(`[AI Guard] Scanning domain: ${domain} via Groq (${model})...`);
+    console.log(`[AI Guard] Scanning domain: ${domain} via Groq (Llama 3.3 70B)...`);
     
     const postData = JSON.stringify({
         model: model,
         messages: [
             {
                 role: "system",
-                content: "You are a DNS Firewall security expert. Classify the domain name. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"brief explanation in Vietnamese\" }."
+                content: "You are a DNS Firewall security expert. Classify the domain name. Analyze common ad/tracker keywords (ads, track, tele, log, stat, click, pixel, doubleclick, analytics, banner, popunder, redirect, push) and subdomains. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }. Keep the reason extremely brief to reduce latency."
             },
             {
                 role: "user",
@@ -1099,13 +1107,13 @@ app.get('/dns/groq/test', (req, res) => {
         return res.status(400).json({ error: "No API Keys configured. Add at least one Groq API Key." });
     }
     
-    const model = config.groqModel || "llama-3.1-8b-instant";
+    const model = "llama-3.3-70b-versatile";
     const postData = JSON.stringify({
         model: model,
         messages: [
             {
                 role: "system",
-                content: "You are a DNS Firewall security expert. Classify the domain name. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"brief explanation in Vietnamese\" }."
+                content: "You are a DNS Firewall security expert. Classify the domain name. Analyze common ad/tracker keywords (ads, track, tele, log, stat, click, pixel, doubleclick, analytics, banner, popunder, redirect, push) and subdomains. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }. Keep the reason extremely brief to reduce latency."
             },
             {
                 role: "user",

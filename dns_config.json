@@ -18,12 +18,16 @@
     "https://raw.githubusercontent.com/FadeMind/hosts.extras/master/add.Spam/hosts",
     "https://v.firebog.net/hosts/Prigent-Crypto.txt",
     "https://raw.githubusercontent.com/PolishFiltersTeam/KADhosts/master/KADhosts.txt",
-    "https://small.oisd.nl"
+    "https://small.oisd.nl",
+    "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts"
   ],
   "upstreamDNS": "1.1.1.1",
   "stats": {
     "total": 0,
     "blocked": 0,
     "allowed": 0
-  }
+  },
+  "aiEnabled": false,
+  "groqModel": "llama-3.3-70b-versatile",
+  "groqApiKeys": []
 }
