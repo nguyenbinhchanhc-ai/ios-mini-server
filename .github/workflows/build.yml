@@ -12,7 +12,7 @@ jobs:
     
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -48,7 +48,7 @@ jobs:
           zip -r iOSMiniServer.ipa Payload
 
       - name: Upload Build Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: iOSMiniServer-Unsigned-IPA
           path: build/iOSMiniServer.ipa
