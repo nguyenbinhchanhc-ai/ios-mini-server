@@ -15,13 +15,16 @@ struct ContentView: View {
     @State private var selectedShareFile: FileItem? = nil
     
     private var serverURLString: String {
-        guard let ip = localIP else { return "Không có Wi-Fi" }
-        return "http://\(ip):\(server.port)"
+        if let ip = localIP {
+            return "http://\(ip):\(server.port)"
+        }
+        return "Không có Wi-Fi"
     }
     
     var body: some View {
         NavigationView {
             ZStack {
+                // Background Gradient
                 LinearGradient(
                     gradient: Gradient(colors: [Color(red: 0.05, green: 0.08, blue: 0.16), Color(red: 0.08, green: 0.05, blue: 0.12)]),
                     startPoint: .top,
@@ -31,23 +34,25 @@ struct ContentView: View {
                 
                 ScrollView {
                     VStack(spacing: 20) {
+                        
+                        // SERVER STATUS CARD
                         VStack(spacing: 16) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Trạng thái máy chủ")
                                         .font(.caption)
-                                        .foregroundColor(.gray)
+                                        .foregroundColor(Color.gray)
                                     
                                     HStack(spacing: 8) {
                                         Circle()
                                             .fill(server.isRunning ? Color.green : Color.red)
                                             .frame(width: 10, height: 10)
-                                            .shadow(color: server.isRunning ? .green : .red, radius: 4)
+                                            .shadow(color: server.isRunning ? Color.green : Color.red, radius: 4)
                                         
                                         Text(server.isRunning ? "ĐANG HOẠT ĐỘNG" : "ĐÃ DỪNG")
                                             .font(.footnote)
                                             .fontWeight(.bold)
-                                            .foregroundColor(server.isRunning ? .green : .red)
+                                            .foregroundColor(server.isRunning ? Color.green : Color.red)
                                     }
                                 }
                                 
@@ -66,7 +71,7 @@ struct ContentView: View {
                                     Text(server.isRunning ? "Dừng Server" : "Khởi Động")
                                         .font(.subheadline)
                                         .fontWeight(.semibold)
-                                        .foregroundColor(.white)
+                                        .foregroundColor(Color.white)
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 8)
                                         .background(
@@ -80,16 +85,17 @@ struct ContentView: View {
                             Divider()
                                 .background(Color.white.opacity(0.1))
                             
+                            // Access URL Display
                             if server.isRunning {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text("Địa chỉ truy cập trên trình duyệt:")
                                         .font(.subheadline)
-                                        .foregroundColor(.white.opacity(0.8))
+                                        .foregroundColor(Color.white.opacity(0.8))
                                     
                                     HStack {
                                         Text(serverURLString)
                                             .font(.headline)
-                                            .foregroundColor(.cyan)
+                                            .foregroundColor(Color.cyan)
                                             .textSelection(.enabled)
                                         
                                         Spacer()
@@ -98,7 +104,7 @@ struct ContentView: View {
                                             UIPasteboard.general.string = serverURLString
                                         }) {
                                             Image(systemName: "doc.on.doc")
-                                                .foregroundColor(.gray)
+                                                .foregroundColor(Color.gray)
                                                 .padding(6)
                                                 .background(Color.white.opacity(0.05))
                                                 .cornerRadius(8)
@@ -111,7 +117,7 @@ struct ContentView: View {
                             } else {
                                 Text("Nhấn 'Khởi Động' để bắt đầu chạy máy chủ chia sẻ tệp.")
                                     .font(.subheadline)
-                                    .foregroundColor(.white.opacity(0.5))
+                                    .foregroundColor(Color.white.opacity(0.5))
                                     .multilineTextAlignment(.leading)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
@@ -124,18 +130,19 @@ struct ContentView: View {
                                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
                         )
                         
+                        // SERVER LIVE LOGS
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Label("Nhật ký hệ thống", systemImage: "terminal")
                                     .font(.headline)
-                                    .foregroundColor(.white)
+                                    .foregroundColor(Color.white)
                                 
                                 Spacer()
                                 
                                 Button(action: { server.logs.removeAll() }) {
                                     Text("Xóa log")
                                         .font(.caption)
-                                        .foregroundColor(.gray)
+                                        .foregroundColor(Color.gray)
                                 }
                             }
                             
@@ -145,15 +152,15 @@ struct ContentView: View {
                                         if server.logs.isEmpty {
                                             Text("Không có log nào...")
                                                 .font(.system(.footnote, design: .monospaced))
-                                                .foregroundColor(.white.opacity(0.3))
+                                                .foregroundColor(Color.white.opacity(0.3))
                                                 .frame(maxWidth: .infinity, alignment: .leading)
                                         } else {
-                                            ForEach(server.logs.indices, id: \.self) { index in
-                                                Text(server.logs[index])
+                                            ForEach(server.logs, id: \.self) { log in
+                                                Text(log)
                                                     .font(.system(.footnote, design: .monospaced))
-                                                    .foregroundColor(.green.opacity(0.9))
+                                                    .foregroundColor(Color.green.opacity(0.9))
                                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                                    .id(index)
+                                                    .id(log)
                                             }
                                         }
                                     }
@@ -162,10 +169,10 @@ struct ContentView: View {
                                 .frame(height: 140)
                                 .background(Color.black.opacity(0.3))
                                 .cornerRadius(12)
-                                .onChange(of: server.logs.count) { _ in
-                                    if !server.logs.isEmpty {
+                                .onChange(of: server.logs) { newLogs in
+                                    if let lastLog = newLogs.last {
                                         withAnimation {
-                                            proxy.scrollTo(server.logs.count - 1, anchor: .bottom)
+                                            proxy.scrollTo(lastLog, anchor: .bottom)
                                         }
                                     }
                                 }
@@ -179,17 +186,18 @@ struct ContentView: View {
                                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
                         )
                         
+                        // FILES LIST CARD
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Label("Tệp tin đã tải lên (\(files.count))", systemImage: "folder")
                                     .font(.headline)
-                                    .foregroundColor(.white)
+                                    .foregroundColor(Color.white)
                                 
                                 Spacer()
                                 
                                 Button(action: { refreshFiles() }) {
                                     Image(systemName: "arrow.clockwise")
-                                        .foregroundColor(.gray)
+                                        .foregroundColor(Color.gray)
                                 }
                             }
                             
@@ -197,13 +205,13 @@ struct ContentView: View {
                                 VStack(spacing: 12) {
                                     Image(systemName: "folder.badge.plus")
                                         .font(.largeTitle)
-                                        .foregroundColor(.white.opacity(0.2))
+                                        .foregroundColor(Color.white.opacity(0.2))
                                     Text("Chưa có tệp tin nào")
                                         .font(.subheadline)
-                                        .foregroundColor(.white.opacity(0.4))
+                                        .foregroundColor(Color.white.opacity(0.4))
                                     Text("Truy cập từ trình duyệt để tải file lên.")
                                         .font(.caption)
-                                        .foregroundColor(.white.opacity(0.3))
+                                        .foregroundColor(Color.white.opacity(0.3))
                                 }
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 30)
@@ -217,7 +225,7 @@ struct ContentView: View {
                                                 Text(file.name)
                                                     .font(.subheadline)
                                                     .fontWeight(.medium)
-                                                    .foregroundColor(.white)
+                                                    .foregroundColor(Color.white)
                                                     .lineLimit(1)
                                                 
                                                 HStack(spacing: 10) {
@@ -226,7 +234,7 @@ struct ContentView: View {
                                                     Text(file.date)
                                                 }
                                                 .font(.caption2)
-                                                .foregroundColor(.gray)
+                                                .foregroundColor(Color.gray)
                                             }
                                             
                                             Spacer()
@@ -236,7 +244,7 @@ struct ContentView: View {
                                                     selectedShareFile = file
                                                 }) {
                                                     Image(systemName: "square.and.arrow.up")
-                                                        .foregroundColor(.cyan)
+                                                        .foregroundColor(Color.cyan)
                                                         .padding(8)
                                                         .background(Color.white.opacity(0.05))
                                                         .cornerRadius(8)
@@ -246,7 +254,7 @@ struct ContentView: View {
                                                     deleteFile(file)
                                                 }) {
                                                     Image(systemName: "trash")
-                                                        .foregroundColor(.red)
+                                                        .foregroundColor(Color.red)
                                                         .padding(8)
                                                         .background(Color.white.opacity(0.05))
                                                         .cornerRadius(8)
@@ -271,6 +279,7 @@ struct ContentView: View {
                             RoundedRectangle(cornerRadius: 20)
                                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
                         )
+                        
                     }
                     .padding()
                 }
@@ -281,7 +290,7 @@ struct ContentView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(action: refreshIP) {
                         Image(systemName: "wifi")
-                            .foregroundColor(localIP != nil ? .green : .gray)
+                            .foregroundColor(localIP != nil ? Color.green : Color.gray)
                     }
                 }
             }
@@ -360,7 +369,12 @@ struct ContentView: View {
 // MARK: - Native Activity View for Sharing
 struct ActivityView: UIViewControllerRepresentable {
     let activityItems: [Any]
-    let applicationActivities: [UIActivity]? = nil
+    let applicationActivities: [UIActivity]?
+    
+    init(activityItems: [Any], applicationActivities: [UIActivity]? = nil) {
+        self.activityItems = activityItems
+        self.applicationActivities = applicationActivities
+    }
     
     func makeUIViewController(context: Context) -> UIActivityViewController {
         UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
