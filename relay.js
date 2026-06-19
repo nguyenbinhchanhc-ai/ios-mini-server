@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const WebSocket = require('ws');
+const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
@@ -92,6 +93,31 @@ function broadcastUpdate() {
     }
 }
 
+function getServerStatus() {
+    const memUsage = process.memoryUsage().heapUsed; // bytes
+    const memUsageMb = Math.round(memUsage / 1024 / 1024);
+    const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    
+    let status = "Ổn định";
+    let statusClass = "stable"; // stable, warning, overloaded
+    
+    if (memUsageMb > 400 || avgLat > 250) {
+        status = "Quá tải";
+        statusClass = "overloaded";
+    } else if (memUsageMb > 250 || avgLat > 120) {
+        status = "Tải cao";
+        statusClass = "warning";
+    }
+    
+    return {
+        status,
+        statusClass,
+        memoryUsage: memUsageMb,
+        memoryLimit: 512,
+        cpuLoad: Math.round(os.loadavg()[0] * 100) / 100
+    };
+}
+
 function getWSUpdatePayload() {
     const blocked = Array.from(customBlockedSet);
     const whitelist = Array.from(whitelistSet);
@@ -121,7 +147,9 @@ function getWSUpdatePayload() {
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
         groqModel: config.groqModel || "llama-3.3-70b-versatile",
-        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY
+        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
+        learnedExamples: learnedExamples,
+        serverStatus: getServerStatus()
     };
 }
 
@@ -1062,8 +1090,10 @@ app.get('/dns/config', (req, res) => {
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqModel: config.groqModel || "llama-3.1-8b-instant",
-        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY
+        groqModel: config.groqModel || "llama-3.3-70b-versatile",
+        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
+        learnedExamples: learnedExamples,
+        serverStatus: getServerStatus()
     });
 });
 

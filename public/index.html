@@ -590,6 +590,14 @@
                             <div class="stat-card-title">Độ trễ trung bình</div>
                             <div class="stat-card-val" id="dnsStatLatency">0 ms</div>
                         </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">RAM Máy Chủ</div>
+                            <div class="stat-card-val" id="dnsStatServerMemory" style="color: #60a5fa;">0 MB / 512 MB</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Trạng thái Server</div>
+                            <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
+                        </div>
                     </div>
 
                     <div class="grid">
@@ -737,6 +745,26 @@
                                     <div id="aiTestResult" style="padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); font-size: 0.8rem; color: var(--text-muted); display: none; line-height: 1.4;">
                                     </div>
                                 </div>
+                                
+                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Nhật ký AI Learning (In-Context)</h4>
+                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Các mối nguy hại AI tự học từ thực tế và đưa vào ngữ cảnh huấn luyện Llama 3.3:</p>
+                                    <div style="max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.25); border-radius: 8px; border: 1px solid var(--card-border); font-size: 0.75rem;">
+                                        <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                                            <thead>
+                                                <tr style="border-bottom: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">
+                                                    <th style="padding: 0.4rem 0.5rem; width: 30px;">#</th>
+                                                    <th style="padding: 0.4rem 0.5rem;">Tên miền đã học</th>
+                                                    <th style="padding: 0.4rem 0.5rem; width: 100px;">Hành vi</th>
+                                                    <th style="padding: 0.4rem 0.5rem; width: 85px;">Trạng thái</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="aiLearningList">
+                                                <!-- Dynamic learning rows -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -869,6 +897,25 @@
         document.getElementById('dnsStatCacheHit').innerText = (dnsConfig.stats.cacheHitRate !== undefined ? dnsConfig.stats.cacheHitRate.toFixed(1) : '0.0') + '%';
         document.getElementById('dnsStatLatency').innerText = (dnsConfig.stats.avgLatency !== undefined ? dnsConfig.stats.avgLatency.toFixed(1) : '0.0') + ' ms';
         
+        // Update Server RAM
+        document.getElementById('dnsStatServerMemory').innerText = (dnsConfig.serverStatus ? dnsConfig.serverStatus.memoryUsage : 0) + ' MB / 512 MB';
+        
+        // Update Server Health Status
+        const statusEl = document.getElementById('dnsStatServerStatus');
+        if (dnsConfig.serverStatus) {
+            statusEl.innerText = dnsConfig.serverStatus.status;
+            if (dnsConfig.serverStatus.statusClass === 'overloaded') {
+                statusEl.style.color = '#ef4444';
+            } else if (dnsConfig.serverStatus.statusClass === 'warning') {
+                statusEl.style.color = '#f59e0b';
+            } else {
+                statusEl.style.color = '#10b981';
+            }
+        } else {
+            statusEl.innerText = 'Ngoại tuyến';
+            statusEl.style.color = '#ef4444';
+        }
+
         if (!isConfigLoaded) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
@@ -881,6 +928,21 @@
         document.getElementById('groqKeyCount').innerText = keyCount;
         document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
         renderGroqKeys(dnsConfig.groqApiKeys || []);
+        
+        // Update AI Learning List
+        const learningList = document.getElementById('aiLearningList');
+        if (!dnsConfig.learnedExamples || dnsConfig.learnedExamples.length === 0) {
+            learningList.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu học động. Hoạt động khi AI tự động chặn.</td></tr>';
+        } else {
+            learningList.innerHTML = dnsConfig.learnedExamples.map((ex, i) => `
+                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+                    <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-weight: bold;">#${i + 1}</td>
+                    <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: #a78bfa; word-break: break-all;">${ex.domain}</td>
+                    <td style="padding: 0.4rem 0.5rem; color: #ef4444; font-weight: 500;">${ex.reason}</td>
+                    <td style="padding: 0.4rem 0.5rem;"><span style="color: #10b981; font-size: 0.7rem; font-weight: bold; background: rgba(16, 185, 129, 0.1); padding: 0.1rem 0.3rem; border-radius: 4px;">Đã học</span></td>
+                </tr>
+            `).reverse().join('');
+        }
         
         // Log table rows
         const logsList = document.getElementById('dnsLogsList');
