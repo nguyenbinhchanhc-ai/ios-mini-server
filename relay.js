@@ -141,7 +141,6 @@ let isQueuePaused = false;
 let queueTimeoutId = null;
 const QUEUE_DELAY_MS = 4000;
 const FALLBACK_MODELS = [
-    "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
     "gemma2-9b-it"
 ];
@@ -252,7 +251,7 @@ function getWSUpdatePayload() {
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqModel: config.groqModel || "llama-3.3-70b-versatile",
+        groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
         aiCacheCount: aiDecisionCache.size,
@@ -324,7 +323,7 @@ function loadConfig() {
                 stats: { total: 0, blocked: 0, allowed: 0 },
                 aiEnabled: false,
                 groqApiKeys: [],
-                groqModel: "llama-3.3-70b-versatile"
+                groqModel: "llama-3.1-8b-instant"
             };
             saveConfig();
         }
@@ -345,13 +344,13 @@ function loadConfig() {
             stats: { total: 0, blocked: 0, allowed: 0 },
             aiEnabled: false,
             groqApiKeys: [],
-            groqModel: "llama-3.3-70b-versatile"
+            groqModel: "llama-3.1-8b-instant"
         };
     }
     
     // Ensure all variables are fully seeded
     config.aiEnabled = config.aiEnabled || false;
-    config.groqModel = "llama-3.3-70b-versatile"; // Enforce 70B model only
+    config.groqModel = "llama-3.1-8b-instant"; // Enforce 8B model only to avoid 429 rate limits
     // Migrate legacy single key to array
     if (config.groqApiKey && !config.groqApiKeys) {
         config.groqApiKeys = [config.groqApiKey];
@@ -1296,7 +1295,7 @@ app.get('/dns/config', (req, res) => {
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqModel: config.groqModel || "llama-3.3-70b-versatile",
+        groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
         serverStatus: getServerStatus()
