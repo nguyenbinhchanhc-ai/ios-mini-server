@@ -4,9 +4,11 @@ const dgram = require('dgram');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
 const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
 const SUB_CACHE_PATH = path.join(__dirname, 'subscription_blocklist.txt');
@@ -18,6 +20,12 @@ let whitelistSet = new Set();
 let subscriptionBlockedSet = new Set();
 let isUpdatingList = false;
 let logs = [];
+
+// WebSocket client registry
+const wsClients = new Set();
+
+// AI Learned Examples (Few-Shot In-context training)
+const learnedExamples = [];
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, expiresAt }
@@ -46,6 +54,76 @@ let cacheHits = 0;
 let cacheMisses = 0;
 let totalLatency = 0;
 let latencyCount = 0;
+
+// WebSocket connection handler
+wss.on('connection', (ws) => {
+    wsClients.add(ws);
+    
+    // Send initial configuration and stats
+    try {
+        const payload = getWSUpdatePayload();
+        ws.send(JSON.stringify(payload));
+    } catch (e) {
+        console.error("Error sending initial WS state:", e);
+    }
+
+    ws.on('close', () => {
+        wsClients.delete(ws);
+    });
+    
+    ws.on('error', (err) => {
+        console.error("WS client error:", err);
+        wsClients.delete(ws);
+    });
+});
+
+function broadcastUpdate() {
+    if (wsClients.size === 0) return;
+    try {
+        const payload = getWSUpdatePayload();
+        const data = JSON.stringify(payload);
+        for (const ws of wsClients) {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(data);
+            }
+        }
+    } catch (e) {
+        console.error("Error broadcasting WS update:", e);
+    }
+}
+
+function getWSUpdatePayload() {
+    const blocked = Array.from(customBlockedSet);
+    const whitelist = Array.from(whitelistSet);
+    const subscriptions = config.subscriptionURLs || [];
+    const upstream = config.upstreamDNS || "1.1.1.1";
+    const isUpdating = isUpdatingList;
+    const stats = {
+        total: config.stats.total,
+        blocked: config.stats.blocked,
+        allowed: config.stats.allowed,
+        blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0,
+        cacheHitRate: (cacheHits + cacheMisses) > 0 ? (cacheHits / (cacheHits + cacheMisses) * 100) : 0,
+        avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
+    };
+    return {
+        type: 'update',
+        running: true,
+        blocked: blocked,
+        blockedCount: customBlockedSet.size + subscriptionBlockedSet.size,
+        whitelist: whitelist,
+        subscriptions: subscriptions,
+        upstream: upstream,
+        logs: logs,
+        stats: stats,
+        isUpdating: isUpdating,
+        aiEnabled: !!config.aiEnabled,
+        groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqApiKeysCount: (config.groqApiKeys || []).length,
+        groqModel: config.groqModel || "llama-3.3-70b-versatile",
+        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY
+    };
+}
 
 // Load config and caches
 loadConfig();
@@ -213,6 +291,8 @@ function checkCache(domain, qtype) {
 }
 
 function setCache(domain, qtype, responseBuffer, ttl) {
+    const minTtl = 60; // Enforce 60 seconds minimum cache TTL
+    const finalTtl = ttl < minTtl ? minTtl : ttl;
     const key = `${domain.toLowerCase()}_${qtype}`;
     if (dnsCache.has(key)) {
         dnsCache.delete(key);
@@ -224,7 +304,7 @@ function setCache(domain, qtype, responseBuffer, ttl) {
     }
     dnsCache.set(key, {
         responseBuffer: responseBuffer,
-        expiresAt: Date.now() + (ttl * 1000)
+        expiresAt: Date.now() + (finalTtl * 1000)
     });
 }
 
@@ -539,12 +619,33 @@ function checkDomainWithGroq(domain, apiKey, callback) {
     
     console.log(`[AI Guard] Scanning domain: ${domain} via Groq (Llama 3.3 70B)...`);
     
+    // Dynamic In-Context Learning (Few-Shot examples) to train the model on the fly
+    const baseExamples = [
+        { domain: "doubleclick.net", blocked: true, reason: "Quảng cáo" },
+        { domain: "graph.facebook.com", blocked: false, reason: "Mạng xã hội" },
+        { domain: "log.tiktokv.com", blocked: true, reason: "Theo dõi TikTok" },
+        { domain: "google-analytics.com", blocked: true, reason: "Theo dõi Google" },
+        { domain: "gateway.fe2.apple-dns.net", blocked: false, reason: "Hệ thống Apple" },
+        { domain: "techcombank-login-scam.vn", blocked: true, reason: "Giả mạo ngân hàng" },
+        { domain: "v3.tiktokcdn.com", blocked: false, reason: "CDN Video" }
+    ];
+    const allExamples = [...baseExamples, ...learnedExamples];
+    const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
+        allExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+
+    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities.\n\n" +
+                          "Rules:\n" +
+                          "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
+                          "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services (e.g. *.tiktokcdn.com, *.fbcdn.net, *.akamai.net are allowed CDNs; but log.tiktokv.com, graph.facebook.com/tr, ads.youtube.com are blocked trackers/ads).\n" +
+                          "3. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          examplesText;
+
     const postData = JSON.stringify({
         model: model,
         messages: [
             {
                 role: "system",
-                content: "You are a DNS Firewall security expert. Classify the domain name. Analyze common ad/tracker keywords (ads, track, tele, log, stat, click, pixel, doubleclick, analytics, banner, popunder, redirect, push) and subdomains. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }. Keep the reason extremely brief to reduce latency."
+                content: systemContent
             },
             {
                 role: "user",
@@ -599,7 +700,14 @@ function checkDomainWithGroq(domain, apiKey, callback) {
                             customBlockedSet.add(domain);
                             config.customBlockedDomains = Array.from(customBlockedSet);
                             saveConfig();
-                            logQuery(domain, true, "AI Guard (Auto Blocked)");
+                            
+                            // Learn from this block dynamically
+                            learnedExamples.push({ domain, blocked: true, reason: decision.reason });
+                            if (learnedExamples.length > 15) {
+                                learnedExamples.shift();
+                            }
+                            
+                            logQuery(domain, true, "AI Guard (Auto Blocked)", "blocked");
                         } else {
                             aiDecisionCache.set(domain, false);
                             console.log(`[AI Guard] Groq classified ${domain} as ALLOWED.`);
@@ -632,18 +740,26 @@ function checkDomainWithGroq(domain, apiKey, callback) {
 
 // MARK: - Logs and Stats Logging
 
-function logQuery(domain, blocked, clientIP) {
+function logQuery(domain, blocked, clientIP, source = "upstream") {
     const now = new Date();
     // Vietnam timezone (UTC+7)
     const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
     const timeStr = vnTime.toISOString().substring(11, 19); // HH:mm:ss
-    const status = blocked ? "❌ BLOCKED" : "✅ ALLOWED";
-    const msg = `[${timeStr}] [${clientIP}] ${status} - ${domain}`;
+    
+    let statusText = "✅ ALLOWED";
+    if (blocked) {
+        statusText = "❌ BLOCKED";
+    } else if (source === "cache") {
+        statusText = "⚡ CACHED";
+    }
+    
+    const msg = `[${timeStr}] [${clientIP}] ${statusText} - ${domain}`;
     
     logs.push(msg);
     if (logs.length > 100) {
         logs.shift();
     }
+    broadcastUpdate(); // Instant real-time UI updates
 }
 
 let lastSaveTimeout = null;
@@ -672,6 +788,7 @@ function updateBlocklists(callback) {
         return;
     }
     isUpdatingList = true;
+    broadcastUpdate(); // Instant real-time UI notification
     console.log("Starting blocklist subscription sync sequentially to preserve memory...");
     
     const urls = config.subscriptionURLs || [];
@@ -680,6 +797,7 @@ function updateBlocklists(callback) {
     
     if (urls.length === 0) {
         isUpdatingList = false;
+        broadcastUpdate();
         if (callback) callback();
         return;
     }
@@ -692,6 +810,7 @@ function updateBlocklists(callback) {
                 saveSubscriptionBlocklistToDisk();
             }
             console.log(`Sync completed. Total active rules: ${subscriptionBlockedSet.size}`);
+            broadcastUpdate();
             if (callback) callback();
             return;
         }
@@ -830,7 +949,8 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         
         // Log both clean and original domain for better transparency
         const logDomain = (domain !== originalDomain) ? `${domain} (${originalDomain})` : domain;
-        logQuery(logDomain, isBlockedQuery, clientIP);
+        const source = isBlockedQuery ? "blocked" : (fromCache ? "cache" : "upstream");
+        logQuery(logDomain, isBlockedQuery, clientIP, source);
         incrementStats(isBlockedQuery);
         
         callback(responseBuffer);
@@ -955,6 +1075,7 @@ app.post('/dns/block', (req, res) => {
             customBlockedSet.add(d);
             config.customBlockedDomains = Array.from(customBlockedSet);
             saveConfig();
+            broadcastUpdate();
             res.send(`Blocked ${d}`);
         } else {
             res.status(400).send("Invalid Domain");
@@ -971,6 +1092,7 @@ app.post('/dns/unblock', (req, res) => {
         customBlockedSet.delete(d);
         config.customBlockedDomains = Array.from(customBlockedSet);
         saveConfig();
+        broadcastUpdate();
         res.send(`Unblocked ${d}`);
     } else {
         res.status(400).send("Missing domain parameter");
@@ -985,6 +1107,7 @@ app.post('/dns/whitelist/add', (req, res) => {
             whitelistSet.add(d);
             config.whitelistDomains = Array.from(whitelistSet);
             saveConfig();
+            broadcastUpdate();
             res.send(`Whitelisted ${d}`);
         } else {
             res.status(400).send("Invalid Domain");
@@ -1001,6 +1124,7 @@ app.post('/dns/whitelist/remove', (req, res) => {
         whitelistSet.delete(d);
         config.whitelistDomains = Array.from(whitelistSet);
         saveConfig();
+        broadcastUpdate();
         res.send(`Removed ${d} from Whitelist`);
     } else {
         res.status(400).send("Missing domain parameter");
@@ -1014,6 +1138,7 @@ app.post('/dns/sub/add', (req, res) => {
         if (trimmed && !config.subscriptionURLs.includes(trimmed)) {
             config.subscriptionURLs.push(trimmed);
             saveConfig();
+            broadcastUpdate();
             res.send("Subscription added");
         } else {
             res.status(400).send("Invalid or duplicate URL");
@@ -1029,6 +1154,7 @@ app.post('/dns/sub/remove', (req, res) => {
         const trimmed = url.trim();
         config.subscriptionURLs = config.subscriptionURLs.filter(u => u !== trimmed);
         saveConfig();
+        broadcastUpdate();
         res.send("Subscription removed");
     } else {
         res.status(400).send("Missing url parameter");
@@ -1049,6 +1175,7 @@ app.post('/dns/upstream', (req, res) => {
         if (ipRegEx.test(trimmed)) {
             config.upstreamDNS = trimmed;
             saveConfig();
+            broadcastUpdate();
             res.send("Upstream updated");
         } else {
             res.status(400).send("Invalid IP format");
@@ -1066,6 +1193,7 @@ app.post('/dns/groq', (req, res) => {
     config.groqModel = model;
     
     saveConfig();
+    broadcastUpdate();
     res.send("Groq configuration updated");
 });
 
@@ -1081,6 +1209,7 @@ app.post('/dns/groq/keys/add', (req, res) => {
     }
     config.groqApiKeys.push(trimmedKey);
     saveConfig();
+    broadcastUpdate();
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
@@ -1094,6 +1223,7 @@ app.post('/dns/groq/keys/remove', (req, res) => {
     }
     config.groqApiKeys.splice(index, 1);
     saveConfig();
+    broadcastUpdate();
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
@@ -1108,12 +1238,32 @@ app.get('/dns/groq/test', (req, res) => {
     }
     
     const model = "llama-3.3-70b-versatile";
+    const baseExamples = [
+        { domain: "doubleclick.net", blocked: true, reason: "Quảng cáo" },
+        { domain: "graph.facebook.com", blocked: false, reason: "Mạng xã hội" },
+        { domain: "log.tiktokv.com", blocked: true, reason: "Theo dõi TikTok" },
+        { domain: "google-analytics.com", blocked: true, reason: "Theo dõi Google" },
+        { domain: "gateway.fe2.apple-dns.net", blocked: false, reason: "Hệ thống Apple" },
+        { domain: "techcombank-login-scam.vn", blocked: true, reason: "Giả mạo ngân hàng" },
+        { domain: "v3.tiktokcdn.com", blocked: false, reason: "CDN Video" }
+    ];
+    const allExamples = [...baseExamples, ...learnedExamples];
+    const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
+        allExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+
+    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities.\n\n" +
+                          "Rules:\n" +
+                          "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
+                          "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services (e.g. *.tiktokcdn.com, *.fbcdn.net, *.akamai.net are allowed CDNs; but log.tiktokv.com, graph.facebook.com/tr, ads.youtube.com are blocked trackers/ads).\n" +
+                          "3. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          examplesText;
+
     const postData = JSON.stringify({
         model: model,
         messages: [
             {
                 role: "system",
-                content: "You are a DNS Firewall security expert. Classify the domain name. Analyze common ad/tracker keywords (ads, track, tele, log, stat, click, pixel, doubleclick, analytics, banner, popunder, redirect, push) and subdomains. Determine if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities. You must respond in strict JSON format: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }. Keep the reason extremely brief to reduce latency."
+                content: systemContent
             },
             {
                 role: "user",
@@ -1173,6 +1323,7 @@ app.post('/dns/stats/reset', (req, res) => {
     totalLatency = 0;
     latencyCount = 0;
     saveConfig();
+    broadcastUpdate();
     res.send("Stats reset");
 });
 

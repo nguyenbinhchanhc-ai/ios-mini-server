@@ -537,6 +537,10 @@
                     background: rgba(239, 68, 68, 0.1);
                     color: var(--danger);
                 }
+                .dns-status-badge.cached {
+                    background: rgba(167, 139, 250, 0.1);
+                    color: #a78bfa;
+                }
             </style>
         </head>
         <body>
@@ -811,14 +815,21 @@
 
     function parseDNSLog(line) {
         // Expect format: [HH:mm:ss] [ClientIP] Status - Domain
-        const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(ALLOW.*?|BLOCKED.*?|✅ ALLOWED|❌ BLOCKED)\s+-\s+(.*?)$/);
+        const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(.*?)\s+-\s+(.*?)$/);
         if (match) {
             const time = match[1];
             const ip = match[2];
             const status = match[3];
             const domain = match[4];
-            const isBlocked = status.includes('BLOCKED') || status.includes('❌');
-            return { time, ip, domain, isBlocked, textStatus: isBlocked ? 'BLOCKED' : 'ALLOWED' };
+            
+            let textStatus = 'ALLOWED';
+            if (status.includes('BLOCKED') || status.includes('❌')) {
+                textStatus = 'BLOCKED';
+            } else if (status.includes('CACHED') || status.includes('⚡')) {
+                textStatus = 'CACHED';
+            }
+            const isBlocked = textStatus === 'BLOCKED';
+            return { time, ip, domain, isBlocked, textStatus };
         }
         
         // Fallback for general logs: [HH:mm:ss] message
@@ -861,7 +872,7 @@
         if (!isConfigLoaded) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
-            document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.1-8b-instant";
+            document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.3-70b-versatile";
             isConfigLoaded = true;
         }
         
@@ -878,7 +889,9 @@
         } else {
             logsList.innerHTML = dnsConfig.logs.map(logLine => {
                 const parsed = parseDNSLog(logLine);
-                const badgeClass = parsed.textStatus === 'BLOCKED' ? 'blocked' : (parsed.textStatus === 'ALLOWED' ? 'allowed' : '');
+                const badgeClass = parsed.textStatus === 'BLOCKED' ? 'blocked' : 
+                                   (parsed.textStatus === 'CACHED' ? 'cached' : 
+                                   (parsed.textStatus === 'ALLOWED' ? 'allowed' : ''));
                 return `
                     <tr>
                         <td>${parsed.time}</td>
@@ -1211,10 +1224,49 @@
     // Initialize UI on load
     fetchDNSConfig();
 
-    // Auto-refresh config/logs every 2 seconds (real-time tracking)
+    // WebSocket connection for real-time streaming updates
+    let socket;
+    function connectWS() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}`;
+        socket = new WebSocket(wsUrl);
+        
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.type === 'update') {
+                    dnsConfig = data;
+                    updateDNSUI();
+                }
+            } catch (e) {
+                console.error('Lỗi khi phân tích WS message:', e);
+            }
+        };
+        
+        socket.onclose = () => {
+            console.log('WS connection closed. Reconnecting in 3s...');
+            setTimeout(connectWS, 3000);
+        };
+        
+        socket.onerror = (err) => {
+            console.error('WS error:', err);
+            socket.close();
+        };
+    }
+    
+    // Connect WebSocket
+    try {
+        connectWS();
+    } catch (e) {
+        console.error('Failed to init WS:', e);
+    }
+
+    // Auto-refresh config/logs every 3 seconds only if WS is not active
     setInterval(() => {
-        fetchDNSConfig();
-    }, 2000);
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            fetchDNSConfig();
+        }
+    }, 3000);
 </script>
 </body>
 </html>
