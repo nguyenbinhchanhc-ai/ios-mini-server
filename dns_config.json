@@ -1,0 +1,20 @@
+{
+  "customBlockedDomains": [
+    "doubleclick.net",
+    "pagead2.googlesyndication.com",
+    "adservice.google.com",
+    "ads.youtube.com",
+    "telemetry.apple.com",
+    "app-measurement.com"
+  ],
+  "whitelistDomains": [],
+  "subscriptionURLs": [
+    "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+  ],
+  "upstreamDNS": "1.1.1.1",
+  "stats": {
+    "total": 0,
+    "blocked": 0,
+    "allowed": 0
+  }
+}
