@@ -626,7 +626,9 @@ function checkDomainWithGroq(domain, apiKey, callback) {
 
 function logQuery(domain, blocked, clientIP) {
     const now = new Date();
-    const timeStr = now.toTimeString().split(' ')[0]; // HH:mm:ss
+    // Vietnam timezone (UTC+7)
+    const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+    const timeStr = vnTime.toISOString().substring(11, 19); // HH:mm:ss
     const status = blocked ? "❌ BLOCKED" : "✅ ALLOWED";
     const msg = `[${timeStr}] [${clientIP}] ${status} - ${domain}`;
     
@@ -803,8 +805,8 @@ function handleDoH(queryData, clientIP, callback) {
         
         callback(responseBuffer);
         
-        // Trigger background AI Guard check for new allowed domains
-        if (!isBlockedQuery && !fromCache && config.aiEnabled && config.groqApiKey) {
+        // Trigger background AI Guard check for ALL domains (blocked or not, cached or not)
+        if (config.aiEnabled && config.groqApiKeys && config.groqApiKeys.length > 0) {
             enqueueGroqCheck(domain);
         }
     };
