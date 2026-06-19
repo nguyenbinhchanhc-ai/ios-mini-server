@@ -137,6 +137,9 @@ const groqQueue = [];
 let activeGroqRequests = 0;
 const GROQ_CONCURRENCY_PER_KEY = 5;
 let groqKeyIndex = 0;
+let isQueuePaused = false;
+let queueTimeoutId = null;
+const QUEUE_DELAY_MS = 1500;
 
 // Shared Upstream UDP Client Sockets
 let upstreamSocket = null;
@@ -710,12 +713,57 @@ function getMaxConcurrentGroq() {
     return keys.length * GROQ_CONCURRENCY_PER_KEY;
 }
 
+// Famous safe networks/systems that do not need AI scanning to conserve tokens
+const SAFE_DOMAINS_SUFFIXES = [
+    ".google.com", ".googleapis.com", ".gstatic.com", ".googleusercontent.com",
+    ".apple.com", ".icloud.com", ".mzstatic.com", ".apple-dns.net",
+    ".microsoft.com", ".windows.com", ".live.com", ".office.com", ".msn.com",
+    ".cloudflare.com", ".cloudflare-dns.com",
+    ".facebook.com", ".fbcdn.net", ".instagram.com",
+    ".youtube.com", ".ytimg.com", ".ggpht.com",
+    ".netflix.com", ".nflximg.net", ".nflxvideo.net",
+    ".tiktok.com", ".tiktokcdn.com", ".byteoversea.com",
+    ".github.com", ".githubusercontent.com",
+    ".wikipedia.org", ".wikimedia.org",
+    ".zalo.me", ".zaloapp.com", ".zalopay.vn",
+    ".momo.vn"
+];
+
+function isSafeDomain(domain) {
+    const d = domain.trim().toLowerCase();
+    const exactMatches = [
+        "google.com", "apple.com", "microsoft.com", "cloudflare.com",
+        "facebook.com", "youtube.com", "netflix.com", "tiktok.com",
+        "github.com", "wikipedia.org", "zalo.me", "momo.vn"
+    ];
+    if (exactMatches.includes(d)) return true;
+    
+    for (const suffix of SAFE_DOMAINS_SUFFIXES) {
+        if (d.endsWith(suffix)) return true;
+    }
+    return false;
+}
+
 function enqueueGroqCheck(domain) {
     const d = domain.trim().toLowerCase();
     if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
     if (d.endsWith('.local') || d.endsWith('.localhost')) return;
     if (aiDecisionCache.has(d)) return;
     if (whitelistSet.has(d)) return;
+    
+    // 1. Skip if already blocked by our blocklists
+    if (shouldBlock(d)) {
+        aiDecisionCache.set(d, true);
+        saveAICache();
+        return;
+    }
+    
+    // 2. Skip if it is a well-known safe domain
+    if (isSafeDomain(d)) {
+        aiDecisionCache.set(d, false);
+        saveAICache();
+        return;
+    }
     
     if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
     
@@ -727,17 +775,27 @@ function enqueueGroqCheck(domain) {
 }
 
 function processGroqQueue() {
+    if (isQueuePaused) return;
+    
     const maxConcurrent = getMaxConcurrentGroq();
-    while (activeGroqRequests < maxConcurrent && groqQueue.length > 0) {
-        const domain = groqQueue.shift();
-        activeGroqRequests++;
-        
-        const apiKey = getNextGroqKey();
-        checkDomainWithGroq(domain, apiKey, () => {
-            activeGroqRequests--;
-            processGroqQueue();
-        });
-    }
+    if (activeGroqRequests >= maxConcurrent || groqQueue.length === 0) return;
+    
+    if (queueTimeoutId) return;
+    
+    const domain = groqQueue.shift();
+    activeGroqRequests++;
+    
+    const apiKey = getNextGroqKey();
+    checkDomainWithGroq(domain, apiKey, () => {
+        activeGroqRequests--;
+        processGroqQueue();
+    });
+    
+    // Schedule the next check after QUEUE_DELAY_MS to space out queries sequentially
+    queueTimeoutId = setTimeout(() => {
+        queueTimeoutId = null;
+        processGroqQueue();
+    }, QUEUE_DELAY_MS);
 }
 
 function checkDomainWithGroq(domain, apiKey, callback) {
@@ -750,8 +808,10 @@ function checkDomainWithGroq(domain, apiKey, callback) {
     
     console.log(`[AI Guard] Scanning domain: ${domain} via Groq (Llama 3.3 70B)...`);
     
-    // Dynamic In-Context Learning (Few-Shot examples) to train the model on the fly
-    const recentExamples = learnedExamples.slice(-20);
+    // Select exactly 6 dynamic examples (3 blocked, 3 allowed) to keep prompt size small (~350 tokens) and prevent 429 TPM exhaustion
+    const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-3);
+    const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-3);
+    const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
 
@@ -807,8 +867,26 @@ function checkDomainWithGroq(domain, apiKey, callback) {
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
-                        console.error(`[AI Guard] Groq returned status ${res.statusCode}`);
-                        aiDecisionCache.delete(domain);
+                        if (res.statusCode === 429) {
+                            console.warn(`[AI Guard] Rate limit hit (429) for ${domain}. Pausing AI queue for 20s...`);
+                            isQueuePaused = true;
+                            // Re-insert at the beginning of the queue if not already there
+                            if (!groqQueue.includes(domain)) {
+                                groqQueue.unshift(domain);
+                            }
+                            aiDecisionCache.delete(domain);
+                            
+                            if (queueTimeoutId) clearTimeout(queueTimeoutId);
+                            queueTimeoutId = setTimeout(() => {
+                                isQueuePaused = false;
+                                queueTimeoutId = null;
+                                console.log("[AI Guard] Resuming AI queue after rate limit cooldown.");
+                                processGroqQueue();
+                            }, 20000); // 20 seconds cooldown
+                        } else {
+                            console.error(`[AI Guard] Groq returned status ${res.statusCode}`);
+                            aiDecisionCache.delete(domain);
+                        }
                         done();
                         return;
                     }
@@ -1383,7 +1461,10 @@ app.get('/dns/groq/test', (req, res) => {
     }
     
     const model = "llama-3.3-70b-versatile";
-    const recentExamples = learnedExamples.slice(-20);
+    // Select exactly 6 dynamic examples (3 blocked, 3 allowed) to keep prompt size small (~350 tokens) and prevent 429 TPM exhaustion
+    const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-3);
+    const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-3);
+    const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
 
