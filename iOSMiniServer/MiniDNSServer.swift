@@ -3,11 +3,22 @@ import Network
 import Combine
 
 /// A lightweight, asynchronous UDP DNS Server listening on port 53.
-/// It intercepts DNS queries, blocks ad domains by returning 0.0.0.0, and forwards allowed queries to 1.1.1.1.
+/// It intercepts DNS queries, blocks ad domains by returning 0.0.0.0, and forwards allowed queries to the upstream DNS.
 class MiniDNSServer: ObservableObject {
     @Published var isRunning = false
     @Published var logs: [String] = []
     @Published var blockedCount = 0
+    
+    // Stats
+    @Published var totalQueries = 0
+    @Published var blockedQueries = 0
+    @Published var allowedQueries = 0
+    
+    // Subscriptions, Whitelist and Upstream DNS settings
+    @Published var isUpdatingList = false
+    @Published var subscriptionURLs: [String] = []
+    @Published var whitelistDomains: Set<String> = []
+    @Published var upstreamDNS: String = "1.1.1.1"
     
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.antigravity.dnsserver.queue", qos: .userInitiated)
@@ -103,7 +114,14 @@ class MiniDNSServer: ObservableObject {
         // Check blocklist (exact match or subdomain matches)
         let isBlocked = shouldBlock(domain: domain)
         
-        logQuery(domain: domain, blocked: isBlocked)
+        // Extract client IP address
+        var clientIP = "Unknown"
+        if case .hostPort(let host, _) = connection.endpoint {
+            clientIP = host.name
+        }
+        
+        logQuery(domain: domain, blocked: isBlocked, clientIP: clientIP)
+        incrementStats(blocked: isBlocked)
         
         if isBlocked {
             // Build response pointing to 0.0.0.0
@@ -112,7 +130,7 @@ class MiniDNSServer: ObservableObject {
                 connection.cancel()
             })
         } else {
-            // Forward to upstream DNS (1.1.1.1)
+            // Forward to upstream DNS
             forwardToUpstream(queryData: data) { [weak self] responseData in
                 if let response = responseData {
                     connection.send(content: response, completion: .contentProcessed { _ in
@@ -128,7 +146,17 @@ class MiniDNSServer: ObservableObject {
     private func shouldBlock(domain: String) -> Bool {
         let lowercaseDomain = domain.lowercased()
         
-        // Exact match
+        // Whitelist checks (exact or subdomain)
+        if whitelistDomains.contains(lowercaseDomain) {
+            return false
+        }
+        for whitelisted in whitelistDomains {
+            if lowercaseDomain.hasSuffix("." + whitelisted) {
+                return false
+            }
+        }
+        
+        // Exact match in blocklist
         if blockedDomains.contains(lowercaseDomain) {
             return true
         }
@@ -144,7 +172,7 @@ class MiniDNSServer: ObservableObject {
     }
     
     private func forwardToUpstream(queryData: Data, completion: @escaping (Data?) -> Void) {
-        let endpoint = NWEndpoint.hostPort(host: "1.1.1.1", port: 53)
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(self.upstreamDNS), port: 53)
         let connection = NWConnection(to: endpoint, using: .udp)
         
         connection.stateUpdateHandler = { state in
@@ -262,6 +290,133 @@ class MiniDNSServer: ObservableObject {
         log("Bỏ chặn tên miền: \(d)")
     }
     
+    func whitelist(domain: String) {
+        let d = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !d.isEmpty else { return }
+        whitelistDomains.insert(d)
+        saveConfig()
+        log("Thêm vào danh sách trắng: \(d)")
+    }
+    
+    func unwhitelist(domain: String) {
+        let d = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        whitelistDomains.remove(d)
+        saveConfig()
+        log("Bỏ chặn danh sách trắng: \(d)")
+    }
+    
+    func addSubscription(url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let _ = URL(string: trimmed) else { return }
+        if !subscriptionURLs.contains(trimmed) {
+            subscriptionURLs.append(trimmed)
+            saveConfig()
+            log("Đã thêm nguồn bộ lọc: \(trimmed)")
+        }
+    }
+    
+    func removeSubscription(url: String) {
+        if let idx = subscriptionURLs.firstIndex(of: url) {
+            subscriptionURLs.remove(at: idx)
+            saveConfig()
+            log("Đã xóa nguồn bộ lọc: \(url)")
+        }
+    }
+    
+    func setUpstream(ip: String) {
+        let trimmed = ip.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ipRegEx = "^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$"
+        let ipTest = NSPredicate(format:"SELF MATCHES %@", ipRegEx)
+        if ipTest.evaluate(with: trimmed) {
+            self.upstreamDNS = trimmed
+            saveConfig()
+            log("Đã đổi DNS thượng nguồn thành: \(trimmed)")
+        } else {
+            log("IP DNS thượng nguồn không hợp lệ: \(trimmed)")
+        }
+    }
+    
+    func updateBlocklists() {
+        guard !isUpdatingList else { return }
+        isUpdatingList = true
+        log("Bắt đầu cập nhật danh sách chặn từ các nguồn...")
+        
+        let urls = self.subscriptionURLs
+        DispatchQueue.global(qos: .background).async {
+            var newBlocked = Set<String>()
+            let group = DispatchGroup()
+            
+            for urlString in urls {
+                guard let url = URL(string: urlString) else { continue }
+                group.enter()
+                
+                let task = URLSession.shared.dataTask(with: url) { data, response, error in
+                    defer { group.leave() }
+                    
+                    if let error = error {
+                        self.log("Lỗi tải \(urlString): \(error.localizedDescription)")
+                        return
+                    }
+                    
+                    guard let data = data, let content = String(data: data, encoding: .utf8) else {
+                        self.log("Lỗi đọc dữ liệu từ \(urlString)")
+                        return
+                    }
+                    
+                    let lines = content.components(separatedBy: .newlines)
+                    var parsedCount = 0
+                    
+                    for line in lines {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("//") {
+                            continue
+                        }
+                        
+                        let parts = trimmed.split(separator: " ").map { String($0) }
+                        if parts.count >= 2 {
+                            let ip = parts[0]
+                            let domain = parts[1].lowercased()
+                            if (ip == "127.0.0.1" || ip == "0.0.0.0") && self.isValidDomain(domain) {
+                                newBlocked.insert(domain)
+                                parsedCount += 1
+                            }
+                        } else if parts.count == 1 {
+                            var domain = parts[0].lowercased()
+                            if domain.hasPrefix("||") && domain.hasSuffix("^") {
+                                domain = String(domain.dropFirst(2).dropLast())
+                            }
+                            if self.isValidDomain(domain) {
+                                newBlocked.insert(domain)
+                                parsedCount += 1
+                            }
+                        }
+                    }
+                    self.log("Tải thành công \(urlString): \(parsedCount) tên miền")
+                }
+                task.resume()
+            }
+            
+            group.wait()
+            
+            DispatchQueue.main.async {
+                if !newBlocked.isEmpty {
+                    self.blockedDomains = newBlocked
+                    self.saveConfig()
+                    self.log("Cập nhật thành công! Tổng số tên miền chặn: \(self.blockedDomains.count)")
+                } else {
+                    self.log("Không có tên miền mới nào được tải về.")
+                }
+                self.isUpdatingList = false
+            }
+        }
+    }
+    
+    private func isValidDomain(_ domain: String) -> Bool {
+        let domainRegEx = "^[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,63}$"
+        let domainTest = NSPredicate(format:"SELF MATCHES %@", domainRegEx)
+        return domainTest.evaluate(with: domain)
+    }
+    
     func loadConfig() {
         let saved = UserDefaults.standard.stringArray(forKey: "BlockedDomains") ?? [
             "doubleclick.net",
@@ -272,6 +427,20 @@ class MiniDNSServer: ObservableObject {
             "app-measurement.com"
         ]
         self.blockedDomains = Set(saved)
+        
+        let savedWhitelist = UserDefaults.standard.stringArray(forKey: "WhitelistDomains") ?? []
+        self.whitelistDomains = Set(savedWhitelist)
+        
+        self.subscriptionURLs = UserDefaults.standard.stringArray(forKey: "SubscriptionURLs") ?? [
+            "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+        ]
+        
+        self.upstreamDNS = UserDefaults.standard.string(forKey: "UpstreamDNS") ?? "1.1.1.1"
+        
+        self.totalQueries = UserDefaults.standard.integer(forKey: "DNSTotalQueries")
+        self.blockedQueries = UserDefaults.standard.integer(forKey: "DNSBlockedQueries")
+        self.allowedQueries = UserDefaults.standard.integer(forKey: "DNSAllowedQueries")
+        
         DispatchQueue.main.async {
             self.blockedCount = self.blockedDomains.count
         }
@@ -279,14 +448,54 @@ class MiniDNSServer: ObservableObject {
     
     func saveConfig() {
         UserDefaults.standard.set(Array(blockedDomains), forKey: "BlockedDomains")
+        UserDefaults.standard.set(Array(whitelistDomains), forKey: "WhitelistDomains")
+        UserDefaults.standard.set(subscriptionURLs, forKey: "SubscriptionURLs")
+        UserDefaults.standard.set(upstreamDNS, forKey: "UpstreamDNS")
+        
+        UserDefaults.standard.set(totalQueries, forKey: "DNSTotalQueries")
+        UserDefaults.standard.set(blockedQueries, forKey: "DNSBlockedQueries")
+        UserDefaults.standard.set(allowedQueries, forKey: "DNSAllowedQueries")
+        
         DispatchQueue.main.async {
             self.blockedCount = self.blockedDomains.count
         }
     }
     
+    func incrementStats(blocked: Bool) {
+        totalQueries += 1
+        if blocked {
+            blockedQueries += 1
+        } else {
+            allowedQueries += 1
+        }
+        
+        UserDefaults.standard.set(totalQueries, forKey: "DNSTotalQueries")
+        UserDefaults.standard.set(blockedQueries, forKey: "DNSBlockedQueries")
+        UserDefaults.standard.set(allowedQueries, forKey: "DNSAllowedQueries")
+        
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+        }
+    }
+    
+    func resetStats() {
+        totalQueries = 0
+        blockedQueries = 0
+        allowedQueries = 0
+        
+        UserDefaults.standard.set(0, forKey: "DNSTotalQueries")
+        UserDefaults.standard.set(0, forKey: "DNSBlockedQueries")
+        UserDefaults.standard.set(0, forKey: "DNSAllowedQueries")
+        
+        log("Đã lập lại chỉ số thống kê DNS.")
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+        }
+    }
+    
     // MARK: - Logs
     
-    private func log(_ message: String) {
+    func log(_ message: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         let timeStr = formatter.string(from: Date())
@@ -300,12 +509,12 @@ class MiniDNSServer: ObservableObject {
         }
     }
     
-    private func logQuery(domain: String, blocked: Bool) {
+    private func logQuery(domain: String, blocked: Bool, clientIP: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         let timeStr = formatter.string(from: Date())
         let status = blocked ? "❌ BLOCKED" : "✅ ALLOWED"
-        let msg = "[\(timeStr)] \(status) - \(domain)"
+        let msg = "[\(timeStr)] [\(clientIP)] \(status) - \(domain)"
         
         DispatchQueue.main.async {
             self.logs.append(msg)

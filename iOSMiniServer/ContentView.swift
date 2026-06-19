@@ -17,6 +17,7 @@ struct ContentView: View {
     @State private var files: [FileItem] = []
     @State private var selectedShareFile: FileItem? = nil
     @State private var relayURLString: String = "https://ios-mini-server.onrender.com/"
+    @State private var upstreamText: String = "1.1.1.1"
     
     init() {
         let dns = MiniDNSServer()
@@ -68,6 +69,7 @@ struct ContentView: View {
             .onAppear {
                 refreshIP()
                 refreshFiles()
+                upstreamText = dnsServer.upstreamDNS
             }
             .onReceive(NotificationCenter.default.publisher(for: .fileListDidChange)) { _ in
                 refreshFiles()
@@ -283,7 +285,7 @@ struct ContentView: View {
         VStack(spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Trình Chặn Quảng Cáo DNS (Pi-hole)")
+                    Text("Trình Chặn Quảng Cáo DNS (Mini AdGuard)")
                         .font(.caption)
                         .foregroundColor(Color.gray)
                     
@@ -325,6 +327,57 @@ struct ContentView: View {
                 }
             }
             
+            // Stats Grid
+            HStack(spacing: 10) {
+                VStack(alignment: .center, spacing: 4) {
+                    Text("TRUY VẤN")
+                        .font(.system(size: 9))
+                        .fontWeight(.bold)
+                        .foregroundColor(Color.gray)
+                    Text("\(dnsServer.totalQueries)")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundColor(Color.white)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.04), lineWidth: 1))
+                
+                VStack(alignment: .center, spacing: 4) {
+                    Text("ĐÃ CHẶN")
+                        .font(.system(size: 9))
+                        .fontWeight(.bold)
+                        .foregroundColor(Color.gray)
+                    Text("\(dnsServer.blockedQueries)")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundColor(Color.red)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.04), lineWidth: 1))
+                
+                VStack(alignment: .center, spacing: 4) {
+                    Text("BỘ LỌC")
+                        .font(.system(size: 9))
+                        .fontWeight(.bold)
+                        .foregroundColor(Color.gray)
+                    Text("\(dnsServer.blockedCount)")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundColor(Color.purple)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.04), lineWidth: 1))
+            }
+            
             if dnsServer.isRunning {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Địa chỉ DNS trên thiết bị khác:")
@@ -353,16 +406,70 @@ struct ContentView: View {
                     .padding(10)
                     .background(Color.black.opacity(0.2))
                     .cornerRadius(10)
+                }
+            }
+            
+            // Upstream & Sync Actions
+            VStack(spacing: 12) {
+                HStack(spacing: 8) {
+                    TextField("Upstream DNS (e.g. 1.1.1.1)", text: $upstreamText)
+                        .textFieldStyle(PlainTextFieldStyle())
+                        .font(.footnote)
+                        .foregroundColor(Color.white)
+                        .padding(10)
+                        .background(Color.white.opacity(0.05))
+                        .cornerRadius(10)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
                     
-                    HStack {
-                        Text("Số lượng chặn:")
+                    Button(action: {
+                        dnsServer.setUpstream(ip: upstreamText)
+                    }) {
+                        Text("Lưu DNS")
                             .font(.footnote)
-                            .foregroundColor(Color.gray)
-                        Spacer()
-                        Text("\(dnsServer.blockedCount) tên miền")
+                            .fontWeight(.semibold)
+                            .foregroundColor(Color.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.blue)
+                            .cornerRadius(10)
+                    }
+                }
+                
+                HStack(spacing: 8) {
+                    Button(action: {
+                        dnsServer.updateBlocklists()
+                    }) {
+                        HStack {
+                            if dnsServer.isUpdatingList {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    .scaleEffect(0.8)
+                                    .padding(.trailing, 4)
+                            }
+                            Text(dnsServer.isUpdatingList ? "Đang đồng bộ..." : "Đồng bộ danh sách chặn")
+                                .font(.footnote)
+                                .fontWeight(.semibold)
+                        }
+                        .foregroundColor(Color.white)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity)
+                        .background(Color.purple.opacity(dnsServer.isUpdatingList ? 0.5 : 0.8))
+                        .cornerRadius(10)
+                    }
+                    .disabled(dnsServer.isUpdatingList)
+                    
+                    Button(action: {
+                        dnsServer.resetStats()
+                    }) {
+                        Text("Reset Stats")
                             .font(.footnote)
-                            .fontWeight(.bold)
-                            .foregroundColor(Color.purple)
+                            .fontWeight(.semibold)
+                            .foregroundColor(Color.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(Color.white.opacity(0.1))
+                            .cornerRadius(10)
                     }
                 }
             }
@@ -397,7 +504,7 @@ struct ContentView: View {
                             } else {
                                 ForEach(dnsServer.logs, id: \.self) { log in
                                     Text(log)
-                                        .font(.system(.caption, design: .monospaced))
+                                        .font(.system(size: 11, weight: .regular, design: .monospaced))
                                         .foregroundColor(log.contains("❌") ? Color.red.opacity(0.9) : Color.green.opacity(0.9))
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .id(log)
@@ -406,7 +513,7 @@ struct ContentView: View {
                         }
                         .padding(10)
                     }
-                    .frame(height: 120)
+                    .frame(height: 140)
                     .background(Color.black.opacity(0.3))
                     .cornerRadius(12)
                     .onChange(of: dnsServer.logs) { newLogs in

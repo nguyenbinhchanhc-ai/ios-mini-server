@@ -167,11 +167,26 @@ class MiniHTTPServer: ObservableObject {
         } else if method == "GET" && path == "/dns/config" {
             let running = dnsServer?.isRunning ?? false
             let blocked = Array(dnsServer?.blockedDomains ?? [])
+            let whitelist = Array(dnsServer?.whitelistDomains ?? [])
+            let subscriptions = dnsServer?.subscriptionURLs ?? []
+            let upstream = dnsServer?.upstreamDNS ?? "1.1.1.1"
             let logs = dnsServer?.logs ?? []
+            let isUpdating = dnsServer?.isUpdatingList ?? false
+            let stats: [String: Any] = [
+                "total": dnsServer?.totalQueries ?? 0,
+                "blocked": dnsServer?.blockedQueries ?? 0,
+                "allowed": dnsServer?.allowedQueries ?? 0,
+                "blockedPercent": (dnsServer?.totalQueries ?? 0) > 0 ? (Double(dnsServer?.blockedQueries ?? 0) / Double(dnsServer?.totalQueries ?? 1) * 100.0) : 0.0
+            ]
             let responseObj: [String: Any] = [
                 "running": running,
                 "blocked": blocked,
-                "logs": logs
+                "whitelist": whitelist,
+                "subscriptions": subscriptions,
+                "upstream": upstream,
+                "logs": logs,
+                "stats": stats,
+                "isUpdating": isUpdating
             ]
             if let jsonData = try? JSONSerialization.data(withJSONObject: responseObj, options: []) {
                 sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "application/json", body: jsonData)
@@ -194,6 +209,52 @@ class MiniHTTPServer: ObservableObject {
             } else {
                 sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'domain' query".data(using: .utf8)!)
             }
+        } else if method == "POST" && path == "/dns/whitelist/add" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let domain = queryItems.first(where: { $0.name == "domain" })?.value {
+                dnsServer?.whitelist(domain: domain)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Whitelisted \(domain)".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'domain' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/whitelist/remove" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let domain = queryItems.first(where: { $0.name == "domain" })?.value {
+                dnsServer?.unwhitelist(domain: domain)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Unwhitelisted \(domain)".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'domain' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/sub/add" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let url = queryItems.first(where: { $0.name == "url" })?.value {
+                dnsServer?.addSubscription(url: url)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Added subscription".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'url' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/sub/remove" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let url = queryItems.first(where: { $0.name == "url" })?.value {
+                dnsServer?.removeSubscription(url: url)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Removed subscription".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'url' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/sub/refresh" {
+            dnsServer?.updateBlocklists()
+            sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Refreshed subscriptions".data(using: .utf8)!)
+        } else if method == "POST" && path == "/dns/upstream" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let ip = queryItems.first(where: { $0.name == "ip" })?.value {
+                dnsServer?.setUpstream(ip: ip)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Updated upstream DNS".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'ip' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/stats/reset" {
+            dnsServer?.resetStats()
+            sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Reset stats".data(using: .utf8)!)
         } else if method == "POST" && path == "/dns/toggle" {
             if let dns = dnsServer {
                 if dns.isRunning {
@@ -246,11 +307,26 @@ class MiniHTTPServer: ObservableObject {
         } else if method == "GET" && path == "/dns/config" {
             let running = dnsServer?.isRunning ?? false
             let blocked = Array(dnsServer?.blockedDomains ?? [])
+            let whitelist = Array(dnsServer?.whitelistDomains ?? [])
+            let subscriptions = dnsServer?.subscriptionURLs ?? []
+            let upstream = dnsServer?.upstreamDNS ?? "1.1.1.1"
             let logs = dnsServer?.logs ?? []
+            let isUpdating = dnsServer?.isUpdatingList ?? false
+            let stats: [String: Any] = [
+                "total": dnsServer?.totalQueries ?? 0,
+                "blocked": dnsServer?.blockedQueries ?? 0,
+                "allowed": dnsServer?.allowedQueries ?? 0,
+                "blockedPercent": (dnsServer?.totalQueries ?? 0) > 0 ? (Double(dnsServer?.blockedQueries ?? 0) / Double(dnsServer?.totalQueries ?? 1) * 100.0) : 0.0
+            ]
             let responseObj: [String: Any] = [
                 "running": running,
                 "blocked": blocked,
-                "logs": logs
+                "whitelist": whitelist,
+                "subscriptions": subscriptions,
+                "upstream": upstream,
+                "logs": logs,
+                "stats": stats,
+                "isUpdating": isUpdating
             ]
             if let jsonData = try? JSONSerialization.data(withJSONObject: responseObj, options: []) {
                 completion(200, "application/json", jsonData, [:])
@@ -273,6 +349,52 @@ class MiniHTTPServer: ObservableObject {
             } else {
                 completion(400, "text/plain", "Missing domain".data(using: .utf8)!, [:])
             }
+        } else if method == "POST" && path == "/dns/whitelist/add" {
+            let queryParams = parseQuery(query)
+            if let domain = queryParams["domain"] {
+                dnsServer?.whitelist(domain: domain)
+                completion(200, "text/plain", "Whitelisted \(domain)".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing domain".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/whitelist/remove" {
+            let queryParams = parseQuery(query)
+            if let domain = queryParams["domain"] {
+                dnsServer?.unwhitelist(domain: domain)
+                completion(200, "text/plain", "Unwhitelisted \(domain)".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing domain".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/sub/add" {
+            let queryParams = parseQuery(query)
+            if let url = queryParams["url"] {
+                dnsServer?.addSubscription(url: url)
+                completion(200, "text/plain", "Added subscription".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing url".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/sub/remove" {
+            let queryParams = parseQuery(query)
+            if let url = queryParams["url"] {
+                dnsServer?.removeSubscription(url: url)
+                completion(200, "text/plain", "Removed subscription".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing url".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/sub/refresh" {
+            dnsServer?.updateBlocklists()
+            completion(200, "text/plain", "Refreshed subscriptions".data(using: .utf8)!, [:])
+        } else if method == "POST" && path == "/dns/upstream" {
+            let queryParams = parseQuery(query)
+            if let ip = queryParams["ip"] {
+                dnsServer?.setUpstream(ip: ip)
+                completion(200, "text/plain", "Updated upstream DNS".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing ip".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/stats/reset" {
+            dnsServer?.resetStats()
+            completion(200, "text/plain", "Reset stats".data(using: .utf8)!, [:])
         } else if method == "POST" && path == "/dns/toggle" {
             if let dns = dnsServer {
                 if dns.isRunning {
@@ -371,13 +493,13 @@ class MiniHTTPServer: ObservableObject {
     }
     
     private func extractBoundary(fromBody body: Data) -> String? {
-        let doubleDash = Data([45, 45]) // "--"
+        let doubleDash = Data([45, 45])
         guard body.starts(with: doubleDash) else { return nil }
         
         let crlf = Data([13, 10])
         guard let crlfRange = body.range(of: crlf) else { return nil }
         
-        let boundaryData = body.subdata(in: 2..<crlfRange.lowerBound) // Skip "--"
+        let boundaryData = body.subdata(in: 2..<crlfRange.lowerBound)
         return String(data: boundaryData, encoding: .utf8)
     }
     
@@ -994,6 +1116,7 @@ class MiniHTTPServer: ObservableObject {
                     background: var(--danger);
                     border-color: var(--danger);
                     box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+                    transform: translateY(-2px);
                 }
 
                 .empty-state {
@@ -1093,7 +1216,45 @@ class MiniHTTPServer: ObservableObject {
                     to { opacity: 1; transform: translateY(0); }
                 }
 
-                /* DNS Settings Styles */
+                /* DNS Settings & Stats Styles */
+                .dns-stats-grid {
+                    display: grid;
+                    grid-template-columns: repeat(2, 1fr);
+                    gap: 1rem;
+                    margin-bottom: 1.5rem;
+                    width: 100%;
+                }
+                @media (min-width: 600px) {
+                    .dns-stats-grid {
+                        grid-template-columns: repeat(4, 1fr);
+                    }
+                }
+                .stat-card {
+                    background: rgba(255, 255, 255, 0.02);
+                    border: 1px solid var(--card-border);
+                    border-radius: 16px;
+                    padding: 1.25rem 0.75rem;
+                    text-align: center;
+                }
+                .stat-card-title {
+                    font-size: 0.75rem;
+                    color: var(--text-muted);
+                    margin-bottom: 0.5rem;
+                    font-weight: 600;
+                    text-transform: uppercase;
+                }
+                .stat-card-val {
+                    font-size: 1.4rem;
+                    font-weight: 700;
+                    color: var(--text-main);
+                }
+                .stat-card-val.blocked-num {
+                    color: var(--danger);
+                }
+                .stat-card-val.allowed-num {
+                    color: var(--success);
+                }
+
                 .badge {
                     padding: 0.3rem 0.85rem;
                     border-radius: 20px;
@@ -1124,13 +1285,8 @@ class MiniHTTPServer: ObservableObject {
                     margin-bottom: 1rem;
                     font-size: 0.95rem;
                 }
-                .stat-num {
-                    font-size: 1.25rem;
-                    font-weight: 700;
-                    color: #a78bfa;
-                }
                 .btn-toggle {
-                    width: 100%;
+                    flex: 1;
                     padding: 0.8rem;
                     border-radius: 12px;
                     border: none;
@@ -1180,6 +1336,38 @@ class MiniHTTPServer: ObservableObject {
                 }
                 .btn-unblock:hover {
                     background: rgba(239, 68, 68, 0.1);
+                }
+                
+                .dns-log-table {
+                    width: 100%;
+                    font-family: monospace;
+                    font-size: 0.85rem;
+                }
+                .dns-log-table th {
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                    padding: 0.5rem;
+                    font-size: 0.75rem;
+                }
+                .dns-log-table td {
+                    padding: 0.6rem 0.5rem;
+                    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+                }
+                .dns-log-table tr:hover td {
+                    background: rgba(255, 255, 255, 0.03);
+                }
+                .dns-status-badge {
+                    font-weight: bold;
+                    font-size: 0.75rem;
+                    padding: 0.2rem 0.4rem;
+                    border-radius: 4px;
+                }
+                .dns-status-badge.allowed {
+                    background: rgba(16, 185, 129, 0.1);
+                    color: var(--success);
+                }
+                .dns-status-badge.blocked {
+                    background: rgba(239, 68, 68, 0.1);
+                    color: var(--danger);
                 }
             </style>
         </head>
@@ -1250,6 +1438,26 @@ class MiniHTTPServer: ObservableObject {
                 </div>
 
                 <div id="dns-tab" class="tab-content">
+                    <!-- Stats Grid -->
+                    <div class="dns-stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-card-title">Tổng truy vấn</div>
+                            <div class="stat-card-val" id="dnsStatTotal">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Đã chặn</div>
+                            <div class="stat-card-val blocked-num" id="dnsStatBlocked">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Tỷ lệ chặn</div>
+                            <div class="stat-card-val blocked-num" id="dnsStatPercent">0%</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Bộ lọc đang hoạt động</div>
+                            <div class="stat-card-val allowed-num" id="dnsStatActive">0</div>
+                        </div>
+                    </div>
+
                     <div class="grid">
                         <div class="card">
                             <h2>Trạng thái DNS</h2>
@@ -1258,35 +1466,89 @@ class MiniHTTPServer: ObservableObject {
                                     <span>Trạng thái:</span>
                                     <span id="dnsRunningBadge" class="badge danger">Đã dừng</span>
                                 </div>
-                                <div class="status-row">
-                                    <span>Tên miền chặn:</span>
-                                    <span id="dnsBlockedCount" class="stat-num">0</span>
+                                <div style="display: flex; gap: 0.5rem; margin-top: 1rem; margin-bottom: 1rem;">
+                                    <button id="btnToggleDNS" class="btn-toggle" onclick="toggleDNSServer()">Khởi động</button>
+                                    <button onclick="resetDNSStats()" style="padding: 0.8rem 1rem; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; cursor: pointer; font-weight: 600; font-size: 0.85rem;">Reset Stats</button>
                                 </div>
-                                <button id="btnToggleDNS" class="btn-toggle" onclick="toggleDNSServer()">Khởi động</button>
                             </div>
-                            <div style="margin-top: 1.5rem;">
-                                <h3>Thêm tên miền chặn</h3>
+                            
+                            <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
+                                <h3>DNS Thượng Nguồn (Upstream)</h3>
                                 <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-                                    <input type="text" id="domainInput" placeholder="Ví dụ: ads.doubleclick.net" style="flex: 1; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem;">
-                                    <button onclick="blockDomain()" style="padding: 0.75rem 1.25rem; border-radius: 10px; background: var(--primary); color: #fff; border: none; font-weight: 600; cursor: pointer; transition: all 0.2s;">Chặn</button>
+                                    <input type="text" id="upstreamInput" placeholder="Ví dụ: 1.1.1.1" style="flex: 1; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem;">
+                                    <button onclick="setUpstreamDNS()" style="padding: 0.75rem 1.25rem; border-radius: 10px; background: var(--primary); color: #fff; border: none; font-weight: 600; cursor: pointer;">Lưu</button>
                                 </div>
                             </div>
                         </div>
 
                         <div class="card">
                             <h2>Bảng Điều Khiển DNS</h2>
-                            <div class="tabs" style="border-bottom: none; gap: 0.5rem; margin-top: 0; margin-bottom: 1rem;">
-                                <div class="tab active" id="subtab-logs" onclick="switchSubTab('logs')" style="padding: 0.5rem 1rem; font-size: 0.85rem;">Nhật ký truy vấn</div>
-                                <div class="tab" id="subtab-list" onclick="switchSubTab('list')" style="padding: 0.5rem 1rem; font-size: 0.85rem;">Danh sách chặn</div>
+                            <div class="tabs" style="border-bottom: none; gap: 0.3rem; margin-top: 0; margin-bottom: 1rem; overflow-x: auto;">
+                                <div class="tab active" id="subtab-logs" onclick="switchSubTab('logs')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Query Logs</div>
+                                <div class="tab" id="subtab-subs" onclick="switchSubTab('subs')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Bộ lọc URL</div>
+                                <div class="tab" id="subtab-list" onclick="switchSubTab('list')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Chặn tùy chỉnh</div>
+                                <div class="tab" id="subtab-white" onclick="switchSubTab('white')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Danh sách trắng</div>
                             </div>
+                            
+                            <!-- Logs panel -->
                             <div id="dns-logs-panel" class="subtab-content">
-                                <div class="logs-container" id="dnsLogsList" style="height: 250px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 0.75rem; border-radius: 12px; font-family: monospace; font-size: 0.85rem; color: #10b981; line-height: 1.4; text-align: left; white-space: pre-wrap; word-break: break-all;">
-                                    Chưa có log truy vấn nào...
+                                <div style="height: 280px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; border: 1px solid var(--card-border);">
+                                    <table class="dns-log-table">
+                                        <thead>
+                                            <tr>
+                                                <th style="width: 70px;">Giờ</th>
+                                                <th style="width: 100px;">Thiết bị</th>
+                                                <th>Tên miền</th>
+                                                <th style="width: 80px;">T.Thái</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="dnsLogsList">
+                                            <!-- Populate rows -->
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
+                            
+                            <!-- Subscriptions panel -->
+                            <div id="dns-subs-panel" class="subtab-content" style="display: none;">
+                                <div style="margin-bottom: 1rem; display: flex; gap: 0.5rem; justify-content: space-between; align-items: center;">
+                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Nguồn danh sách chặn (.hosts / adblock)</h4>
+                                    <button onclick="refreshSubscriptions()" id="btnRefreshSubs" style="padding: 0.5rem 1rem; border-radius: 8px; background: var(--success); color: white; border: none; font-size: 0.8rem; font-weight: bold; cursor: pointer;">Cập nhật bộ lọc</button>
+                                </div>
+                                <div id="dnsSubsList" style="max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
+                                    <!-- Subscription list -->
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
+                                    <input type="text" id="subInput" placeholder="Nhập URL bộ lọc (.hosts / adblock)" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                    <button onclick="addSubscription()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Thêm</button>
+                                </div>
+                            </div>
+                            
+                            <!-- Custom blocklist panel -->
                             <div id="dns-list-panel" class="subtab-content" style="display: none;">
-                                <div id="dnsBlockedList" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
-                                    <!-- Blocked domains -->
+                                <div style="margin-bottom: 0.5rem; display: flex; gap: 0.5rem; justify-content: space-between;">
+                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Chặn thủ công</h4>
+                                </div>
+                                <div id="dnsBlockedList" style="max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
+                                    <!-- Custom Blocked List -->
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
+                                    <input type="text" id="domainInput" placeholder="Ví dụ: ads.doubleclick.net" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                    <button onclick="blockDomain()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Chặn</button>
+                                </div>
+                            </div>
+                            
+                            <!-- Whitelist panel -->
+                            <div id="dns-white-panel" class="subtab-content" style="display: none;">
+                                <div style="margin-bottom: 0.5rem; display: flex; gap: 0.5rem; justify-content: space-between;">
+                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Danh sách tên miền tin cậy</h4>
+                                </div>
+                                <div id="dnsWhiteList" style="max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
+                                    <!-- Whitelist -->
+                                </div>
+                                <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
+                                    <input type="text" id="whiteInput" placeholder="Ví dụ: google.com" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                    <button onclick="addWhitelist()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Thêm</button>
                                 </div>
                             </div>
                         </div>
@@ -1473,20 +1735,27 @@ class MiniHTTPServer: ObservableObject {
                 }
 
                 function switchSubTab(type) {
+                    document.querySelectorAll('.subtab-content').forEach(el => el.style.display = 'none');
+                    document.querySelectorAll('.tab-content .tabs > .tab').forEach(el => {
+                        if(el.id.startsWith('subtab-')) el.classList.remove('active');
+                    });
+                    
                     if (type === 'logs') {
                         document.getElementById('subtab-logs').classList.add('active');
-                        document.getElementById('subtab-list').classList.remove('active');
                         document.getElementById('dns-logs-panel').style.display = 'block';
-                        document.getElementById('dns-list-panel').style.display = 'none';
-                    } else {
-                        document.getElementById('subtab-logs').classList.remove('active');
+                    } else if (type === 'subs') {
+                        document.getElementById('subtab-subs').classList.add('active');
+                        document.getElementById('dns-subs-panel').style.display = 'block';
+                    } else if (type === 'list') {
                         document.getElementById('subtab-list').classList.add('active');
-                        document.getElementById('dns-logs-panel').style.display = 'none';
                         document.getElementById('dns-list-panel').style.display = 'block';
+                    } else if (type === 'white') {
+                        document.getElementById('subtab-white').classList.add('active');
+                        document.getElementById('dns-white-panel').style.display = 'block';
                     }
                 }
 
-                let dnsConfig = { running: false, blocked: [], logs: [] };
+                let dnsConfig = { running: false, blocked: [], whitelist: [], subscriptions: [], upstream: "1.1.1.1", logs: [], stats: { total: 0, blocked: 0, allowed: 0, blockedPercent: 0.0 }, isUpdating: false };
 
                 function fetchDNSConfig() {
                     fetch('/dns/config')
@@ -1500,10 +1769,31 @@ class MiniHTTPServer: ObservableObject {
                         });
                 }
 
+                function parseDNSLog(line) {
+                    // Expect format: [HH:mm:ss] [ClientIP] Status - Domain
+                    const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(ALLOW.*?|BLOCKED.*?|✅ ALLOWED|❌ BLOCKED)\s+-\s+(.*?)$/);
+                    if (match) {
+                        const time = match[1];
+                        const ip = match[2];
+                        const status = match[3];
+                        const domain = match[4];
+                        const isBlocked = status.includes('BLOCKED') || status.includes('❌');
+                        return { time, ip, domain, isBlocked, textStatus: isBlocked ? 'BLOCKED' : 'ALLOWED' };
+                    }
+                    
+                    // Fallback for general logs: [HH:mm:ss] message
+                    const fallbackMatch = line.match(/^\[(.*?)\]\s+(.*?)$/);
+                    if (fallbackMatch) {
+                        return { time: fallbackMatch[1], ip: 'System', domain: fallbackMatch[2], isBlocked: false, textStatus: 'INFO' };
+                    }
+                    
+                    return { time: '', ip: 'System', domain: line, isBlocked: false, textStatus: 'INFO' };
+                }
+
                 function updateDNSUI() {
                     const runningBadge = document.getElementById('dnsRunningBadge');
                     const btnToggle = document.getElementById('btnToggleDNS');
-                    const blockedCount = document.getElementById('dnsBlockedCount');
+                    const btnRefreshSubs = document.getElementById('btnRefreshSubs');
                     
                     if (dnsConfig.running) {
                         runningBadge.className = 'badge success';
@@ -1517,26 +1807,75 @@ class MiniHTTPServer: ObservableObject {
                         btnToggle.innerText = 'Khởi động DNS Server';
                     }
                     
-                    blockedCount.innerText = dnsConfig.blocked ? dnsConfig.blocked.length : 0;
+                    btnRefreshSubs.innerText = dnsConfig.isUpdating ? 'Đang cập nhật...' : 'Cập nhật bộ lọc';
+                    btnRefreshSubs.disabled = dnsConfig.isUpdating;
                     
-                    // Logs list
-                    const logsList = document.getElementById('dnsLogsList');
-                    if (!dnsConfig.logs || dnsConfig.logs.length === 0) {
-                        logsList.innerText = 'Chưa có log truy vấn nào...';
-                    } else {
-                        logsList.innerText = dnsConfig.logs.join('\n');
-                        logsList.scrollTop = logsList.scrollHeight;
+                    // Update stats
+                    document.getElementById('dnsStatTotal').innerText = dnsConfig.stats.total;
+                    document.getElementById('dnsStatBlocked').innerText = dnsConfig.stats.blocked;
+                    document.getElementById('dnsStatPercent').innerText = dnsConfig.stats.blockedPercent.toFixed(1) + '%';
+                    document.getElementById('dnsStatActive').innerText = (dnsConfig.blocked ? dnsConfig.blocked.length : 0) + ' tên miền';
+                    
+                    if(document.activeElement !== document.getElementById('upstreamInput')) {
+                        document.getElementById('upstreamInput').value = dnsConfig.upstream;
                     }
                     
-                    // Blocked list
+                    // Log table rows
+                    const logsList = document.getElementById('dnsLogsList');
+                    if (!dnsConfig.logs || dnsConfig.logs.length === 0) {
+                        logsList.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có truy vấn nào được ghi nhận.</td></tr>';
+                    } else {
+                        logsList.innerHTML = dnsConfig.logs.map(logLine => {
+                            const parsed = parseDNSLog(logLine);
+                            const badgeClass = parsed.textStatus === 'BLOCKED' ? 'blocked' : (parsed.textStatus === 'ALLOWED' ? 'allowed' : '');
+                            return `
+                                <tr>
+                                    <td>${parsed.time}</td>
+                                    <td>${parsed.ip}</td>
+                                    <td style="white-space: normal; word-break: break-all;">${parsed.domain}</td>
+                                    <td><span class="dns-status-badge ${badgeClass}">${parsed.textStatus}</span></td>
+                                </tr>
+                            `;
+                        }).reverse().join('');
+                    }
+                    
+                    // Subscription source list
+                    const subsList = document.getElementById('dnsSubsList');
+                    if (!dnsConfig.subscriptions || dnsConfig.subscriptions.length === 0) {
+                        subsList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa có nguồn bộ lọc nào.</div>';
+                    } else {
+                        subsList.innerHTML = dnsConfig.subscriptions.map(url => `
+                            <div class="dns-list-item">
+                                <span title="${url}">${url}</span>
+                                <button class="btn-unblock" onclick="removeSubscription('${url}')">Xóa</button>
+                            </div>
+                        `).join('');
+                    }
+                    
+                    // Custom blocked list
                     const blockedList = document.getElementById('dnsBlockedList');
                     if (!dnsConfig.blocked || dnsConfig.blocked.length === 0) {
-                        blockedList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa chặn tên miền nào.</div>';
+                        blockedList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa chặn thủ công tên miền nào.</div>';
                     } else {
-                        blockedList.innerHTML = dnsConfig.blocked.map(domain => `
+                        // Max show 100 manual domains to prevent browser freezing
+                        const displayBlocked = dnsConfig.blocked.slice(0, 100);
+                        blockedList.innerHTML = displayBlocked.map(domain => `
                             <div class="dns-list-item">
                                 <span>${domain}</span>
-                                <button class="btn-unblock" onclick="unblockDomain('${domain}')">Bỏ chặn</button>
+                                <button class="btn-unblock" onclick="unblockDomain('${domain}')">Xóa</button>
+                            </div>
+                        `).join('') + (dnsConfig.blocked.length > 100 ? `<div style="text-align: center; font-size: 0.75rem; color: var(--text-muted);">...và ${dnsConfig.blocked.length - 100} tên miền khác</div>` : '');
+                    }
+                    
+                    // Whitelist
+                    const whitelistContainer = document.getElementById('dnsWhiteList');
+                    if (!dnsConfig.whitelist || dnsConfig.whitelist.length === 0) {
+                        whitelistContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa cấu hình danh sách trắng.</div>';
+                    } else {
+                        whitelistContainer.innerHTML = dnsConfig.whitelist.map(domain => `
+                            <div class="dns-list-item">
+                                <span>${domain}</span>
+                                <button class="btn-unblock" onclick="removeWhitelist('${domain}')">Xóa</button>
                             </div>
                         `).join('');
                     }
@@ -1590,6 +1929,126 @@ class MiniHTTPServer: ObservableObject {
                         .catch(err => {
                             console.error(err);
                             showToast('Lỗi mạng', 'error');
+                        });
+                }
+                
+                function addWhitelist() {
+                    const input = document.getElementById('whiteInput');
+                    const domain = input.value.trim();
+                    if (!domain) return;
+                    
+                    fetch(`/dns/whitelist/add?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast(`Đã thêm whitelist: ${domain}`);
+                                input.value = '';
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Thêm whitelist thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+                
+                function removeWhitelist(domain) {
+                    fetch(`/dns/whitelist/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast(`Đã xóa whitelist: ${domain}`);
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Xóa whitelist thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+
+                function addSubscription() {
+                    const input = document.getElementById('subInput');
+                    const url = input.value.trim();
+                    if (!url) return;
+                    
+                    fetch(`/dns/sub/add?url=${encodeURIComponent(url)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast('Đã thêm nguồn bộ lọc thành công');
+                                input.value = '';
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Thêm nguồn thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+
+                function removeSubscription(url) {
+                    if (!confirm('Bạn có muốn xóa nguồn bộ lọc này không?')) return;
+                    fetch(`/dns/sub/remove?url=${encodeURIComponent(url)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast('Đã xóa nguồn bộ lọc');
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Xóa nguồn thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+
+                function refreshSubscriptions() {
+                    showToast('Đang tải và cập nhật các nguồn bộ lọc...', 'info');
+                    fetch('/dns/sub/refresh', { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Cập nhật thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi kết nối mạng', 'error');
+                        });
+                }
+
+                function setUpstreamDNS() {
+                    const ip = document.getElementById('upstreamInput').value.trim();
+                    if (!ip) return;
+                    fetch(`/dns/upstream?ip=${encodeURIComponent(ip)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast('Đã lưu DNS thượng nguồn');
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Lỗi cấu hình Upstream', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+
+                function resetDNSStats() {
+                    if (!confirm('Bạn có muốn reset các số liệu thống kê không?')) return;
+                    fetch('/dns/stats/reset', { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast('Đã reset thống kê');
+                                fetchDNSConfig();
+                            }
                         });
                 }
 
