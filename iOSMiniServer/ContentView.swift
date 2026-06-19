@@ -9,16 +9,20 @@ struct FileItem: Identifiable {
 }
 
 struct ContentView: View {
+    @StateObject private var dnsServer: MiniDNSServer
     @StateObject private var server: MiniHTTPServer
     @StateObject private var tunnelClient: WebSocketTunnelClient
     
     @State private var localIP: String? = nil
     @State private var files: [FileItem] = []
     @State private var selectedShareFile: FileItem? = nil
-    @State private var relayURLString: String = "https://ios-mini-server.glitch.me"
+    @State private var relayURLString: String = "https://ios-mini-server.onrender.com/"
     
     init() {
+        let dns = MiniDNSServer()
         let s = MiniHTTPServer(port: 8080)
+        s.dnsServer = dns
+        _dnsServer = StateObject(wrappedValue: dns)
         _server = StateObject(wrappedValue: s)
         _tunnelClient = StateObject(wrappedValue: WebSocketTunnelClient(server: s))
     }
@@ -44,6 +48,7 @@ struct ContentView: View {
                 ScrollView {
                     VStack(spacing: 20) {
                         statusCard
+                        dnsCard
                         logsCard
                         filesCard
                     }
@@ -260,6 +265,156 @@ struct ContentView: View {
                         .padding(10)
                         .background(Color.black.opacity(0.2))
                         .cornerRadius(10)
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color.white.opacity(0.05))
+        .cornerRadius(20)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+    
+    @ViewBuilder
+    private var dnsCard: some View {
+        VStack(spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Trình Chặn Quảng Cáo DNS (Pi-hole)")
+                        .font(.caption)
+                        .foregroundColor(Color.gray)
+                    
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(dnsServer.isRunning ? Color.green : Color.red)
+                            .frame(width: 10, height: 10)
+                            .shadow(color: dnsServer.isRunning ? Color.green : Color.red, radius: 4)
+                        
+                        Text(dnsServer.isRunning ? "ĐANG BẬT" : "ĐÃ TẮT")
+                            .font(.footnote)
+                            .fontWeight(.bold)
+                            .foregroundColor(dnsServer.isRunning ? Color.green : Color.red)
+                    }
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    withAnimation(.spring()) {
+                        if dnsServer.isRunning {
+                            dnsServer.stop()
+                        } else {
+                            dnsServer.start()
+                        }
+                    }
+                }) {
+                    Text(dnsServer.isRunning ? "Tắt DNS" : "Bật DNS")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(Color.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(dnsServer.isRunning ? Color.red : Color.green)
+                                .shadow(color: dnsServer.isRunning ? Color.red.opacity(0.4) : Color.green.opacity(0.4), radius: 8)
+                        )
+                }
+            }
+            
+            if dnsServer.isRunning {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Địa chỉ DNS trên thiết bị khác:")
+                        .font(.caption)
+                        .foregroundColor(Color.gray)
+                    
+                    HStack {
+                        Text(localIP ?? "Cần kết nối Wi-Fi")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundColor(Color.cyan)
+                            .textSelection(.enabled)
+                        
+                        Spacer()
+                        
+                        Button(action: {
+                            UIPasteboard.general.string = localIP
+                        }) {
+                            Image(systemName: "doc.on.doc")
+                                .foregroundColor(Color.gray)
+                                .padding(6)
+                                .background(Color.white.opacity(0.05))
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.black.opacity(0.2))
+                    .cornerRadius(10)
+                    
+                    HStack {
+                        Text("Số lượng chặn:")
+                            .font(.footnote)
+                            .foregroundColor(Color.gray)
+                        Spacer()
+                        Text("\(dnsServer.blockedCount) tên miền")
+                            .font(.footnote)
+                            .fontWeight(.bold)
+                            .foregroundColor(Color.purple)
+                    }
+                }
+            }
+            
+            Divider()
+                .background(Color.white.opacity(0.1))
+            
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("Nhật ký DNS", systemImage: "shield.text.feed")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(Color.white)
+                    
+                    Spacer()
+                    
+                    Button(action: { dnsServer.logs.removeAll() }) {
+                        Text("Xóa log")
+                            .font(.caption)
+                            .foregroundColor(Color.gray)
+                    }
+                }
+                
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if dnsServer.logs.isEmpty {
+                                Text("Không có truy vấn DNS nào...")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(Color.white.opacity(0.3))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                ForEach(dnsServer.logs, id: \.self) { log in
+                                    Text(log)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundColor(log.contains("❌") ? Color.red.opacity(0.9) : Color.green.opacity(0.9))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .id(log)
+                                }
+                            }
+                        }
+                        .padding(10)
+                    }
+                    .frame(height: 120)
+                    .background(Color.black.opacity(0.3))
+                    .cornerRadius(12)
+                    .onChange(of: dnsServer.logs) { newLogs in
+                        if let lastLog = newLogs.last {
+                            withAnimation {
+                                proxy.scrollTo(lastLog, anchor: .bottom)
+                            }
+                        }
                     }
                 }
             }

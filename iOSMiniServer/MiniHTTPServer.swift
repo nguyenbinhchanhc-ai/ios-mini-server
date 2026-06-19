@@ -13,6 +13,7 @@ class MiniHTTPServer: ObservableObject {
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.antigravity.miniserver.queue", qos: .userInitiated)
     let port: UInt16
+    weak var dnsServer: MiniDNSServer?
     
     init(port: UInt16 = 8080) {
         self.port = port
@@ -163,6 +164,48 @@ class MiniHTTPServer: ObservableObject {
         if method == "GET" && path == "/" {
             let html = getDashboardHTML()
             sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/html; charset=utf-8", body: html.data(using: .utf8)!)
+        } else if method == "GET" && path == "/dns/config" {
+            let running = dnsServer?.isRunning ?? false
+            let blocked = Array(dnsServer?.blockedDomains ?? [])
+            let logs = dnsServer?.logs ?? []
+            let responseObj: [String: Any] = [
+                "running": running,
+                "blocked": blocked,
+                "logs": logs
+            ]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: responseObj, options: []) {
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "application/json", body: jsonData)
+            } else {
+                sendResponse(connection: connection, statusCode: 500, statusText: "Internal Error", body: "JSON encoding failed".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/block" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let domain = queryItems.first(where: { $0.name == "domain" })?.value {
+                dnsServer?.block(domain: domain)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Blocked \(domain)".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'domain' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/unblock" {
+            if let queryItems = URLComponents(string: urlString)?.queryItems,
+               let domain = queryItems.first(where: { $0.name == "domain" })?.value {
+                dnsServer?.unblock(domain: domain)
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/plain", body: "Unblocked \(domain)".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Missing 'domain' query".data(using: .utf8)!)
+            }
+        } else if method == "POST" && path == "/dns/toggle" {
+            if let dns = dnsServer {
+                if dns.isRunning {
+                    dns.stop()
+                } else {
+                    dns.start()
+                }
+                let running = dns.isRunning
+                sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "application/json", body: "{\"running\": \(running)}".data(using: .utf8)!)
+            } else {
+                sendResponse(connection: connection, statusCode: 500, statusText: "Internal Error", body: "DNS Server not bound".data(using: .utf8)!)
+            }
         } else if method == "GET" && path == "/files" {
             let files = listDocumentsFiles()
             do {
@@ -200,6 +243,48 @@ class MiniHTTPServer: ObservableObject {
         if method == "GET" && path == "/" {
             let html = getDashboardHTML()
             completion(200, "text/html; charset=utf-8", html.data(using: .utf8)!, [:])
+        } else if method == "GET" && path == "/dns/config" {
+            let running = dnsServer?.isRunning ?? false
+            let blocked = Array(dnsServer?.blockedDomains ?? [])
+            let logs = dnsServer?.logs ?? []
+            let responseObj: [String: Any] = [
+                "running": running,
+                "blocked": blocked,
+                "logs": logs
+            ]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: responseObj, options: []) {
+                completion(200, "application/json", jsonData, [:])
+            } else {
+                completion(500, "text/plain", "JSON failed".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/block" {
+            let queryParams = parseQuery(query)
+            if let domain = queryParams["domain"] {
+                dnsServer?.block(domain: domain)
+                completion(200, "text/plain", "Blocked \(domain)".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing domain".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/unblock" {
+            let queryParams = parseQuery(query)
+            if let domain = queryParams["domain"] {
+                dnsServer?.unblock(domain: domain)
+                completion(200, "text/plain", "Unblocked \(domain)".data(using: .utf8)!, [:])
+            } else {
+                completion(400, "text/plain", "Missing domain".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/dns/toggle" {
+            if let dns = dnsServer {
+                if dns.isRunning {
+                    dns.stop()
+                } else {
+                    dns.start()
+                }
+                let running = dns.isRunning
+                completion(200, "application/json", "{\"running\": \(running)}".data(using: .utf8)!, [:])
+            } else {
+                completion(500, "text/plain", "DNS Server not bound".data(using: .utf8)!, [:])
+            }
         } else if method == "GET" && path == "/files" {
             let files = listDocumentsFiles()
             if let jsonData = try? JSONSerialization.data(withJSONObject: files, options: []) {
@@ -963,6 +1048,139 @@ class MiniHTTPServer: ObservableObject {
                     height: 18px;
                     fill: currentColor;
                 }
+
+                /* Tabbed Navigation Styles */
+                .tabs {
+                    display: flex;
+                    gap: 0.75rem;
+                    margin-top: 1rem;
+                    margin-bottom: 0.5rem;
+                    width: 100%;
+                    border-bottom: 1px solid var(--card-border);
+                    padding-bottom: 0.5rem;
+                }
+                .tab {
+                    padding: 0.6rem 1.2rem;
+                    border-radius: 12px;
+                    cursor: pointer;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                    transition: all 0.25s ease;
+                    background: rgba(255, 255, 255, 0.02);
+                    border: 1px solid var(--card-border);
+                    font-size: 0.9rem;
+                }
+                .tab.active {
+                    color: var(--text-main);
+                    background: var(--primary);
+                    border-color: var(--primary);
+                    box-shadow: 0 0 15px var(--primary-glow);
+                }
+                .tab:hover:not(.active) {
+                    background: rgba(255, 255, 255, 0.06);
+                    color: var(--text-main);
+                }
+                .tab-content {
+                    display: none;
+                    width: 100%;
+                    animation: fadeIn 0.3s ease;
+                }
+                .tab-content.active {
+                    display: block;
+                }
+                @keyframes fadeIn {
+                    from { opacity: 0; transform: translateY(5px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+
+                /* DNS Settings Styles */
+                .badge {
+                    padding: 0.3rem 0.85rem;
+                    border-radius: 20px;
+                    font-size: 0.8rem;
+                    font-weight: 600;
+                    display: inline-block;
+                }
+                .badge.success {
+                    background: rgba(16, 185, 129, 0.1);
+                    color: var(--success);
+                    border: 1px solid rgba(16, 185, 129, 0.2);
+                }
+                .badge.danger {
+                    background: rgba(239, 68, 68, 0.1);
+                    color: var(--danger);
+                    border: 1px solid rgba(239, 68, 68, 0.2);
+                }
+                .dns-status-panel {
+                    background: rgba(0,0,0,0.15);
+                    padding: 1.25rem;
+                    border-radius: 16px;
+                    border: 1px solid var(--card-border);
+                }
+                .status-row {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 1rem;
+                    font-size: 0.95rem;
+                }
+                .stat-num {
+                    font-size: 1.25rem;
+                    font-weight: 700;
+                    color: #a78bfa;
+                }
+                .btn-toggle {
+                    width: 100%;
+                    padding: 0.8rem;
+                    border-radius: 12px;
+                    border: none;
+                    color: white;
+                    font-weight: 600;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                    background: var(--primary);
+                    box-shadow: 0 4px 12px var(--primary-glow);
+                }
+                .btn-toggle.running {
+                    background: var(--danger);
+                    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+                }
+                .btn-toggle:hover {
+                    transform: translateY(-2px);
+                }
+                .dns-list-item {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    padding: 0.6rem 1rem;
+                    background: rgba(255,255,255,0.02);
+                    border-radius: 10px;
+                    border: 1px solid rgba(255,255,255,0.04);
+                    transition: background 0.2s;
+                }
+                .dns-list-item:hover {
+                    background: rgba(255,255,255,0.05);
+                }
+                .dns-list-item span {
+                    font-size: 0.9rem;
+                    color: var(--text-main);
+                    word-break: break-all;
+                    padding-right: 0.5rem;
+                }
+                .btn-unblock {
+                    background: transparent;
+                    border: none;
+                    color: var(--danger);
+                    cursor: pointer;
+                    font-weight: 600;
+                    font-size: 0.85rem;
+                    padding: 0.3rem 0.6rem;
+                    border-radius: 6px;
+                    transition: background 0.2s;
+                }
+                .btn-unblock:hover {
+                    background: rgba(239, 68, 68, 0.1);
+                }
             </style>
         </head>
         <body>
@@ -981,45 +1199,96 @@ class MiniHTTPServer: ObservableObject {
                     </div>
                 </header>
 
-                <div class="grid">
-                    <div class="card">
-                        <h2>Tải Lên Tệp Tin</h2>
-                        <div class="upload-area" id="dropzone">
-                            <div class="upload-icon">🚀</div>
-                            <p>Kéo & Thả tệp tin vào đây</p>
-                            <span>hoặc nhấn để chọn từ máy tính</span>
-                            <input type="file" id="fileInput">
-                        </div>
-                        <div class="progress-container" id="progressContainer">
-                            <div class="progress-bar-bg">
-                                <div class="progress-bar-fill" id="progressBar"></div>
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('files-tab')">📁 Quản lý File</div>
+                    <div class="tab" onclick="switchTab('dns-tab')">🛡️ DNS Ad-Blocker</div>
+                </div>
+
+                <div id="files-tab" class="tab-content active">
+                    <div class="grid">
+                        <div class="card">
+                            <h2>Tải Lên Tệp Tin</h2>
+                            <div class="upload-area" id="dropzone">
+                                <div class="upload-icon">🚀</div>
+                                <p>Kéo & Thả tệp tin vào đây</p>
+                                <span>hoặc nhấn để chọn từ máy tính</span>
+                                <input type="file" id="fileInput">
                             </div>
-                            <div class="progress-text">
-                                <span id="progressPercent">0%</span>
-                                <span id="progressFileName">file.txt</span>
+                            <div class="progress-container" id="progressContainer">
+                                <div class="progress-bar-bg">
+                                    <div class="progress-bar-fill" id="progressBar"></div>
+                                </div>
+                                <div class="progress-text">
+                                    <span id="progressPercent">0%</span>
+                                    <span id="progressFileName">file.txt</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <h2>Tệp Tin Trên iPhone</h2>
+                            <div class="files-table-wrapper">
+                                <table id="filesTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Tên Tệp</th>
+                                            <th>Kích Thước</th>
+                                            <th>Hành Động</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="filesList">
+                                        <!-- JS Populated -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div id="emptyState" class="empty-state" style="display: none;">
+                                <div class="empty-icon">📁</div>
+                                <p>Chưa có tệp tin nào được tải lên</p>
                             </div>
                         </div>
                     </div>
+                </div>
 
-                    <div class="card">
-                        <h2>Tệp Tin Trên iPhone</h2>
-                        <div class="files-table-wrapper">
-                            <table id="filesTable">
-                                <thead>
-                                    <tr>
-                                        <th>Tên Tệp</th>
-                                        <th>Kích Thước</th>
-                                        <th>Hành Động</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="filesList">
-                                    <!-- JS Populated -->
-                                </tbody>
-                            </table>
+                <div id="dns-tab" class="tab-content">
+                    <div class="grid">
+                        <div class="card">
+                            <h2>Trạng thái DNS</h2>
+                            <div class="dns-status-panel">
+                                <div class="status-row">
+                                    <span>Trạng thái:</span>
+                                    <span id="dnsRunningBadge" class="badge danger">Đã dừng</span>
+                                </div>
+                                <div class="status-row">
+                                    <span>Tên miền chặn:</span>
+                                    <span id="dnsBlockedCount" class="stat-num">0</span>
+                                </div>
+                                <button id="btnToggleDNS" class="btn-toggle" onclick="toggleDNSServer()">Khởi động</button>
+                            </div>
+                            <div style="margin-top: 1.5rem;">
+                                <h3>Thêm tên miền chặn</h3>
+                                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                                    <input type="text" id="domainInput" placeholder="Ví dụ: ads.doubleclick.net" style="flex: 1; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem;">
+                                    <button onclick="blockDomain()" style="padding: 0.75rem 1.25rem; border-radius: 10px; background: var(--primary); color: #fff; border: none; font-weight: 600; cursor: pointer; transition: all 0.2s;">Chặn</button>
+                                </div>
+                            </div>
                         </div>
-                        <div id="emptyState" class="empty-state" style="display: none;">
-                            <div class="empty-icon">📁</div>
-                            <p>Chưa có tệp tin nào được tải lên</p>
+
+                        <div class="card">
+                            <h2>Bảng Điều Khiển DNS</h2>
+                            <div class="tabs" style="border-bottom: none; gap: 0.5rem; margin-top: 0; margin-bottom: 1rem;">
+                                <div class="tab active" id="subtab-logs" onclick="switchSubTab('logs')" style="padding: 0.5rem 1rem; font-size: 0.85rem;">Nhật ký truy vấn</div>
+                                <div class="tab" id="subtab-list" onclick="switchSubTab('list')" style="padding: 0.5rem 1rem; font-size: 0.85rem;">Danh sách chặn</div>
+                            </div>
+                            <div id="dns-logs-panel" class="subtab-content">
+                                <div class="logs-container" id="dnsLogsList" style="height: 250px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 0.75rem; border-radius: 12px; font-family: monospace; font-size: 0.85rem; color: #10b981; line-height: 1.4; text-align: left; white-space: pre-wrap; word-break: break-all;">
+                                    Chưa có log truy vấn nào...
+                                </div>
+                            </div>
+                            <div id="dns-list-panel" class="subtab-content" style="display: none;">
+                                <div id="dnsBlockedList" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
+                                    <!-- Blocked domains -->
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1186,6 +1455,151 @@ class MiniHTTPServer: ObservableObject {
                             showToast('Lỗi mạng', 'error');
                         });
                 }
+
+                // DNS Tab Logic
+                function switchTab(tabId) {
+                    document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+                    document.getElementById(tabId).classList.add('active');
+                    
+                    const tabs = document.querySelectorAll('.tabs > .tab');
+                    if (tabId === 'files-tab') {
+                        tabs[0].classList.add('active');
+                        tabs[1].classList.remove('active');
+                    } else {
+                        tabs[0].classList.remove('active');
+                        tabs[1].classList.add('active');
+                        fetchDNSConfig();
+                    }
+                }
+
+                function switchSubTab(type) {
+                    if (type === 'logs') {
+                        document.getElementById('subtab-logs').classList.add('active');
+                        document.getElementById('subtab-list').classList.remove('active');
+                        document.getElementById('dns-logs-panel').style.display = 'block';
+                        document.getElementById('dns-list-panel').style.display = 'none';
+                    } else {
+                        document.getElementById('subtab-logs').classList.remove('active');
+                        document.getElementById('subtab-list').classList.add('active');
+                        document.getElementById('dns-logs-panel').style.display = 'none';
+                        document.getElementById('dns-list-panel').style.display = 'block';
+                    }
+                }
+
+                let dnsConfig = { running: false, blocked: [], logs: [] };
+
+                function fetchDNSConfig() {
+                    fetch('/dns/config')
+                        .then(res => res.json())
+                        .then(data => {
+                            dnsConfig = data;
+                            updateDNSUI();
+                        })
+                        .catch(err => {
+                            console.error("Lỗi cấu hình DNS:", err);
+                        });
+                }
+
+                function updateDNSUI() {
+                    const runningBadge = document.getElementById('dnsRunningBadge');
+                    const btnToggle = document.getElementById('btnToggleDNS');
+                    const blockedCount = document.getElementById('dnsBlockedCount');
+                    
+                    if (dnsConfig.running) {
+                        runningBadge.className = 'badge success';
+                        runningBadge.innerText = 'Đang hoạt động';
+                        btnToggle.className = 'btn-toggle running';
+                        btnToggle.innerText = 'Dừng DNS Server';
+                    } else {
+                        runningBadge.className = 'badge danger';
+                        runningBadge.innerText = 'Đã dừng';
+                        btnToggle.className = 'btn-toggle';
+                        btnToggle.innerText = 'Khởi động DNS Server';
+                    }
+                    
+                    blockedCount.innerText = dnsConfig.blocked ? dnsConfig.blocked.length : 0;
+                    
+                    // Logs list
+                    const logsList = document.getElementById('dnsLogsList');
+                    if (!dnsConfig.logs || dnsConfig.logs.length === 0) {
+                        logsList.innerText = 'Chưa có log truy vấn nào...';
+                    } else {
+                        logsList.innerText = dnsConfig.logs.join('\n');
+                        logsList.scrollTop = logsList.scrollHeight;
+                    }
+                    
+                    // Blocked list
+                    const blockedList = document.getElementById('dnsBlockedList');
+                    if (!dnsConfig.blocked || dnsConfig.blocked.length === 0) {
+                        blockedList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa chặn tên miền nào.</div>';
+                    } else {
+                        blockedList.innerHTML = dnsConfig.blocked.map(domain => `
+                            <div class="dns-list-item">
+                                <span>${domain}</span>
+                                <button class="btn-unblock" onclick="unblockDomain('${domain}')">Bỏ chặn</button>
+                            </div>
+                        `).join('');
+                    }
+                }
+
+                function toggleDNSServer() {
+                    fetch('/dns/toggle', { method: 'POST' })
+                        .then(res => res.json())
+                        .then(data => {
+                            dnsConfig.running = data.running;
+                            showToast(data.running ? 'Đã khởi động DNS Server' : 'Đã dừng DNS Server', 'info');
+                            fetchDNSConfig();
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Không thể thay đổi trạng thái DNS', 'error');
+                        });
+                }
+
+                function blockDomain() {
+                    const input = document.getElementById('domainInput');
+                    const domain = input.value.trim();
+                    if (!domain) return;
+                    
+                    fetch(`/dns/block?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast(`Đã chặn: ${domain}`);
+                                input.value = '';
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Chặn thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+
+                function unblockDomain(domain) {
+                    fetch(`/dns/unblock?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+                        .then(res => {
+                            if (res.ok) {
+                                showToast(`Đã bỏ chặn: ${domain}`);
+                                fetchDNSConfig();
+                            } else {
+                                showToast('Bỏ chặn thất bại', 'error');
+                            }
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            showToast('Lỗi mạng', 'error');
+                        });
+                }
+
+                // Auto refresh DNS config/logs every 3 seconds if DNS tab active
+                setInterval(() => {
+                    const dnsTab = document.getElementById('dns-tab');
+                    if (dnsTab && dnsTab.classList.contains('active')) {
+                        fetchDNSConfig();
+                    }
+                }, 3000);
             </script>
         </body>
         </html>
