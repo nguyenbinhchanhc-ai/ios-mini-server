@@ -9,14 +9,18 @@ struct IPAddressHelper {
         
         for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
             let interface = ptr.pointee
-            let addrFamily = interface.ifa_addr.pointee.sa_family
+            
+            // Unwrap interface address safely to avoid compiler errors on optional pointer dereference
+            guard let addr = interface.ifa_addr else { continue }
+            let addrFamily = addr.pointee.sa_family
+            
             if addrFamily == UInt8(AF_INET) {
                 let name = String(cString: interface.ifa_name)
                 if name == "en0" {
                     var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                     let result = getnameinfo(
-                        interface.ifa_addr,
-                        socklen_t(interface.ifa_addr.pointee.sa_len),
+                        addr,
+                        socklen_t(addr.pointee.sa_len),
                         &hostname,
                         socklen_t(hostname.count),
                         nil,
