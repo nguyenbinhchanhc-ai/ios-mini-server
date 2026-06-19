@@ -356,3 +356,15 @@ struct ContentView: View {
         return formatter.string(fromByteCount: Int64(bytes))
     }
 }
+
+// MARK: - Native Activity View for Sharing
+struct ActivityView: UIViewControllerRepresentable {
+    let activityItems: [Any]
+    let applicationActivities: [UIActivity]? = nil
+    
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: activityItems, applicationActivities: applicationActivities)
+    }
+    
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}

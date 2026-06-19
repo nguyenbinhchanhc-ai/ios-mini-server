@@ -22,7 +22,7 @@ class MiniHTTPServer: ObservableObject {
         guard !isRunning else { return }
         
         do {
-            let listener = try NWListener(using: .tcp, on: NWPort(rawValue: self.port)!)
+            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: self.port)!)
             
             listener.stateUpdateHandler = { [weak self] state in
                 guard let self = self else { return }
