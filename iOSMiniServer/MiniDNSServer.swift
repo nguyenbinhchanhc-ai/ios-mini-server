@@ -152,6 +152,34 @@ class MiniDNSServer: ObservableObject {
         }
     }
     
+    func processDoHQuery(data: Data, clientIP: String, completion: @escaping (Data) -> Void) {
+        guard let parsed = extractDomainName(from: data) else {
+            completion(Data())
+            return
+        }
+        
+        let domain = parsed.domain
+        let questionEndOffset = parsed.typeOffset
+        
+        let isBlocked = shouldBlock(domain: domain)
+        
+        logQuery(domain: domain, blocked: isBlocked, clientIP: clientIP)
+        incrementStats(blocked: isBlocked)
+        
+        if isBlocked {
+            let responseData = buildBlockResponse(queryData: data, questionEndOffset: questionEndOffset)
+            completion(responseData)
+        } else {
+            forwardToUpstream(queryData: data) { responseData in
+                if let response = responseData {
+                    completion(response)
+                } else {
+                    completion(Data())
+                }
+            }
+        }
+    }
+    
     private func shouldBlock(domain: String) -> Bool {
         let lowercaseDomain = domain.lowercased()
         

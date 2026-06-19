@@ -164,6 +164,34 @@ class MiniHTTPServer: ObservableObject {
         if method == "GET" && path == "/" {
             let html = getDashboardHTML()
             sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "text/html; charset=utf-8", body: html.data(using: .utf8)!)
+        } else if path == "/dns-query" {
+            var clientIP = "Unknown"
+            if case .hostPort(let host, _) = connection.endpoint {
+                switch host {
+                case .name(let name, _): clientIP = name
+                case .ipv4(let ipv4): clientIP = "\(ipv4)"
+                case .ipv6(let ipv6): clientIP = "\(ipv6)"
+                @unknown default: clientIP = "\(host)"
+                }
+            }
+            
+            if method == "GET" {
+                if let queryItems = URLComponents(string: urlString)?.queryItems,
+                   let dnsParam = queryItems.first(where: { $0.name == "dns" })?.value,
+                   let queryData = decodeBase64Url(dnsParam) {
+                    dnsServer?.processDoHQuery(data: queryData, clientIP: clientIP) { [weak self] responseData in
+                        self?.sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "application/dns-message", body: responseData)
+                    }
+                } else {
+                    sendResponse(connection: connection, statusCode: 400, statusText: "Bad Request", body: "Bad DoH Request".data(using: .utf8)!)
+                }
+            } else if method == "POST" {
+                dnsServer?.processDoHQuery(data: bodyData, clientIP: clientIP) { [weak self] responseData in
+                    self?.sendResponse(connection: connection, statusCode: 200, statusText: "OK", contentType: "application/dns-message", body: responseData)
+                }
+            } else {
+                sendResponse(connection: connection, statusCode: 405, statusText: "Method Not Allowed", body: "Method Not Allowed".data(using: .utf8)!)
+            }
         } else if method == "GET" && path == "/dns/config" {
             let running = dnsServer?.isRunning ?? false
             let blocked = Array(dnsServer?.blockedDomains ?? [])
@@ -298,12 +326,32 @@ class MiniHTTPServer: ObservableObject {
     
     // MARK: - Generic HTTP Handler (WebSocket Relay support)
     
-    func handleHTTP(method: String, path: String, query: String, body: Data, completion: @escaping (Int, String, Data, [String: String]) -> Void) {
+    func handleHTTP(method: String, path: String, query: String, body: Data, headers: [String: String] = [:], completion: @escaping (Int, String, Data, [String: String]) -> Void) {
         log("Tunnel Request: \(method) \(path)")
         
         if method == "GET" && path == "/" {
             let html = getDashboardHTML()
             completion(200, "text/html; charset=utf-8", html.data(using: .utf8)!, [:])
+        } else if path == "/dns-query" {
+            let clientIP = headers["x-forwarded-for"]?.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? "Tunnel"
+            
+            if method == "GET" {
+                let queryParams = parseQuery(query)
+                if let dnsParam = queryParams["dns"],
+                   let queryData = decodeBase64Url(dnsParam) {
+                    dnsServer?.processDoHQuery(data: queryData, clientIP: clientIP) { responseData in
+                        completion(200, "application/dns-message", responseData, ["Access-Control-Allow-Origin": "*"])
+                    }
+                } else {
+                    completion(400, "text/plain", "Bad DoH Request".data(using: .utf8)!, [:])
+                }
+            } else if method == "POST" {
+                dnsServer?.processDoHQuery(data: body, clientIP: clientIP) { responseData in
+                    completion(200, "application/dns-message", responseData, ["Access-Control-Allow-Origin": "*"])
+                }
+            } else {
+                completion(405, "text/plain", "Method Not Allowed".data(using: .utf8)!, [:])
+            }
         } else if method == "GET" && path == "/dns/config" {
             let running = dnsServer?.isRunning ?? false
             let blocked = Array(dnsServer?.blockedDomains ?? [])
@@ -2063,5 +2111,18 @@ class MiniHTTPServer: ObservableObject {
         </body>
         </html>
         """#
+    }
+    
+    private func decodeBase64Url(_ string: String) -> Data? {
+        var base64 = string
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        
+        let mod = base64.count % 4
+        if mod > 0 {
+            base64 += String(repeating: "=", count: 4 - mod)
+        }
+        
+        return Data(base64Encoded: base64)
     }
 }

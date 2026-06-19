@@ -136,9 +136,10 @@ class WebSocketTunnelClient: ObservableObject {
         let query = json["query"] as? String ?? ""
         let bodyBase64 = json["body"] as? String ?? ""
         let bodyData = Data(base64Encoded: bodyBase64) ?? Data()
+        let headersDict = json["headers"] as? [String: String] ?? [:]
         
         // Execute HTTP request locally
-        server.handleHTTP(method: method, path: path, query: query, body: bodyData) { [weak self] statusCode, contentType, responseData, headers in
+        server.handleHTTP(method: method, path: path, query: query, body: bodyData, headers: headersDict) { [weak self] statusCode, contentType, responseData, headers in
             guard let self = self else { return }
             
             // Format response payload
