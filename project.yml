@@ -1,0 +1,18 @@
+name: iOSMiniServer
+options:
+  bundleIdPrefix: com.antigravity
+targets:
+  iOSMiniServer:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: iOSMiniServer
+    info:
+      plist:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSLocalNetworkUsageDescription: "Ứng dụng cần truy cập mạng cục bộ để thiết lập HTTP server chia sẻ file."
+        NSBonjourServices:
+          - "_http._tcp"

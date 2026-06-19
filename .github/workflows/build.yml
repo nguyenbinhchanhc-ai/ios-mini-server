@@ -1,0 +1,54 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Compile and Package IPA
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Clean Build Directory
+        run: |
+          xcodebuild clean \
+            -project iOSMiniServer.xcodeproj \
+            -scheme iOSMiniServer \
+            -configuration Release
+
+      - name: Archive Project
+        run: |
+          xcodebuild archive \
+            -project iOSMiniServer.xcodeproj \
+            -scheme iOSMiniServer \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath $PWD/build/iOSMiniServer.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Package IPA
+        run: |
+          mkdir -p $PWD/build/Payload
+          cp -r $PWD/build/iOSMiniServer.xcarchive/Products/Applications/iOSMiniServer.app $PWD/build/Payload/
+          cd build
+          zip -r iOSMiniServer.ipa Payload
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: iOSMiniServer-Unsigned-IPA
+          path: build/iOSMiniServer.ipa
