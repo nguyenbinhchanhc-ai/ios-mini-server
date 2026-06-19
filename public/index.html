@@ -774,6 +774,7 @@
         stats: { total: 0, blocked: 0, allowed: 0, blockedPercent: 0.0 }, 
         isUpdating: false 
     };
+    let isConfigLoaded = false;
 
     function fetchDNSConfig() {
         fetch('/dns/config')
@@ -836,17 +837,12 @@
         document.getElementById('dnsStatCacheHit').innerText = (dnsConfig.stats.cacheHitRate !== undefined ? dnsConfig.stats.cacheHitRate.toFixed(1) : '0.0') + '%';
         document.getElementById('dnsStatLatency').innerText = (dnsConfig.stats.avgLatency !== undefined ? dnsConfig.stats.avgLatency.toFixed(1) : '0.0') + ' ms';
         
-        if(document.activeElement !== document.getElementById('upstreamInput')) {
+        if (!isConfigLoaded) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
-        }
-        
-        // Update Groq AI configs
-        document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
-        if(document.activeElement !== document.getElementById('groqApiKey')) {
+            document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
             document.getElementById('groqApiKey').value = dnsConfig.groqApiKey || "";
-        }
-        if(document.activeElement !== document.getElementById('groqModel')) {
             document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.1-8b-instant";
+            isConfigLoaded = true;
         }
         
         // Log table rows
@@ -1049,6 +1045,7 @@
             .then(res => {
                 if (res.ok) {
                     showToast('Đã lưu DNS thượng nguồn');
+                    isConfigLoaded = false;
                     fetchDNSConfig();
                 } else {
                     showToast('Lỗi cấu hình Upstream', 'error');
@@ -1080,6 +1077,7 @@
             .then(res => {
                 if (res.ok) {
                     showToast('Đã lưu cấu hình Groq AI');
+                    isConfigLoaded = false;
                     fetchDNSConfig();
                 } else {
                     showToast('Lỗi khi lưu cấu hình', 'error');
