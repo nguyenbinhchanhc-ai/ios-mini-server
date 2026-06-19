@@ -1301,9 +1301,10 @@
                     resultDiv.innerHTML = `<strong>Lỗi:</strong> ${data.error}<br><small style="font-size:0.7rem;word-break:break-all;">${data.raw || ''}</small>`;
                 } else {
                     const statusText = data.blocked ? '<span style="color: #ef4444; font-weight: bold;">❌ CHẶN (BLOCKED)</span>' : '<span style="color: #10b981; font-weight: bold;">✅ CHO PHÉP (ALLOWED)</span>';
+                    const modelInfo = data.modelUsed ? `<br><strong>Mô hình sử dụng:</strong> <span style="color: #a78bfa; font-weight: bold;">${data.modelUsed}</span>` : '';
                     resultDiv.innerHTML = `
                         <strong>Trạng thái AI phân loại:</strong> ${statusText}<br>
-                        <strong>Lý do:</strong> ${data.reason || 'Không có'}
+                        <strong>Lý do:</strong> ${data.reason || 'Không có'}${modelInfo}
                     `;
                 }
             })

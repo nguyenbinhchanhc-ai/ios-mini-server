@@ -140,6 +140,11 @@ let groqKeyIndex = 0;
 let isQueuePaused = false;
 let queueTimeoutId = null;
 const QUEUE_DELAY_MS = 4000;
+const FALLBACK_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "gemma2-9b-it"
+];
 
 // Shared Upstream UDP Client Sockets
 let upstreamSocket = null;
@@ -805,15 +810,37 @@ function processGroqQueue() {
     }, QUEUE_DELAY_MS);
 }
 
-function checkDomainWithGroq(domain, apiKey, callback) {
+function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0) {
     if (!apiKey) {
         aiDecisionCache.delete(domain);
         if (callback) callback();
         return;
     }
-    const model = "llama-3.3-70b-versatile";
     
-    console.log(`[AI Guard] Scanning domain: ${domain} via Groq (Llama 3.3 70B)...`);
+    // Check if we exhausted all fallback models
+    if (modelIndex >= FALLBACK_MODELS.length) {
+        console.warn(`[AI Guard] All Groq models exhausted for ${domain}. Pausing AI queue for 60s...`);
+        isQueuePaused = true;
+        // Re-insert at the beginning of the queue if not already there
+        if (!groqQueue.includes(domain)) {
+            groqQueue.unshift(domain);
+        }
+        aiDecisionCache.delete(domain);
+        
+        if (queueTimeoutId) clearTimeout(queueTimeoutId);
+        queueTimeoutId = setTimeout(() => {
+            isQueuePaused = false;
+            queueTimeoutId = null;
+            console.log("[AI Guard] Resuming AI queue after rate limit cooldown.");
+            processGroqQueue();
+        }, 60000); // 60 seconds cooldown
+        
+        if (callback) callback();
+        return;
+    }
+    
+    const model = FALLBACK_MODELS[modelIndex];
+    console.log(`[AI Guard] Scanning domain: ${domain} via Groq (${model}) [Try #${modelIndex + 1}]...`);
     
     // Select exactly 4 dynamic examples (2 blocked, 2 allowed) to keep prompt size small (~350 tokens) and prevent 429 TPM exhaustion
     const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
@@ -859,11 +886,12 @@ function checkDomainWithGroq(domain, apiKey, callback) {
         }
     };
     
-    let completed = false;
-    const done = () => {
-        if (!completed) {
-            completed = true;
-            callback();
+    let fallbackCalled = false;
+    const triggerFallback = (reason) => {
+        if (!fallbackCalled) {
+            fallbackCalled = true;
+            console.warn(`[AI Guard] Groq model ${model} failed for ${domain} (${reason}). Trying fallback...`);
+            checkDomainWithGroq(domain, apiKey, callback, modelIndex + 1);
         }
     };
     
@@ -874,27 +902,7 @@ function checkDomainWithGroq(domain, apiKey, callback) {
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
-                        if (res.statusCode === 429) {
-                            console.warn(`[AI Guard] Rate limit hit (429) for ${domain}. Pausing AI queue for 60s...`);
-                            isQueuePaused = true;
-                            // Re-insert at the beginning of the queue if not already there
-                            if (!groqQueue.includes(domain)) {
-                                groqQueue.unshift(domain);
-                            }
-                            aiDecisionCache.delete(domain);
-                            
-                            if (queueTimeoutId) clearTimeout(queueTimeoutId);
-                            queueTimeoutId = setTimeout(() => {
-                                isQueuePaused = false;
-                                queueTimeoutId = null;
-                                console.log("[AI Guard] Resuming AI queue after rate limit cooldown.");
-                                processGroqQueue();
-                            }, 60000); // 60 seconds cooldown
-                        } else {
-                            console.error(`[AI Guard] Groq returned status ${res.statusCode}`);
-                            aiDecisionCache.delete(domain);
-                        }
-                        done();
+                        triggerFallback(`Status ${res.statusCode}`);
                         return;
                     }
                     
@@ -905,7 +913,7 @@ function checkDomainWithGroq(domain, apiKey, callback) {
                         if (decision.blocked === true) {
                             aiDecisionCache.set(domain, true);
                             saveAICache(); // Save AI classification cache to disk
-                            console.log(`[AI Guard] Groq classified ${domain} as BLOCKED. Reason: ${decision.reason}`);
+                            console.log(`[AI Guard] Groq classified ${domain} as BLOCKED via ${model}. Reason: ${decision.reason}`);
                             
                             // Auto block the domain
                             customBlockedSet.add(domain);
@@ -929,7 +937,7 @@ function checkDomainWithGroq(domain, apiKey, callback) {
                         } else {
                             aiDecisionCache.set(domain, false);
                             saveAICache(); // Save AI classification cache to disk
-                            console.log(`[AI Guard] Groq classified ${domain} as ALLOWED.`);
+                            console.log(`[AI Guard] Groq classified ${domain} as ALLOWED via ${model}.`);
                             
                             // Learn from this allowed domain dynamically
                             learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
@@ -940,29 +948,27 @@ function checkDomainWithGroq(domain, apiKey, callback) {
                             
                             broadcastUpdate();
                         }
+                        if (callback) callback();
                     } else {
-                        aiDecisionCache.delete(domain);
+                        triggerFallback("Empty response message content");
                     }
                 } catch (e) {
                     console.error("[AI Guard] Failed to parse Groq response:", e);
-                    aiDecisionCache.delete(domain);
+                    triggerFallback(`Parse error: ${e.message}`);
                 }
-                done();
             });
         });
         
         req.on('error', (e) => {
             console.error("[AI Guard] Groq API error:", e);
-            aiDecisionCache.delete(domain);
-            done();
+            triggerFallback(`Request error: ${e.message}`);
         });
         
         req.write(postData);
         req.end();
     } catch (e) {
         console.error("[AI Guard] Groq API request exception:", e);
-        aiDecisionCache.delete(domain);
-        done();
+        triggerFallback(`Exception: ${e.message}`);
     }
 }
 
@@ -1457,17 +1463,13 @@ app.post('/dns/groq/keys/remove', (req, res) => {
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
-app.get('/dns/groq/test', (req, res) => {
-    const domain = req.query.domain;
-    if (!domain) {
-        return res.status(400).json({ error: "Missing domain parameter" });
-    }
-    const apiKey = getNextGroqKey();
-    if (!apiKey) {
-        return res.status(400).json({ error: "No API Keys configured. Add at least one Groq API Key." });
+function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
+    if (modelIndex >= FALLBACK_MODELS.length) {
+        return res.status(500).json({ error: "Tất cả các mô hình Groq trong chuỗi đều bị quá tải (Rate Limit) hoặc gặp lỗi. Vui lòng thử lại sau." });
     }
     
-    const model = "llama-3.3-70b-versatile";
+    const model = FALLBACK_MODELS[modelIndex];
+    
     // Select exactly 4 dynamic examples (2 blocked, 2 allowed) to keep prompt size small (~350 tokens) and prevent 429 TPM exhaustion
     const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
     const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-2);
@@ -1512,35 +1514,63 @@ app.get('/dns/groq/test', (req, res) => {
         }
     };
     
-    const request = https.request(options, (response) => {
-        let body = [];
-        response.on('data', chunk => body.push(chunk));
-        response.on('end', () => {
-            try {
-                const responseString = Buffer.concat(body).toString('utf8');
-                if (response.statusCode !== 200) {
-                    return res.status(500).json({ error: `Groq returned status ${response.statusCode}`, raw: responseString });
+    let fallbackCalled = false;
+    const triggerFallback = (reason) => {
+        if (!fallbackCalled) {
+            fallbackCalled = true;
+            console.warn(`[AI Test] Groq model ${model} failed for ${domain} (${reason}). Trying fallback...`);
+            runTestWithFallback(domain, apiKey, res, modelIndex + 1);
+        }
+    };
+    
+    try {
+        const request = https.request(options, (response) => {
+            let body = [];
+            response.on('data', chunk => body.push(chunk));
+            response.on('end', () => {
+                try {
+                    const responseString = Buffer.concat(body).toString('utf8');
+                    if (response.statusCode !== 200) {
+                        triggerFallback(`Status ${response.statusCode}: ${responseString}`);
+                        return;
+                    }
+                    const resData = JSON.parse(responseString);
+                    const replyStr = resData.choices?.[0]?.message?.content;
+                    if (replyStr) {
+                        const decision = JSON.parse(replyStr);
+                        decision.modelUsed = model;
+                        return res.json(decision);
+                    } else {
+                        triggerFallback("Empty response content");
+                    }
+                } catch (e) {
+                    triggerFallback(`Parse error: ${e.message}`);
                 }
-                const resData = JSON.parse(responseString);
-                const replyStr = resData.choices?.[0]?.message?.content;
-                if (replyStr) {
-                    const decision = JSON.parse(replyStr);
-                    return res.json(decision);
-                } else {
-                    return res.status(500).json({ error: "Empty response from Groq", raw: responseString });
-                }
-            } catch (e) {
-                return res.status(500).json({ error: "Failed to parse Groq response", details: e.message });
-            }
+            });
         });
-    });
+        
+        request.on('error', (e) => {
+            triggerFallback(`Request error: ${e.message}`);
+        });
+        
+        request.write(postData);
+        request.end();
+    } catch (e) {
+        triggerFallback(`Exception: ${e.message}`);
+    }
+}
+
+app.get('/dns/groq/test', (req, res) => {
+    const domain = req.query.domain;
+    if (!domain) {
+        return res.status(400).json({ error: "Missing domain parameter" });
+    }
+    const apiKey = getNextGroqKey();
+    if (!apiKey) {
+        return res.status(400).json({ error: "No API Keys configured. Add at least one Groq API Key." });
+    }
     
-    request.on('error', (e) => {
-        res.status(500).json({ error: "Groq API request error", details: e.message });
-    });
-    
-    request.write(postData);
-    request.end();
+    runTestWithFallback(domain, apiKey, res, 0);
 });
 
 app.post('/dns/ai/learning/remove', (req, res) => {
