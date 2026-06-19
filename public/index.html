@@ -598,6 +598,14 @@
                             <div class="stat-card-title">Trạng thái Server</div>
                             <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
                         </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Bộ nhớ phân loại AI</div>
+                            <div class="stat-card-val" id="dnsStatAICache" style="font-weight: bold; color: #c084fc;">0 tên miền</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-title">Hàng đợi quét AI</div>
+                            <div class="stat-card-val" id="dnsStatAIQueue" style="font-weight: bold; color: #fb7185;">0 yêu cầu</div>
+                        </div>
                     </div>
 
                     <div class="grid">
@@ -747,8 +755,14 @@
                                 </div>
                                 
                                 <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Nhật ký AI Learning (In-Context)</h4>
-                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Các mối nguy hại AI tự học từ thực tế và đưa vào ngữ cảnh huấn luyện Llama 3.3:</p>
+                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                                        <h4 style="font-size: 0.9rem; color: var(--text-muted);">Nhật ký AI Learning (In-Context)</h4>
+                                        <div style="display: flex; gap: 0.5rem;">
+                                            <button onclick="clearAICache()" style="padding: 0.25rem 0.5rem; border-radius: 6px; background: rgba(192, 132, 252, 0.1); border: 1px solid rgba(192, 132, 252, 0.2); color: #c084fc; font-size: 0.7rem; font-weight: bold; cursor: pointer;">Xóa Cache AI</button>
+                                            <button onclick="clearAILearning()" style="padding: 0.25rem 0.5rem; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; font-size: 0.7rem; font-weight: bold; cursor: pointer;">Reset Tri thức</button>
+                                        </div>
+                                    </div>
+                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Các hành vi AI tự động nhận biết, học hỏi từ thực tế để huấn luyện lại Llama 3.3:</p>
                                     <div style="max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.25); border-radius: 8px; border: 1px solid var(--card-border); font-size: 0.75rem;">
                                         <table style="width: 100%; border-collapse: collapse; text-align: left;">
                                             <thead>
@@ -757,6 +771,7 @@
                                                     <th style="padding: 0.4rem 0.5rem;">Tên miền đã học</th>
                                                     <th style="padding: 0.4rem 0.5rem; width: 100px;">Hành vi</th>
                                                     <th style="padding: 0.4rem 0.5rem; width: 85px;">Trạng thái</th>
+                                                    <th style="padding: 0.4rem 0.5rem; width: 40px; text-align: center;">Xóa</th>
                                                 </tr>
                                             </thead>
                                             <tbody id="aiLearningList">
@@ -916,6 +931,11 @@
             statusEl.style.color = '#ef4444';
         }
 
+        // Update AI stats
+        document.getElementById('dnsStatAICache').innerText = (dnsConfig.aiCacheCount !== undefined ? dnsConfig.aiCacheCount : 0) + ' tên miền';
+        document.getElementById('dnsStatAIQueue').innerText = (dnsConfig.aiQueueLength !== undefined ? dnsConfig.aiQueueLength : 0) + ' yêu cầu' +
+            (dnsConfig.activeGroqRequests ? ` (đang quét ${dnsConfig.activeGroqRequests})` : '');
+
         if (!isConfigLoaded) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
@@ -932,16 +952,27 @@
         // Update AI Learning List
         const learningList = document.getElementById('aiLearningList');
         if (!dnsConfig.learnedExamples || dnsConfig.learnedExamples.length === 0) {
-            learningList.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu học động. Hoạt động khi AI tự động chặn.</td></tr>';
+            learningList.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu học động. Hoạt động khi AI tự động chặn.</td></tr>';
         } else {
-            learningList.innerHTML = dnsConfig.learnedExamples.map((ex, i) => `
-                <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                    <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-weight: bold;">#${i + 1}</td>
-                    <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: #a78bfa; word-break: break-all;">${ex.domain}</td>
-                    <td style="padding: 0.4rem 0.5rem; color: #ef4444; font-weight: 500;">${ex.reason}</td>
-                    <td style="padding: 0.4rem 0.5rem;"><span style="color: #10b981; font-size: 0.7rem; font-weight: bold; background: rgba(16, 185, 129, 0.1); padding: 0.1rem 0.3rem; border-radius: 4px;">Đã học</span></td>
-                </tr>
-            `).reverse().join('');
+            learningList.innerHTML = dnsConfig.learnedExamples.map((ex, i) => {
+                const isBlocked = ex.blocked === true;
+                const reasonColor = isBlocked ? '#ef4444' : '#10b981';
+                const badgeStyle = isBlocked 
+                    ? 'color: #ef4444; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);' 
+                    : 'color: #10b981; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2);';
+                const badgeText = isBlocked ? 'Đã chặn' : 'Hợp lệ';
+                return `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-weight: bold;">#${i + 1}</td>
+                        <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: #a78bfa; word-break: break-all;">${ex.domain}</td>
+                        <td style="padding: 0.4rem 0.5rem; color: ${reasonColor}; font-weight: 500;">${ex.reason}</td>
+                        <td style="padding: 0.4rem 0.5rem;"><span style="font-size: 0.7rem; font-weight: bold; padding: 0.1rem 0.3rem; border-radius: 4px; ${badgeStyle}">${badgeText}</span></td>
+                        <td style="padding: 0.4rem 0.5rem; text-align: center;">
+                            <button onclick="removeAILearning('${ex.domain}')" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 0.9rem;" title="Xóa tri thức này">✕</button>
+                        </td>
+                    </tr>
+                `;
+            }).reverse().join('');
         }
         
         // Log table rows
@@ -1280,6 +1311,57 @@
                 console.error(err);
                 resultDiv.style.color = '#ef4444';
                 resultDiv.innerText = 'Lỗi kết nối đến máy chủ!';
+            });
+    }
+
+    function removeAILearning(domain) {
+        if (!confirm(`Bạn có muốn xóa tri thức đã học cho tên miền "${domain}" không?`)) return;
+        fetch(`/dns/ai/learning/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast(`Đã xóa tri thức của AI cho: ${domain}`);
+                    fetchDNSConfig();
+                } else {
+                    showToast('Xóa tri thức thất bại', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
+            });
+    }
+
+    function clearAICache() {
+        if (!confirm('Bạn có muốn xóa sạch toàn bộ bộ nhớ Cache phân loại của AI không? (Hành động này sẽ buộc AI quét lại các tên miền từ đầu)')) return;
+        fetch('/dns/ai/cache/clear', { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã xóa sạch bộ nhớ cache phân loại AI');
+                    fetchDNSConfig();
+                } else {
+                    showToast('Lỗi xóa cache AI', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
+            });
+    }
+
+    function clearAILearning() {
+        if (!confirm('Bạn có muốn reset toàn bộ các ví dụ tự học của AI về trạng thái mặc định không?')) return;
+        fetch('/dns/ai/learning/clear', { method: 'POST' })
+            .then(res => {
+                if (res.ok) {
+                    showToast('Đã đặt lại dữ liệu tự học AI về mặc định');
+                    fetchDNSConfig();
+                } else {
+                    showToast('Reset tri thức thất bại', 'error');
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
             });
     }
 

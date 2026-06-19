@@ -1,0 +1,77 @@
+[
+  {
+    "domain": "doubleclick.net",
+    "blocked": true,
+    "reason": "Quảng cáo Google"
+  },
+  {
+    "domain": "log.tiktokv.com",
+    "blocked": true,
+    "reason": "Theo dõi TikTok"
+  },
+  {
+    "domain": "graph.facebook.com/tr",
+    "blocked": true,
+    "reason": "Facebook Pixel Tracker"
+  },
+  {
+    "domain": "google-analytics.com",
+    "blocked": true,
+    "reason": "Theo dõi Google Analytics"
+  },
+  {
+    "domain": "techcombank-verify.cfd",
+    "blocked": true,
+    "reason": "Giả mạo Techcombank"
+  },
+  {
+    "domain": "momo-nhan-qua.xyz",
+    "blocked": true,
+    "reason": "Lừa đảo Momo"
+  },
+  {
+    "domain": "shopee-tri-an.top",
+    "blocked": true,
+    "reason": "Lừa đảo Shopee"
+  },
+  {
+    "domain": "mbcheck-auth.cc",
+    "blocked": true,
+    "reason": "Giả mạo MB Bank"
+  },
+  {
+    "domain": "admicro.vn",
+    "blocked": true,
+    "reason": "Quảng cáo Việt Nam"
+  },
+  {
+    "domain": "adtima.vn",
+    "blocked": true,
+    "reason": "Quảng cáo Zalo/Adtima"
+  },
+  {
+    "domain": "v3.tiktokcdn.com",
+    "blocked": false,
+    "reason": "CDN Tiktok Video"
+  },
+  {
+    "domain": "gateway.fe2.apple-dns.net",
+    "blocked": false,
+    "reason": "Hệ thống Apple"
+  },
+  {
+    "domain": "graph.facebook.com",
+    "blocked": false,
+    "reason": "API Facebook hợp lệ"
+  },
+  {
+    "domain": "sp.shopee.vn",
+    "blocked": false,
+    "reason": "Dịch vụ Shopee chính"
+  },
+  {
+    "domain": "momo.vn",
+    "blocked": false,
+    "reason": "Dịch vụ ví Momo chính"
+  }
+]

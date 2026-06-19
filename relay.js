@@ -13,6 +13,8 @@ const wss = new WebSocket.Server({ server });
 
 const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
 const SUB_CACHE_PATH = path.join(__dirname, 'subscription_blocklist.txt');
+const AI_LEARNED_PATH = path.join(__dirname, 'ai_learned_examples.json');
+const AI_CACHE_PATH = path.join(__dirname, 'ai_decision_cache.json');
 
 // State variables
 let config = {};
@@ -26,7 +28,7 @@ let logs = [];
 const wsClients = new Set();
 
 // AI Learned Examples (Few-Shot In-context training)
-const learnedExamples = [];
+let learnedExamples = [];
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, expiresAt }
@@ -34,10 +36,106 @@ const MAX_CACHE_SIZE = 15000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
 const aiDecisionCache = new Map(); // Key: domain, Value: true/false
 
+// Load/Save functions for AI persistence
+function loadAILearning() {
+    try {
+        if (fs.existsSync(AI_LEARNED_PATH)) {
+            const data = fs.readFileSync(AI_LEARNED_PATH, 'utf8');
+            const list = JSON.parse(data);
+            if (Array.isArray(list)) {
+                learnedExamples.length = 0;
+                list.forEach(ex => {
+                    if (ex && typeof ex.domain === 'string') {
+                        learnedExamples.push({
+                            domain: ex.domain,
+                            blocked: !!ex.blocked,
+                            reason: ex.reason || "Mối nguy hại"
+                        });
+                    }
+                });
+                console.log(`Loaded ${learnedExamples.length} AI learned examples.`);
+                return;
+            }
+        }
+    } catch (e) {
+        console.error("Failed to load AI learned examples:", e);
+    }
+    seedDefaultAILearning();
+}
+
+function seedDefaultAILearning() {
+    const defaults = [
+        { domain: "doubleclick.net", blocked: true, reason: "Quảng cáo Google" },
+        { domain: "log.tiktokv.com", blocked: true, reason: "Theo dõi TikTok" },
+        { domain: "graph.facebook.com/tr", blocked: true, reason: "Facebook Pixel Tracker" },
+        { domain: "google-analytics.com", blocked: true, reason: "Theo dõi Google Analytics" },
+        { domain: "techcombank-verify.cfd", blocked: true, reason: "Giả mạo Techcombank" },
+        { domain: "momo-nhan-qua.xyz", blocked: true, reason: "Lừa đảo Momo" },
+        { domain: "shopee-tri-an.top", blocked: true, reason: "Lừa đảo Shopee" },
+        { domain: "mbcheck-auth.cc", blocked: true, reason: "Giả mạo MB Bank" },
+        { domain: "admicro.vn", blocked: true, reason: "Quảng cáo Việt Nam" },
+        { domain: "adtima.vn", blocked: true, reason: "Quảng cáo Zalo/Adtima" },
+        { domain: "v3.tiktokcdn.com", blocked: false, reason: "CDN Tiktok Video" },
+        { domain: "gateway.fe2.apple-dns.net", blocked: false, reason: "Hệ thống Apple" },
+        { domain: "graph.facebook.com", blocked: false, reason: "API Facebook hợp lệ" },
+        { domain: "sp.shopee.vn", blocked: false, reason: "Dịch vụ Shopee chính" },
+        { domain: "momo.vn", blocked: false, reason: "Dịch vụ ví Momo chính" }
+    ];
+    learnedExamples.length = 0;
+    defaults.forEach(d => learnedExamples.push(d));
+    saveAILearning();
+}
+
+let lastLearningSaveTimeout = null;
+function saveAILearning() {
+    if (lastLearningSaveTimeout) return;
+    lastLearningSaveTimeout = setTimeout(() => {
+        lastLearningSaveTimeout = null;
+        try {
+            fs.writeFileSync(AI_LEARNED_PATH, JSON.stringify(learnedExamples, null, 2), 'utf8');
+        } catch (e) {
+            console.error("Failed to save AI learned examples:", e);
+        }
+    }, 2000);
+}
+
+function loadAICache() {
+    try {
+        if (fs.existsSync(AI_CACHE_PATH)) {
+            const data = fs.readFileSync(AI_CACHE_PATH, 'utf8');
+            const obj = JSON.parse(data);
+            aiDecisionCache.clear();
+            for (const [k, v] of Object.entries(obj)) {
+                aiDecisionCache.set(k, !!v);
+            }
+            console.log(`Loaded ${aiDecisionCache.size} domains in AI decision cache.`);
+        }
+    } catch (e) {
+        console.error("Failed to load AI decision cache:", e);
+    }
+}
+
+let lastCacheSaveTimeout = null;
+function saveAICache() {
+    if (lastCacheSaveTimeout) return;
+    lastCacheSaveTimeout = setTimeout(() => {
+        lastCacheSaveTimeout = null;
+        try {
+            const obj = {};
+            for (const [k, v] of aiDecisionCache.entries()) {
+                obj[k] = v;
+            }
+            fs.writeFileSync(AI_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
+        } catch (e) {
+            console.error("Failed to save AI decision cache:", e);
+        }
+    }, 5000);
+}
+
 // Groq AI Guard Queue Variables
 const groqQueue = [];
 let activeGroqRequests = 0;
-const GROQ_CONCURRENCY_PER_KEY = 3;
+const GROQ_CONCURRENCY_PER_KEY = 5;
 let groqKeyIndex = 0;
 
 // Shared Upstream UDP Client Sockets
@@ -149,12 +247,17 @@ function getWSUpdatePayload() {
         groqModel: config.groqModel || "llama-3.3-70b-versatile",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
+        aiCacheCount: aiDecisionCache.size,
+        aiQueueLength: groqQueue.length,
+        activeGroqRequests: activeGroqRequests,
         serverStatus: getServerStatus()
     };
 }
 
 // Load config and caches
 loadConfig();
+loadAILearning();
+loadAICache();
 
 // Load the blocklists on startup
 setTimeout(() => {
@@ -648,24 +751,18 @@ function checkDomainWithGroq(domain, apiKey, callback) {
     console.log(`[AI Guard] Scanning domain: ${domain} via Groq (Llama 3.3 70B)...`);
     
     // Dynamic In-Context Learning (Few-Shot examples) to train the model on the fly
-    const baseExamples = [
-        { domain: "doubleclick.net", blocked: true, reason: "Quảng cáo" },
-        { domain: "graph.facebook.com", blocked: false, reason: "Mạng xã hội" },
-        { domain: "log.tiktokv.com", blocked: true, reason: "Theo dõi TikTok" },
-        { domain: "google-analytics.com", blocked: true, reason: "Theo dõi Google" },
-        { domain: "gateway.fe2.apple-dns.net", blocked: false, reason: "Hệ thống Apple" },
-        { domain: "techcombank-login-scam.vn", blocked: true, reason: "Giả mạo ngân hàng" },
-        { domain: "v3.tiktokcdn.com", blocked: false, reason: "CDN Video" }
-    ];
-    const allExamples = [...baseExamples, ...learnedExamples];
+    const recentExamples = learnedExamples.slice(-20);
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        allExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+        recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities.\n\n" +
-                          "Rules:\n" +
+    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, telemetry, phishing, malware, scam, or other harmful activities.\n\n" +
+                          "Strict Rules:\n" +
                           "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
                           "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services (e.g. *.tiktokcdn.com, *.fbcdn.net, *.akamai.net are allowed CDNs; but log.tiktokv.com, graph.facebook.com/tr, ads.youtube.com are blocked trackers/ads).\n" +
-                          "3. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          "3. Watch out for Typosquatting/Phishing: If the domain contains a famous brand (like techcombank, shopee, momo, mbcheck, apple-dns, bidv, vietcombank, sacombank, facebook) but looks suspicious or uses a cheap/non-standard TLD (like .cfd, .xyz, .cc, .top, .site, .icu, .vip, .win, .online, .tech, .click), block it.\n" +
+                          "4. Watch out for ad networks and trackers in Vietnam: e.g. admicro, eclick, adtima, ants, yomedia, ad.gonet.vn, and other telemetry/tracking subdomains.\n" +
+                          "5. Allow legitimate primary domains and their structural subdomains (e.g. static assets, images, logins) unless they are explicitly ad servers.\n" +
+                          "6. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
@@ -722,23 +819,41 @@ function checkDomainWithGroq(domain, apiKey, callback) {
                         const decision = JSON.parse(replyStr);
                         if (decision.blocked === true) {
                             aiDecisionCache.set(domain, true);
+                            saveAICache(); // Save AI classification cache to disk
                             console.log(`[AI Guard] Groq classified ${domain} as BLOCKED. Reason: ${decision.reason}`);
                             
                             // Auto block the domain
                             customBlockedSet.add(domain);
                             config.customBlockedDomains = Array.from(customBlockedSet);
+                            
+                            // Retroactively adjust stats: convert 1 allowed to blocked
+                            config.stats.blocked += 1;
+                            if (config.stats.allowed > 0) {
+                                config.stats.allowed -= 1;
+                            }
                             saveConfig();
                             
                             // Learn from this block dynamically
-                            learnedExamples.push({ domain, blocked: true, reason: decision.reason });
-                            if (learnedExamples.length > 15) {
+                            learnedExamples.push({ domain, blocked: true, reason: decision.reason || "Mối nguy hại" });
+                            if (learnedExamples.length > 50) {
                                 learnedExamples.shift();
                             }
+                            saveAILearning(); // Save AI dynamic learning log to disk
                             
                             logQuery(domain, true, "AI Guard (Auto Blocked)", "blocked");
                         } else {
                             aiDecisionCache.set(domain, false);
+                            saveAICache(); // Save AI classification cache to disk
                             console.log(`[AI Guard] Groq classified ${domain} as ALLOWED.`);
+                            
+                            // Learn from this allowed domain dynamically
+                            learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
+                            if (learnedExamples.length > 50) {
+                                learnedExamples.shift();
+                            }
+                            saveAILearning(); // Save AI dynamic learning log to disk
+                            
+                            broadcastUpdate();
                         }
                     } else {
                         aiDecisionCache.delete(domain);
@@ -1268,24 +1383,18 @@ app.get('/dns/groq/test', (req, res) => {
     }
     
     const model = "llama-3.3-70b-versatile";
-    const baseExamples = [
-        { domain: "doubleclick.net", blocked: true, reason: "Quảng cáo" },
-        { domain: "graph.facebook.com", blocked: false, reason: "Mạng xã hội" },
-        { domain: "log.tiktokv.com", blocked: true, reason: "Theo dõi TikTok" },
-        { domain: "google-analytics.com", blocked: true, reason: "Theo dõi Google" },
-        { domain: "gateway.fe2.apple-dns.net", blocked: false, reason: "Hệ thống Apple" },
-        { domain: "techcombank-login-scam.vn", blocked: true, reason: "Giả mạo ngân hàng" },
-        { domain: "v3.tiktokcdn.com", blocked: false, reason: "CDN Video" }
-    ];
-    const allExamples = [...baseExamples, ...learnedExamples];
+    const recentExamples = learnedExamples.slice(-20);
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        allExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+        recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, phishing, malware, scam, or other harmful activities.\n\n" +
-                          "Rules:\n" +
+    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, telemetry, phishing, malware, scam, or other harmful activities.\n\n" +
+                          "Strict Rules:\n" +
                           "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
                           "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services (e.g. *.tiktokcdn.com, *.fbcdn.net, *.akamai.net are allowed CDNs; but log.tiktokv.com, graph.facebook.com/tr, ads.youtube.com are blocked trackers/ads).\n" +
-                          "3. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          "3. Watch out for Typosquatting/Phishing: If the domain contains a famous brand (like techcombank, shopee, momo, mbcheck, apple-dns, bidv, vietcombank, sacombank, facebook) but looks suspicious or uses a cheap/non-standard TLD (like .cfd, .xyz, .cc, .top, .site, .icu, .vip, .win, .online, .tech, .click), block it.\n" +
+                          "4. Watch out for ad networks and trackers in Vietnam: e.g. admicro, eclick, adtima, ants, yomedia, ad.gonet.vn, and other telemetry/tracking subdomains.\n" +
+                          "5. Allow legitimate primary domains and their structural subdomains (e.g. static assets, images, logins) unless they are explicitly ad servers.\n" +
+                          "6. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
@@ -1346,6 +1455,33 @@ app.get('/dns/groq/test', (req, res) => {
     request.end();
 });
 
+app.post('/dns/ai/learning/remove', (req, res) => {
+    const domain = req.query.domain;
+    if (domain) {
+        const d = domain.trim().toLowerCase();
+        learnedExamples = learnedExamples.filter(ex => ex.domain.toLowerCase() !== d);
+        saveAILearning();
+        broadcastUpdate();
+        res.send(`Removed ${d} from AI learning log.`);
+    } else {
+        res.status(400).send("Missing domain parameter");
+    }
+});
+
+app.post('/dns/ai/learning/clear', (req, res) => {
+    learnedExamples.length = 0;
+    seedDefaultAILearning();
+    broadcastUpdate();
+    res.send("AI learning log reset to defaults.");
+});
+
+app.post('/dns/ai/cache/clear', (req, res) => {
+    aiDecisionCache.clear();
+    saveAICache();
+    broadcastUpdate();
+    res.send("AI classification cache cleared.");
+});
+
 app.post('/dns/stats/reset', (req, res) => {
     config.stats = { total: 0, blocked: 0, allowed: 0 };
     cacheHits = 0;
@@ -1361,6 +1497,40 @@ app.post('/dns/toggle', (req, res) => {
     // Persistent Cloud DNS server is always active
     res.json({ running: true });
 });
+
+// Graceful shutdown hooks to persist data immediately on exit
+function gracefulShutdown() {
+    console.log("Shutting down. Saving config and caches...");
+    if (lastLearningSaveTimeout) {
+        clearTimeout(lastLearningSaveTimeout);
+        try {
+            fs.writeFileSync(AI_LEARNED_PATH, JSON.stringify(learnedExamples, null, 2), 'utf8');
+        } catch (e) {
+            console.error("Graceful shutdown failed to write AI learning examples:", e);
+        }
+    }
+    if (lastCacheSaveTimeout) {
+        clearTimeout(lastCacheSaveTimeout);
+        try {
+            const obj = {};
+            for (const [k, v] of aiDecisionCache.entries()) {
+                obj[k] = v;
+            }
+            fs.writeFileSync(AI_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
+        } catch (e) {
+            console.error("Graceful shutdown failed to write AI cache:", e);
+        }
+    }
+    try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+    } catch (e) {
+        console.error("Graceful shutdown failed to write config:", e);
+    }
+    process.exit(0);
+}
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
