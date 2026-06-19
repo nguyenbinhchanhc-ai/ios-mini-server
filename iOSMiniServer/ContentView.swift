@@ -9,10 +9,19 @@ struct FileItem: Identifiable {
 }
 
 struct ContentView: View {
-    @StateObject private var server = MiniHTTPServer(port: 8080)
+    @StateObject private var server: MiniHTTPServer
+    @StateObject private var tunnelClient: WebSocketTunnelClient
+    
     @State private var localIP: String? = nil
     @State private var files: [FileItem] = []
     @State private var selectedShareFile: FileItem? = nil
+    @State private var relayURLString: String = "https://ios-mini-server.glitch.me"
+    
+    init() {
+        let s = MiniHTTPServer(port: 8080)
+        _server = StateObject(wrappedValue: s)
+        _tunnelClient = StateObject(wrappedValue: WebSocketTunnelClient(server: s))
+    }
     
     private var serverURLString: String {
         if let ip = localIP {
@@ -70,9 +79,10 @@ struct ContentView: View {
     @ViewBuilder
     private var statusCard: some View {
         VStack(spacing: 16) {
+            // Local Server Control
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Trạng thái máy chủ")
+                    Text("Máy chủ nội bộ (Wi-Fi)")
                         .font(.caption)
                         .foregroundColor(Color.gray)
                     
@@ -94,6 +104,10 @@ struct ContentView: View {
                 Button(action: {
                     withAnimation(.spring()) {
                         if server.isRunning {
+                            if tunnelClient.isConnected {
+                                tunnelClient.disconnect()
+                                BackgroundHelper.shared.stop()
+                            }
                             server.stop()
                         } else {
                             refreshIP()
@@ -115,19 +129,17 @@ struct ContentView: View {
                 }
             }
             
-            Divider()
-                .background(Color.white.opacity(0.1))
-            
-            // Access URL Display
+            // Local IP Address
             if server.isRunning {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Địa chỉ truy cập trên trình duyệt:")
-                        .font(.subheadline)
-                        .foregroundColor(Color.white.opacity(0.8))
+                    Text("Địa chỉ Wi-Fi nội bộ:")
+                        .font(.caption)
+                        .foregroundColor(Color.gray)
                     
                     HStack {
                         Text(serverURLString)
-                            .font(.headline)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
                             .foregroundColor(Color.cyan)
                             .textSelection(.enabled)
                         
@@ -143,16 +155,113 @@ struct ContentView: View {
                                 .cornerRadius(8)
                         }
                     }
-                    .padding(12)
+                    .padding(10)
                     .background(Color.black.opacity(0.2))
                     .cornerRadius(10)
                 }
-            } else {
-                Text("Nhấn 'Khởi Động' để bắt đầu chạy máy chủ chia sẻ tệp.")
-                    .font(.subheadline)
-                    .foregroundColor(Color.white.opacity(0.5))
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            
+            Divider()
+                .background(Color.white.opacity(0.1))
+            
+            // Public Cloud Tunnel Control
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Đường truyền đám mây (Internet)")
+                            .font(.caption)
+                            .foregroundColor(Color.gray)
+                        
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(tunnelClient.isConnected ? Color.green : Color.orange)
+                                .frame(width: 10, height: 10)
+                                .shadow(color: tunnelClient.isConnected ? Color.green : Color.orange, radius: 4)
+                            
+                            Text(tunnelClient.isConnected ? "ĐẠT KẾT NỐI" : "CHƯA KẾT NỐI")
+                                .font(.footnote)
+                                .fontWeight(.bold)
+                                .foregroundColor(tunnelClient.isConnected ? Color.green : Color.orange)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        withAnimation(.spring()) {
+                            if tunnelClient.isConnected {
+                                tunnelClient.disconnect()
+                                BackgroundHelper.shared.stop()
+                            } else {
+                                if !server.isRunning {
+                                    refreshIP()
+                                    server.start()
+                                }
+                                BackgroundHelper.shared.start()
+                                tunnelClient.connect(to: relayURLString)
+                            }
+                        }
+                    }) {
+                        Text(tunnelClient.isConnected ? "Ngắt Kết Nối" : "Kết Nối Cloud")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundColor(Color.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(tunnelClient.isConnected ? Color.orange : Color.purple)
+                                    .shadow(color: tunnelClient.isConnected ? Color.orange.opacity(0.4) : Color.purple.opacity(0.4), radius: 8)
+                            )
+                    }
+                }
+                
+                if !tunnelClient.isConnected {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Nhập URL Server trung gian:")
+                            .font(.caption2)
+                            .foregroundColor(Color.gray)
+                        
+                        TextField("https://your-relay-domain.com", text: $relayURLString)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .font(.subheadline)
+                            .foregroundColor(Color.white)
+                            .padding(10)
+                            .background(Color.white.opacity(0.05))
+                            .cornerRadius(10)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Địa chỉ truy cập Internet công cộng:")
+                            .font(.caption)
+                            .foregroundColor(Color.gray)
+                        
+                        HStack {
+                            Text(tunnelClient.publicURL)
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundColor(Color.purple)
+                                .textSelection(.enabled)
+                            
+                            Spacer()
+                            
+                            Button(action: {
+                                UIPasteboard.general.string = tunnelClient.publicURL
+                            }) {
+                                Image(systemName: "doc.on.doc")
+                                    .foregroundColor(Color.gray)
+                                    .padding(6)
+                                    .background(Color.white.opacity(0.05))
+                                    .cornerRadius(8)
+                            }
+                        }
+                        .padding(10)
+                        .background(Color.black.opacity(0.2))
+                        .cornerRadius(10)
+                    }
+                }
             }
         }
         .padding()

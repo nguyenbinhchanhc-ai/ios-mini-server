@@ -192,6 +192,164 @@ class MiniHTTPServer: ObservableObject {
         }
     }
     
+    // MARK: - Generic HTTP Handler (WebSocket Relay support)
+    
+    func handleHTTP(method: String, path: String, query: String, body: Data, completion: @escaping (Int, String, Data, [String: String]) -> Void) {
+        log("Tunnel Request: \(method) \(path)")
+        
+        if method == "GET" && path == "/" {
+            let html = getDashboardHTML()
+            completion(200, "text/html; charset=utf-8", html.data(using: .utf8)!, [:])
+        } else if method == "GET" && path == "/files" {
+            let files = listDocumentsFiles()
+            if let jsonData = try? JSONSerialization.data(withJSONObject: files, options: []) {
+                completion(200, "application/json", jsonData, [:])
+            } else {
+                completion(500, "text/plain", "JSON failed".data(using: .utf8)!, [:])
+            }
+        } else if method == "GET" && path == "/download" {
+            let queryParams = parseQuery(query)
+            if let fileName = queryParams["name"] {
+                let fileManager = FileManager.default
+                guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                    completion(500, "text/plain", "Docs offline".data(using: .utf8)!, [:])
+                    return
+                }
+                let fileURL = documentsURL.appendingPathComponent(fileName)
+                if fileManager.fileExists(atPath: fileURL.path) {
+                    if let fileData = try? Data(contentsOf: fileURL) {
+                        let mime = mimeTypeForPath(path: fileName)
+                        let headers = ["Content-Disposition": "attachment; filename=\"\(fileName)\""]
+                        completion(200, mime, fileData, headers)
+                    } else {
+                        completion(500, "text/plain", "Read failed".data(using: .utf8)!, [:])
+                    }
+                } else {
+                    completion(404, "text/plain", "File not found".data(using: .utf8)!, [:])
+                }
+            } else {
+                completion(400, "text/plain", "Missing name".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/upload" {
+            if let boundary = extractBoundary(fromBody: body) {
+                let result = handleUploadData(body: body, boundary: boundary)
+                if result.success {
+                    completion(200, "text/plain", "Upload successful".data(using: .utf8)!, [:])
+                } else {
+                    completion(500, "text/plain", (result.error ?? "Upload failed").data(using: .utf8)!, [:])
+                }
+            } else {
+                completion(400, "text/plain", "Could not extract boundary".data(using: .utf8)!, [:])
+            }
+        } else if method == "POST" && path == "/delete" {
+            let queryParams = parseQuery(query)
+            if let fileName = queryParams["name"] {
+                let fileManager = FileManager.default
+                guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                    completion(500, "text/plain", "Docs offline".data(using: .utf8)!, [:])
+                    return
+                }
+                let fileURL = documentsURL.appendingPathComponent(fileName)
+                if fileManager.fileExists(atPath: fileURL.path) {
+                    do {
+                        try fileManager.removeItem(at: fileURL)
+                        log("Deleted: \(fileName)")
+                        DispatchQueue.main.async {
+                            NotificationCenter.default.post(name: .fileListDidChange, object: nil)
+                        }
+                        completion(200, "text/plain", "Deleted".data(using: .utf8)!, [:])
+                    } catch {
+                        completion(500, "text/plain", "Delete failed".data(using: .utf8)!, [:])
+                    }
+                } else {
+                    completion(404, "text/plain", "File not found".data(using: .utf8)!, [:])
+                }
+            } else {
+                completion(400, "text/plain", "Missing name".data(using: .utf8)!, [:])
+            }
+        } else {
+            completion(404, "text/plain", "Not found".data(using: .utf8)!, [:])
+        }
+    }
+    
+    private func parseQuery(_ query: String) -> [String: String] {
+        var params: [String: String] = [:]
+        for item in query.components(separatedBy: "&") {
+            let parts = item.split(separator: "=", maxSplits: 1).map { String($0) }
+            if parts.count == 2 {
+                let key = parts[0].removingPercentEncoding ?? parts[0]
+                let val = parts[1].removingPercentEncoding ?? parts[1]
+                params[key] = val
+            }
+        }
+        return params
+    }
+    
+    private func extractBoundary(fromBody body: Data) -> String? {
+        let doubleDash = Data([45, 45]) // "--"
+        guard body.starts(with: doubleDash) else { return nil }
+        
+        let crlf = Data([13, 10])
+        guard let crlfRange = body.range(of: crlf) else { return nil }
+        
+        let boundaryData = body.subdata(in: 2..<crlfRange.lowerBound) // Skip "--"
+        return String(data: boundaryData, encoding: .utf8)
+    }
+    
+    private func handleUploadData(body: Data, boundary: String) -> (success: Bool, error: String?) {
+        let boundaryStr = "--" + boundary
+        guard let boundaryData = boundaryStr.data(using: .utf8) else {
+            return (false, "Invalid boundary")
+        }
+        
+        guard let firstBoundaryRange = body.range(of: boundaryData) else {
+            return (false, "Boundary not found")
+        }
+        
+        let partStart = firstBoundaryRange.upperBound + 2
+        guard partStart < body.count else {
+            return (false, "Empty body")
+        }
+        
+        let searchRange = partStart..<body.count
+        guard let nextBoundaryRange = body.range(of: boundaryData, options: [], in: searchRange) else {
+            return (false, "Closing boundary not found")
+        }
+        
+        let partData = body.subdata(in: partStart..<nextBoundaryRange.lowerBound)
+        let doubleCRLF = Data([13, 10, 13, 10])
+        guard let separatorRange = partData.range(of: doubleCRLF) else {
+            return (false, "Part header missing separator")
+        }
+        
+        let partHeaderData = partData.subdata(in: 0..<separatorRange.lowerBound)
+        let fileData = partData.subdata(in: separatorRange.upperBound..<(partData.count - 2))
+        
+        guard let partHeaders = String(data: partHeaderData, encoding: .utf8),
+              let filename = extractFilename(from: partHeaders) else {
+            return (false, "Could not extract filename")
+        }
+        
+        let fileManager = FileManager.default
+        guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return (false, "Docs folder offline")
+        }
+        
+        let fileURL = documentsURL.appendingPathComponent(filename)
+        
+        do {
+            try fileData.write(to: fileURL)
+            log("Saved file: \(filename) (\(fileData.count) bytes)")
+            
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .fileListDidChange, object: nil)
+            }
+            return (true, nil)
+        } catch {
+            return (false, "Write failed: \(error.localizedDescription)")
+        }
+    }
+    
     private func getBoundary(from headers: String) -> String? {
         for line in headers.components(separatedBy: "\r\n") {
             let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }

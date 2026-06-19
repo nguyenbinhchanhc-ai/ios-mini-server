@@ -14,6 +14,8 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        UIBackgroundModes:
+          - audio
         NSLocalNetworkUsageDescription: "Ứng dụng cần truy cập mạng cục bộ để thiết lập HTTP server chia sẻ file."
         NSBonjourServices:
           - "_http._tcp"
