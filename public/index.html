@@ -1296,8 +1296,8 @@
                 }
             });
             
-            if (localExamples.length > 100) {
-                localExamples.splice(0, localExamples.length - 100);
+            if (localExamples.length > 1000) {
+                localExamples.splice(0, localExamples.length - 1000);
             }
             localStorage.setItem('ai_learned_examples', JSON.stringify(localExamples));
         }

@@ -299,7 +299,8 @@ function getWSUpdatePayload() {
     };
 }
 
-let trainingTimeoutId = null;
+let trainingWorkerTimeouts = [];
+let activeWorkers = {};
 
 function runStartupAITraining() {
     if (!config.aiEnabled || !config.groqTrainKeys || config.groqTrainKeys.length === 0) {
@@ -310,11 +311,7 @@ function runStartupAITraining() {
         return;
     }
     
-    if (aiTrainingStatus.isRunning) {
-        return; // Already running
-    }
-    
-    console.log("[AI Training] Starting background training loop using dedicated Training API Keys...");
+    console.log(`[AI Training] Starting background training loop using ${config.groqTrainKeys.length} parallel workers...`);
     
     const staticCandidates = [
         "ads.tiktok.com", "analytics.google.com", "ads.youtube.com", "pixel.facebook.com",
@@ -336,102 +333,119 @@ function runStartupAITraining() {
         });
     }
     
-    aiTrainingStatus.isRunning = true;
     aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
     
-    let keyRotationIndex = 0;
+    // Clear any existing workers
+    trainingWorkerTimeouts.forEach(clearTimeout);
+    trainingWorkerTimeouts = [];
+    activeWorkers = {};
     
-    if (trainingTimeoutId) clearTimeout(trainingTimeoutId);
-    
-    function trainNext() {
-        if (!config.aiEnabled || !config.groqTrainKeys || config.groqTrainKeys.length === 0) {
-            aiTrainingStatus.isRunning = false;
-            aiTrainingStatus.currentDomain = null;
-            aiTrainingStatus.currentKey = null;
-            broadcastUpdate();
-            return;
-        }
-        
-        if (trainingQueue.length === 0) {
-            console.log("[AI Training] Training queue is empty. Suspending training loop.");
-            aiTrainingStatus.isRunning = false;
-            aiTrainingStatus.currentDomain = null;
-            aiTrainingStatus.currentKey = null;
-            broadcastUpdate();
-            return;
-        }
-        
-        const domain = trainingQueue.shift();
-        totalTrainingProcessed++;
-        
-        aiTrainingStatus.currentIndex = totalTrainingProcessed;
-        aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
-        
-        // Only train if not already in learnedExamples to avoid wasting tokens
-        const learnedItem = learnedExamples.find(ex => ex.domain.toLowerCase() === domain.toLowerCase());
-        if (learnedItem) {
-            const now = new Date();
-            const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-            const timeStr = vnTime.toISOString().substring(11, 19);
-            
-            aiTrainingStatus.trainedList.unshift({
-                domain: domain,
-                keyUsed: "N/A (Đã lưu bộ nhớ)",
-                time: timeStr,
-                success: true,
-                blocked: learnedItem.blocked,
-                reason: `Đã học (${learnedItem.reason || (learnedItem.blocked ? 'Chặn' : 'Bỏ qua')})`
-            });
-            if (aiTrainingStatus.trainedList.length > 50) {
-                aiTrainingStatus.trainedList.pop();
-            }
-            
-            aiTrainingStatus.currentDomain = domain;
-            aiTrainingStatus.currentKey = "N/A (Đã lưu bộ nhớ)";
-            throttledBroadcastUpdate();
-            
-            trainingTimeoutId = setTimeout(trainNext, 100);
-            return;
-        }
-        
-        const keys = config.groqTrainKeys;
-        const rawKey = keys[keyRotationIndex % keys.length];
-        keyRotationIndex = (keyRotationIndex + 1) % keys.length;
-        
-        const maskedKey = rawKey.substring(0, 8) + '...' + rawKey.substring(rawKey.length - 4);
-        aiTrainingStatus.currentDomain = domain;
-        aiTrainingStatus.currentKey = maskedKey;
-        broadcastUpdate();
-        
-        console.log(`[AI Training] Pre-training on domain: ${domain} using key: ${maskedKey}...`);
-        
-        checkDomainWithGroqForTraining(domain, rawKey, (success, decision) => {
-            const now = new Date();
-            const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-            const timeStr = vnTime.toISOString().substring(11, 19);
-            
-            aiTrainingStatus.trainedList.unshift({
-                domain: domain,
-                keyUsed: maskedKey,
-                time: timeStr,
-                success: success,
-                blocked: decision ? decision.blocked : false,
-                reason: decision ? decision.reason : "Lỗi kết nối"
-            });
-            if (aiTrainingStatus.trainedList.length > 50) {
-                aiTrainingStatus.trainedList.pop();
-            }
-            
-            // Rotate keys to speed up training. Safe delay per key is 15 seconds.
-            const delayPerKey = 15000;
-            const delay = Math.max(3000, Math.round(delayPerKey / keys.length));
-            
-            trainingTimeoutId = setTimeout(trainNext, delay);
-        });
+    // Start a worker loop for each key
+    config.groqTrainKeys.forEach((apiKey, idx) => {
+        // Space out the initial start of workers slightly to avoid concurrent request spikes on startup
+        const startDelay = idx * 1500; 
+        const timeoutId = setTimeout(() => {
+            runWorker(apiKey);
+        }, startDelay);
+        trainingWorkerTimeouts.push(timeoutId);
+    });
+}
+
+function runWorker(apiKey) {
+    if (!config.aiEnabled || !config.groqTrainKeys || !config.groqTrainKeys.includes(apiKey)) {
+        delete activeWorkers[apiKey];
+        updateTrainingUIStatus();
+        return;
     }
     
-    // Start after 1 second delay to let the server boot up completely
-    trainingTimeoutId = setTimeout(trainNext, 1000);
+    if (trainingQueue.length === 0) {
+        delete activeWorkers[apiKey];
+        updateTrainingUIStatus();
+        // If queue is empty, check again in 3 seconds to see if new domains are enqueued
+        const timeoutId = setTimeout(() => runWorker(apiKey), 3000);
+        trainingWorkerTimeouts.push(timeoutId);
+        return;
+    }
+    
+    const domain = trainingQueue.shift();
+    totalTrainingProcessed++;
+    
+    aiTrainingStatus.currentIndex = totalTrainingProcessed;
+    aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
+    
+    const learnedItem = learnedExamples.find(ex => ex.domain.toLowerCase() === domain.toLowerCase());
+    if (learnedItem) {
+        const now = new Date();
+        const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+        const timeStr = vnTime.toISOString().substring(11, 19);
+        
+        aiTrainingStatus.trainedList.unshift({
+            domain: domain,
+            keyUsed: "N/A (Đã lưu bộ nhớ)",
+            time: timeStr,
+            success: true,
+            blocked: learnedItem.blocked,
+            reason: `Đã học (${learnedItem.reason || (learnedItem.blocked ? 'Chặn' : 'Bỏ qua')})`
+        });
+        if (aiTrainingStatus.trainedList.length > 50) {
+            aiTrainingStatus.trainedList.pop();
+        }
+        
+        // Broadcast the update and loop immediately for the next domain (no delay for cached ones)
+        throttledBroadcastUpdate();
+        const timeoutId = setTimeout(() => runWorker(apiKey), 100);
+        trainingWorkerTimeouts.push(timeoutId);
+        return;
+    }
+    
+    // Set active status
+    activeWorkers[apiKey] = domain;
+    updateTrainingUIStatus();
+    
+    const maskedKey = apiKey.substring(0, 8) + '...' + apiKey.substring(apiKey.length - 4);
+    console.log(`[AI Training Worker] Training domain: ${domain} using key: ${maskedKey}...`);
+    
+    checkDomainWithGroqForTraining(domain, apiKey, (success, decision) => {
+        const now = new Date();
+        const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+        const timeStr = vnTime.toISOString().substring(11, 19);
+        
+        aiTrainingStatus.trainedList.unshift({
+            domain: domain,
+            keyUsed: maskedKey,
+            time: timeStr,
+            success: success,
+            blocked: decision ? decision.blocked : false,
+            reason: decision ? decision.reason : "Lỗi kết nối"
+        });
+        if (aiTrainingStatus.trainedList.length > 50) {
+            aiTrainingStatus.trainedList.pop();
+        }
+        
+        // Remove from active status
+        delete activeWorkers[apiKey];
+        updateTrainingUIStatus();
+        
+        // Wait 15 seconds per worker (safe RPM for Groq)
+        const timeoutId = setTimeout(() => runWorker(apiKey), 15000);
+        trainingWorkerTimeouts.push(timeoutId);
+    });
+}
+
+function updateTrainingUIStatus() {
+    const activeKeys = Object.keys(activeWorkers);
+    if (activeKeys.length > 0) {
+        aiTrainingStatus.isRunning = true;
+        aiTrainingStatus.currentDomain = activeKeys.map(k => activeWorkers[k]).join(' | ');
+        aiTrainingStatus.currentKey = activeKeys.map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)).join(' | ');
+    } else {
+        aiTrainingStatus.currentDomain = null;
+        aiTrainingStatus.currentKey = null;
+        if (trainingQueue.length === 0) {
+            aiTrainingStatus.isRunning = false;
+        }
+    }
+    throttledBroadcastUpdate();
 }
 
 function enqueueDomainForTraining(domain) {
@@ -459,6 +473,39 @@ function enqueueDomainForTraining(domain) {
 }
 
 function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContext = null) {
+    if (process.env.MOCK_GROQ === 'true' || apiKey.startsWith('gsk_train')) {
+        // Simulate a slow API request (6 seconds) to allow parallel verification
+        setTimeout(() => {
+            const isBlocked = domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry');
+            const decision = {
+                blocked: isBlocked,
+                reason: isBlocked ? "Quảng cáo giả lập" : "CDN giả lập"
+            };
+            if (isBlocked) {
+                aiDecisionCache.set(domain, true);
+                saveAICache();
+                customBlockedSet.add(domain);
+                config.customBlockedDomains = Array.from(customBlockedSet);
+                config.stats.blocked += 1;
+                if (config.stats.allowed > 0) {
+                    config.stats.allowed -= 1;
+                }
+                saveConfig();
+                learnedExamples.push({ domain, blocked: true, reason: decision.reason });
+                if (learnedExamples.length > 1000) learnedExamples.shift();
+                saveAILearning();
+            } else {
+                aiDecisionCache.set(domain, false);
+                saveAICache();
+                learnedExamples.push({ domain, blocked: false, reason: decision.reason });
+                if (learnedExamples.length > 1000) learnedExamples.shift();
+                saveAILearning();
+            }
+            callback(true, decision);
+        }, 6000);
+        return;
+    }
+
     if (internetContext === null) {
         gatherInternetContext(domain).then((context) => {
             checkDomainWithGroqForTraining(domain, apiKey, callback, context);
@@ -529,14 +576,14 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
                             saveConfig();
                             
                             learnedExamples.push({ domain, blocked: true, reason: decision.reason || "Mối nguy hại" });
-                            if (learnedExamples.length > 100) learnedExamples.shift();
+                            if (learnedExamples.length > 1000) learnedExamples.shift();
                             saveAILearning();
                         } else {
                             aiDecisionCache.set(domain, false);
                             saveAICache();
                             
                             learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
-                            if (learnedExamples.length > 100) learnedExamples.shift();
+                            if (learnedExamples.length > 1000) learnedExamples.shift();
                             saveAILearning();
                         }
                         callback(true, decision);
@@ -795,7 +842,7 @@ function checkCache(domain, qtype) {
 }
 
 function setCache(domain, qtype, responseBuffer, ttl) {
-    const minTtl = 60; // Enforce 60 seconds minimum cache TTL
+    const minTtl = 300; // Enforce 300 seconds (5 minutes) minimum cache TTL
     const parsedTtl = Number(ttl);
     const finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
     const key = `${domain.toLowerCase()}_${qtype}`;
@@ -1301,6 +1348,33 @@ function buildAIAnalysisContext(domain, internetContext = null) {
 }
 
 function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetContext = null) {
+    if (process.env.MOCK_GROQ === 'true' || apiKey.startsWith('gsk_mock')) {
+        setTimeout(() => {
+            const isBlocked = domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry');
+            aiDecisionCache.set(domain, isBlocked);
+            saveAICache();
+            if (isBlocked) {
+                customBlockedSet.add(domain);
+                config.customBlockedDomains = Array.from(customBlockedSet);
+                config.stats.blocked += 1;
+                if (config.stats.allowed > 0) {
+                    config.stats.allowed -= 1;
+                }
+                saveConfig();
+                learnedExamples.push({ domain, blocked: true, reason: "Mối nguy hại (MOCK)" });
+                if (learnedExamples.length > 1000) learnedExamples.shift();
+                saveAILearning();
+                logQuery(domain, true, "AI Guard (Auto Blocked)", "blocked");
+            } else {
+                learnedExamples.push({ domain, blocked: false, reason: "CDN / Hợp lệ (MOCK)" });
+                if (learnedExamples.length > 1000) learnedExamples.shift();
+                saveAILearning();
+            }
+            if (callback) callback();
+        }, 1000);
+        return;
+    }
+
     if (internetContext === null) {
         gatherInternetContext(domain).then((context) => {
             checkDomainWithGroq(domain, apiKey, callback, modelIndex, context);
@@ -1425,7 +1499,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
                             
                             // Learn from this block dynamically
                             learnedExamples.push({ domain, blocked: true, reason: decision.reason || "Mối nguy hại" });
-                            if (learnedExamples.length > 50) {
+                            if (learnedExamples.length > 1000) {
                                 learnedExamples.shift();
                             }
                             saveAILearning(); // Save AI dynamic learning log to disk
@@ -1438,7 +1512,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
                             
                             // Learn from this allowed domain dynamically
                             learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
-                            if (learnedExamples.length > 50) {
+                            if (learnedExamples.length > 1000) {
                                 learnedExamples.shift();
                             }
                             saveAILearning(); // Save AI dynamic learning log to disk
@@ -1826,7 +1900,7 @@ app.post('/dns/block', (req, res) => {
             const exists = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
             if (!exists) {
                 learnedExamples.push({ domain: d, blocked: true, reason: "Chặn thủ công (RL-Admin)" });
-                if (learnedExamples.length > 100) learnedExamples.shift();
+                if (learnedExamples.length > 1000) learnedExamples.shift();
                 saveAILearning();
             }
             
@@ -1867,7 +1941,7 @@ app.post('/dns/whitelist/add', (req, res) => {
             const exists = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
             if (!exists) {
                 learnedExamples.push({ domain: d, blocked: false, reason: "Tin cậy thủ công (RL-Admin)" });
-                if (learnedExamples.length > 100) learnedExamples.shift();
+                if (learnedExamples.length > 1000) learnedExamples.shift();
                 saveAILearning();
             }
             
@@ -2191,8 +2265,8 @@ app.post('/dns/ai/learning/sync', (req, res) => {
                     }
                 }
             });
-            if (learnedExamples.length > 100) {
-                learnedExamples.splice(0, learnedExamples.length - 100); // keep last 100
+            if (learnedExamples.length > 1000) {
+                learnedExamples.splice(0, learnedExamples.length - 1000); // keep last 1000
             }
             saveAILearning();
             broadcastUpdate();
