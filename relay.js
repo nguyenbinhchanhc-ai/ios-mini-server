@@ -842,6 +842,60 @@ function processGroqQueue() {
     }, QUEUE_DELAY_MS);
 }
 
+function buildAIAnalysisContext(domain) {
+    const d = domain.trim().toLowerCase();
+    const parts = d.split('.');
+    const tld = parts[parts.length - 1];
+    
+    // Famous suspicious/low-cost TLDs often used for phishing/scams
+    const suspiciousTlds = new Set(['cfd', 'xyz', 'cc', 'top', 'site', 'icu', 'vip', 'win', 'online', 'tech', 'click', 'info', 'biz', 'tk', 'ml', 'ga', 'cf', 'gq']);
+    
+    // Famous Vietnamese and international brands targeted by phishing
+    const famousBrands = [
+        { brand: 'techcombank', matches: ['techcombank', 'tcb'] },
+        { brand: 'shopee', matches: ['shopee'] },
+        { brand: 'momo', matches: ['momo'] },
+        { brand: 'mbcheck', matches: ['mbcheck', 'mbbank', 'mbb'] },
+        { brand: 'bidv', matches: ['bidv'] },
+        { brand: 'vietcombank', matches: ['vietcombank', 'vcb'] },
+        { brand: 'sacombank', matches: ['sacombank'] },
+        { brand: 'agribank', matches: ['agribank'] },
+        { brand: 'facebook', matches: ['facebook', 'fb'] },
+        { brand: 'apple', matches: ['apple', 'icloud'] },
+        { brand: 'netflix', matches: ['netflix'] },
+        { brand: 'tiktok', matches: ['tiktok'] }
+    ];
+
+    let brandDetected = null;
+    for (const b of famousBrands) {
+        for (const match of b.matches) {
+            if (d.includes(match)) {
+                // Confirm it is not the legitimate primary domain of the brand
+                const isLegit = (d === `${b.brand}.com` || d.endsWith(`.${b.brand}.com`) || d === `${b.brand}.vn` || d.endsWith(`.${b.brand}.vn`) || d === `${b.brand}.com.vn` || d.endsWith(`.${b.brand}.com.vn`));
+                if (!isLegit) {
+                    brandDetected = b.brand;
+                    break;
+                }
+            }
+        }
+        if (brandDetected) break;
+    }
+
+    let contextualPrompt = `Domain to analyze: ${domain}\n`;
+    contextualPrompt += `Metadata:\n`;
+    contextualPrompt += `- TLD: .${tld} (Suspicious: ${suspiciousTlds.has(tld) ? "YES" : "NO"})\n`;
+    if (brandDetected) {
+        contextualPrompt += `- Brand abuse detected: Domain contains brand keywords referencing "${brandDetected}" but is NOT the official domain of ${brandDetected}. (Potential phishing/brand impersonation: YES)\n`;
+    }
+    
+    // Check if the domain length is abnormally long (common for dynamically generated ad/tracking hosts)
+    if (parts[0] && parts[0].length > 25) {
+        contextualPrompt += `- Subdomain pattern: Abnormally long host label (Potential DGA/tracking endpoint: YES)\n`;
+    }
+    
+    return contextualPrompt;
+}
+
 function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0) {
     if (!apiKey) {
         aiDecisionCache.delete(domain);
@@ -900,7 +954,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0) {
             },
             {
                 role: "user",
-                content: `Analyze this domain: ${domain}`
+                content: buildAIAnalysisContext(domain)
             }
         ],
         response_format: { type: "json_object" }
@@ -1343,6 +1397,15 @@ app.post('/dns/block', (req, res) => {
             customBlockedSet.add(d);
             config.customBlockedDomains = Array.from(customBlockedSet);
             saveConfig();
+            
+            // Teach the AI immediately (RL-Admin)
+            const exists = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
+            if (!exists) {
+                learnedExamples.push({ domain: d, blocked: true, reason: "Chặn thủ công (RL-Admin)" });
+                if (learnedExamples.length > 100) learnedExamples.shift();
+                saveAILearning();
+            }
+            
             broadcastUpdate();
             res.send(`Blocked ${d}`);
         } else {
@@ -1375,6 +1438,15 @@ app.post('/dns/whitelist/add', (req, res) => {
             whitelistSet.add(d);
             config.whitelistDomains = Array.from(whitelistSet);
             saveConfig();
+            
+            // Teach the AI immediately (RL-Admin)
+            const exists = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
+            if (!exists) {
+                learnedExamples.push({ domain: d, blocked: false, reason: "Tin cậy thủ công (RL-Admin)" });
+                if (learnedExamples.length > 100) learnedExamples.shift();
+                saveAILearning();
+            }
+            
             broadcastUpdate();
             res.send(`Whitelisted ${d}`);
         } else {
@@ -1528,7 +1600,7 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
             },
             {
                 role: "user",
-                content: `Analyze this domain: ${domain}`
+                content: buildAIAnalysisContext(domain)
             }
         ],
         response_format: { type: "json_object" }
@@ -1630,6 +1702,39 @@ app.post('/dns/ai/cache/clear', (req, res) => {
     saveAICache();
     broadcastUpdate();
     res.send("AI classification cache cleared.");
+});
+
+app.post('/dns/ai/learning/sync', (req, res) => {
+    try {
+        if (!req.rawBody || req.rawBody.length === 0) {
+            return res.status(400).send("Empty payload");
+        }
+        const list = JSON.parse(req.rawBody.toString('utf8'));
+        if (Array.isArray(list)) {
+            list.forEach(item => {
+                if (item && typeof item.domain === 'string') {
+                    const domainLower = item.domain.toLowerCase().trim();
+                    const exists = learnedExamples.some(ex => ex.domain.toLowerCase().trim() === domainLower);
+                    if (!exists) {
+                        learnedExamples.push({
+                            domain: item.domain.trim(),
+                            blocked: !!item.blocked,
+                            reason: item.reason || "Trí tuệ nhân tạo học ngầm"
+                        });
+                    }
+                }
+            });
+            if (learnedExamples.length > 100) {
+                learnedExamples.splice(0, learnedExamples.length - 100); // keep last 100
+            }
+            saveAILearning();
+            broadcastUpdate();
+            return res.json({ success: true, count: learnedExamples.length });
+        }
+    } catch(e) {
+        console.error("Failed to parse learning sync payload:", e);
+    }
+    res.status(400).send("Invalid JSON payload");
 });
 
 app.post('/dns/stats/reset', (req, res) => {

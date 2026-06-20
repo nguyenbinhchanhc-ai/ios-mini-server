@@ -897,6 +897,47 @@
         }
     }
 
+    let isSyncingLearning = false;
+    function syncLearningWithServer() {
+        if (isSyncingLearning) return;
+        
+        let localExamples = [];
+        try {
+            localExamples = JSON.parse(localStorage.getItem('ai_learned_examples') || '[]');
+        } catch (e) {}
+        if (!Array.isArray(localExamples) || localExamples.length === 0) return;
+        
+        const serverExamples = dnsConfig.learnedExamples || [];
+        const missingExamples = localExamples.filter(localEx => {
+            return !serverExamples.some(serverEx => serverEx.domain.toLowerCase() === localEx.domain.toLowerCase());
+        });
+        
+        if (missingExamples.length > 0) {
+            isSyncingLearning = true;
+            console.log(`Syncing ${missingExamples.length} missing learned examples to server...`);
+            
+            fetch('/dns/ai/learning/sync', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(missingExamples)
+            })
+            .then(res => res.json())
+            .then(data => {
+                isSyncingLearning = false;
+                if (data.success) {
+                    console.log(`Synced learning successfully. Total: ${data.count}`);
+                    fetchDNSConfig();
+                }
+            })
+            .catch(err => {
+                isSyncingLearning = false;
+                console.error("Error syncing learning:", err);
+            });
+        }
+    }
+
     function fetchDNSConfig() {
         fetch('/dns/config')
             .then(res => res.json())
@@ -904,6 +945,7 @@
                 dnsConfig = data;
                 updateDNSUI();
                 syncKeysWithServer();
+                syncLearningWithServer();
             })
             .catch(err => {
                 console.error("Lỗi cấu hình DNS:", err);
@@ -1088,6 +1130,27 @@
                     <button class="btn-unblock" onclick="removeWhitelist('${domain}')">Xóa</button>
                 </div>
             `).join('');
+        }
+
+        // Save/merge server learned examples into localStorage for persistence
+        if (dnsConfig.learnedExamples && dnsConfig.learnedExamples.length > 0) {
+            let localExamples = [];
+            try {
+                localExamples = JSON.parse(localStorage.getItem('ai_learned_examples') || '[]');
+            } catch (e) {}
+            
+            // Merge and avoid duplicates
+            dnsConfig.learnedExamples.forEach(serverEx => {
+                const exists = localExamples.some(localEx => localEx.domain.toLowerCase() === serverEx.domain.toLowerCase());
+                if (!exists) {
+                    localExamples.push(serverEx);
+                }
+            });
+            
+            if (localExamples.length > 100) {
+                localExamples.splice(0, localExamples.length - 100);
+            }
+            localStorage.setItem('ai_learned_examples', JSON.stringify(localExamples));
         }
     }
 
