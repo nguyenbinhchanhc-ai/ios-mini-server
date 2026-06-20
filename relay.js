@@ -272,6 +272,51 @@ function getWSUpdatePayload() {
     };
 }
 
+function runStartupAITraining() {
+    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) return;
+    
+    console.log("[AI Training] Starting background pre-training loop using 1st API Key...");
+    
+    const trainingList = [
+        "ads.tiktok.com", "analytics.google.com", "ads.youtube.com", "pixel.facebook.com",
+        "telemetry.microsoft.com", "stats.g.doubleclick.net", "adserver.admicro.vn", "ad.adtima.vn",
+        "scam-banking-verify.xyz", "vietcombank-login-online.cc", "momo-nhan-qua.top",
+        "shopee-gift-lucky.site", "eclick.vn", "ants.vn", "yomedia.vn", "ad.gonet.vn",
+        "api-auth.mbbank.cc", "shopee-tri-an.xyz", "mbcheck-banking.info", "adservice.google.com.vn"
+    ];
+    
+    const apiKey = config.groqApiKeys[0]; // Dedicated 1st key for training
+    let index = 0;
+    
+    function trainNext() {
+        if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) return;
+        
+        if (index >= trainingList.length) {
+            console.log("[AI Training] Background pre-training loop completed.");
+            return;
+        }
+        
+        const domain = trainingList[index];
+        index++;
+        
+        // Only train if not already in learnedExamples to avoid wasting tokens
+        const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === domain.toLowerCase());
+        if (alreadyLearned) {
+            setTimeout(trainNext, 100);
+            return;
+        }
+        
+        console.log(`[AI Training] Pre-training on domain: ${domain}...`);
+        checkDomainWithGroq(domain, apiKey, () => {
+            // Space out training queries by 15 seconds to strictly prevent 429 Rate Limits
+            setTimeout(trainNext, 15000);
+        });
+    }
+    
+    // Start after 10 seconds delay to let the server boot up completely
+    setTimeout(trainNext, 10000);
+}
+
 // Load config and caches
 loadConfig();
 loadAILearning();
@@ -283,6 +328,9 @@ setTimeout(() => {
         updateBlocklists();
     }
 }, 2000);
+
+// Schedule AI background pre-training loop on startup
+setTimeout(runStartupAITraining, 15000);
 
 // Raw body parser middleware for DNS binary payloads
 app.use((req, res, next) => {
@@ -311,7 +359,11 @@ function loadConfig() {
         "https://v.firebog.net/hosts/Prigent-Crypto.txt",
         "https://raw.githubusercontent.com/PolishFiltersTeam/KADhosts/master/KADhosts.txt",
         "https://small.oisd.nl",
-        "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts"
+        "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts",
+        "https://abpvn.com/android/abpvn.txt",
+        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt",
+        "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
+        "https://raw.githubusercontent.com/neodevpro/neodevhost/master/host"
     ];
 
     try {
@@ -393,13 +445,31 @@ function loadConfig() {
 
     config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
     if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
-        config.subscriptionURLs = defaultSubs;
+        config.subscriptionURLs = [...defaultSubs];
     }
     
-    // Automatically inject BigDargon Vietnam host list if not present
-    const vnList = "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts";
-    if (!config.subscriptionURLs.includes(vnList)) {
-        config.subscriptionURLs.push(vnList);
+    // Automatically inject any missing default subscriptions and prune legacy ones
+    let configUpdated = false;
+    defaultSubs.forEach(sub => {
+        if (!config.subscriptionURLs.includes(sub)) {
+            config.subscriptionURLs.push(sub);
+            configUpdated = true;
+        }
+    });
+    
+    // Clean up legacy 404 URLs if they exist in subscriptionURLs
+    const legacy404Urls = [
+        "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_11_Vietnamese/filter.txt",
+        "https://abpvn.com/filter/abpvn.txt"
+    ];
+    legacy404Urls.forEach(legacyUrl => {
+        if (config.subscriptionURLs.includes(legacyUrl)) {
+            config.subscriptionURLs = config.subscriptionURLs.filter(u => u !== legacyUrl);
+            configUpdated = true;
+        }
+    });
+    
+    if (configUpdated) {
         saveConfig();
     }
     
@@ -1159,8 +1229,13 @@ function updateBlocklists(callback) {
                         }
                     } else if (parts.length === 1) {
                         let domain = parts[0].toLowerCase();
-                        if (domain.startsWith('||') && domain.endsWith('^')) {
-                            domain = domain.substring(2, domain.length - 1);
+                        if (domain.startsWith('||')) {
+                            let endIdx = domain.search(/[\^\/\$]/);
+                            if (endIdx !== -1) {
+                                domain = domain.substring(2, endIdx);
+                            } else {
+                                domain = domain.substring(2);
+                            }
                         }
                         if (isValidDomain(domain)) {
                             if (!IGNORED_DOMAINS.has(domain) && !domain.endsWith('.local') && !domain.endsWith('.localhost')) {
@@ -1534,6 +1609,9 @@ app.post('/dns/groq', (req, res) => {
     
     saveConfig();
     broadcastUpdate();
+    if (enabled) {
+        setTimeout(runStartupAITraining, 2000);
+    }
     res.send("Groq configuration updated");
 });
 
@@ -1550,6 +1628,9 @@ app.post('/dns/groq/keys/add', (req, res) => {
     config.groqApiKeys.push(trimmedKey);
     saveConfig();
     broadcastUpdate();
+    if (config.aiEnabled) {
+        setTimeout(runStartupAITraining, 2000);
+    }
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
