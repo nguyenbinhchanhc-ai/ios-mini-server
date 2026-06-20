@@ -19,15 +19,22 @@
     "https://v.firebog.net/hosts/Prigent-Crypto.txt",
     "https://raw.githubusercontent.com/PolishFiltersTeam/KADhosts/master/KADhosts.txt",
     "https://small.oisd.nl",
-    "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts"
+    "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts",
+    "https://abpvn.com/android/abpvn.txt",
+    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt",
+    "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
+    "https://raw.githubusercontent.com/neodevpro/neodevhost/master/host"
   ],
   "upstreamDNS": "1.1.1.1",
   "stats": {
     "total": 0,
     "blocked": 0,
-    "allowed": 0
+    "allowed": 0,
+    "cacheHits": 0,
+    "cacheMisses": 0
   },
   "aiEnabled": false,
-  "groqModel": "llama-3.3-70b-versatile",
-  "groqApiKeys": []
+  "groqModel": "llama-3.1-8b-instant",
+  "groqApiKeys": [],
+  "groqTrainKeys": []
 }

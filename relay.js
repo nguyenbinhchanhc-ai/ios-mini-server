@@ -32,6 +32,16 @@ let subscriptionBlockedSet = new Set();
 let isUpdatingList = false;
 let logs = [];
 
+// AI Training State
+const aiTrainingStatus = {
+    isRunning: false,
+    totalCandidates: 0,
+    currentIndex: 0,
+    currentDomain: null,
+    currentKey: null,
+    trainedList: []
+};
+
 // WebSocket client registry
 const wsClients = new Set();
 
@@ -262,6 +272,9 @@ function getWSUpdatePayload() {
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
+        groqTrainKeys: (config.groqTrainKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqTrainKeysCount: (config.groqTrainKeys || []).length,
+        aiTrainingStatus: aiTrainingStatus,
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
@@ -272,10 +285,18 @@ function getWSUpdatePayload() {
     };
 }
 
+let trainingTimeoutId = null;
+
 function runStartupAITraining() {
-    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) return;
+    if (!config.aiEnabled || !config.groqTrainKeys || config.groqTrainKeys.length === 0) {
+        aiTrainingStatus.isRunning = false;
+        aiTrainingStatus.currentDomain = null;
+        aiTrainingStatus.currentKey = null;
+        broadcastUpdate();
+        return;
+    }
     
-    console.log("[AI Training] Starting background pre-training loop using 1st API Key...");
+    console.log("[AI Training] Starting background training loop using dedicated Training API Keys...");
     
     const trainingList = [
         "ads.tiktok.com", "analytics.google.com", "ads.youtube.com", "pixel.facebook.com",
@@ -285,36 +306,178 @@ function runStartupAITraining() {
         "api-auth.mbbank.cc", "shopee-tri-an.xyz", "mbcheck-banking.info", "adservice.google.com.vn"
     ];
     
-    const apiKey = config.groqApiKeys[0]; // Dedicated 1st key for training
+    aiTrainingStatus.isRunning = true;
+    aiTrainingStatus.totalCandidates = trainingList.length;
+    
     let index = 0;
+    let keyRotationIndex = 0;
+    
+    if (trainingTimeoutId) clearTimeout(trainingTimeoutId);
     
     function trainNext() {
-        if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) return;
+        if (!config.aiEnabled || !config.groqTrainKeys || config.groqTrainKeys.length === 0) {
+            aiTrainingStatus.isRunning = false;
+            aiTrainingStatus.currentDomain = null;
+            aiTrainingStatus.currentKey = null;
+            broadcastUpdate();
+            return;
+        }
         
         if (index >= trainingList.length) {
-            console.log("[AI Training] Background pre-training loop completed.");
+            console.log("[AI Training] Training loop completed.");
+            aiTrainingStatus.isRunning = false;
+            aiTrainingStatus.currentDomain = null;
+            aiTrainingStatus.currentKey = null;
+            broadcastUpdate();
             return;
         }
         
         const domain = trainingList[index];
-        index++;
+        aiTrainingStatus.currentIndex = index + 1;
         
         // Only train if not already in learnedExamples to avoid wasting tokens
         const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === domain.toLowerCase());
         if (alreadyLearned) {
-            setTimeout(trainNext, 100);
+            index++;
+            trainNext();
             return;
         }
         
-        console.log(`[AI Training] Pre-training on domain: ${domain}...`);
-        checkDomainWithGroq(domain, apiKey, () => {
-            // Space out training queries by 15 seconds to strictly prevent 429 Rate Limits
-            setTimeout(trainNext, 15000);
+        const keys = config.groqTrainKeys;
+        const rawKey = keys[keyRotationIndex % keys.length];
+        keyRotationIndex = (keyRotationIndex + 1) % keys.length;
+        
+        const maskedKey = rawKey.substring(0, 8) + '...' + rawKey.substring(rawKey.length - 4);
+        aiTrainingStatus.currentDomain = domain;
+        aiTrainingStatus.currentKey = maskedKey;
+        broadcastUpdate();
+        
+        console.log(`[AI Training] Pre-training on domain: ${domain} using key: ${maskedKey}...`);
+        
+        checkDomainWithGroqForTraining(domain, rawKey, (success, decision) => {
+            const now = new Date();
+            const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+            const timeStr = vnTime.toISOString().substring(11, 19);
+            
+            aiTrainingStatus.trainedList.unshift({
+                domain: domain,
+                keyUsed: maskedKey,
+                time: timeStr,
+                success: success,
+                blocked: decision ? decision.blocked : false,
+                reason: decision ? decision.reason : "Lỗi kết nối"
+            });
+            if (aiTrainingStatus.trainedList.length > 50) {
+                aiTrainingStatus.trainedList.pop();
+            }
+            
+            index++;
+            
+            // Rotate keys to speed up training. Safe delay per key is 15 seconds.
+            const delayPerKey = 15000;
+            const delay = Math.max(3000, Math.round(delayPerKey / keys.length));
+            
+            trainingTimeoutId = setTimeout(trainNext, delay);
         });
     }
     
     // Start after 10 seconds delay to let the server boot up completely
-    setTimeout(trainNext, 10000);
+    trainingTimeoutId = setTimeout(trainNext, 10000);
+}
+
+function checkDomainWithGroqForTraining(domain, apiKey, callback) {
+    const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
+    const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-2);
+    const recentExamples = [...blockedEx, ...allowedEx];
+    const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
+        recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+
+    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, telemetry, phishing, malware, scam, or other harmful activities.\n\n" +
+                          "Strict Rules:\n" +
+                          "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
+                          "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services.\n" +
+                          "3. Watch out for Typosquatting/Phishing: If the domain contains a famous brand but looks suspicious or uses a cheap/non-standard TLD, block it.\n" +
+                          "4. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          examplesText;
+
+    const postData = JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        messages: [
+            { role: "system", content: systemContent },
+            { role: "user", content: buildAIAnalysisContext(domain) }
+        ],
+        response_format: { type: "json_object" }
+    });
+    
+    const options = {
+        hostname: 'api.groq.com',
+        port: 443,
+        path: '/openai/v1/chat/completions',
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Length': Buffer.byteLength(postData)
+        }
+    };
+    
+    try {
+        const req = https.request(options, (res) => {
+            let body = [];
+            res.on('data', chunk => body.push(chunk));
+            res.on('end', () => {
+                try {
+                    if (res.statusCode !== 200) {
+                        callback(false, null);
+                        return;
+                    }
+                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
+                    const replyStr = resData.choices?.[0]?.message?.content;
+                    if (replyStr) {
+                        const decision = JSON.parse(replyStr);
+                        if (decision.blocked === true) {
+                            aiDecisionCache.set(domain, true);
+                            saveAICache();
+                            
+                            customBlockedSet.add(domain);
+                            config.customBlockedDomains = Array.from(customBlockedSet);
+                            
+                            config.stats.blocked += 1;
+                            if (config.stats.allowed > 0) {
+                                config.stats.allowed -= 1;
+                            }
+                            saveConfig();
+                            
+                            learnedExamples.push({ domain, blocked: true, reason: decision.reason || "Mối nguy hại" });
+                            if (learnedExamples.length > 100) learnedExamples.shift();
+                            saveAILearning();
+                        } else {
+                            aiDecisionCache.set(domain, false);
+                            saveAICache();
+                            
+                            learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
+                            if (learnedExamples.length > 100) learnedExamples.shift();
+                            saveAILearning();
+                        }
+                        callback(true, decision);
+                    } else {
+                        callback(false, null);
+                    }
+                } catch (e) {
+                    callback(false, null);
+                }
+            });
+        });
+        
+        req.on('error', () => {
+            callback(false, null);
+        });
+        
+        req.write(postData);
+        req.end();
+    } catch (e) {
+        callback(false, null);
+    }
 }
 
 // Load config and caches
@@ -386,6 +549,7 @@ function loadConfig() {
                 stats: { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 },
                 aiEnabled: false,
                 groqApiKeys: [],
+                groqTrainKeys: [],
                 groqModel: "llama-3.1-8b-instant"
             };
             saveConfig();
@@ -407,6 +571,7 @@ function loadConfig() {
             stats: { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 },
             aiEnabled: false,
             groqApiKeys: [],
+            groqTrainKeys: [],
             groqModel: "llama-3.1-8b-instant"
         };
     }
@@ -428,6 +593,9 @@ function loadConfig() {
     if (!Array.isArray(config.groqApiKeys)) {
         config.groqApiKeys = [];
     }
+    if (!Array.isArray(config.groqTrainKeys)) {
+        config.groqTrainKeys = [];
+    }
     
     // Load keys from environment variable GROQ_API_KEYS (comma separated)
     if (process.env.GROQ_API_KEYS) {
@@ -444,6 +612,22 @@ function loadConfig() {
     }
 
     config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
+
+    // Load training keys from environment variable GROQ_TRAIN_KEYS (comma separated)
+    if (process.env.GROQ_TRAIN_KEYS) {
+        const envKeys = process.env.GROQ_TRAIN_KEYS.split(',')
+            .map(k => k.trim())
+            .filter(k => k.length > 0);
+        
+        envKeys.forEach(k => {
+            if (!config.groqTrainKeys.includes(k)) {
+                config.groqTrainKeys.push(k);
+            }
+        });
+        console.log(`Loaded ${envKeys.length} Groq Training API keys from environment variable.`);
+    }
+
+    config.groqTrainKeys = config.groqTrainKeys.filter(k => k && k.trim().length > 0);
     if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
         config.subscriptionURLs = [...defaultSubs];
     }
@@ -1457,6 +1641,9 @@ app.get('/dns/config', (req, res) => {
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
+        groqTrainKeys: (config.groqTrainKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqTrainKeysCount: (config.groqTrainKeys || []).length,
+        aiTrainingStatus: aiTrainingStatus,
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
@@ -1628,9 +1815,6 @@ app.post('/dns/groq/keys/add', (req, res) => {
     config.groqApiKeys.push(trimmedKey);
     saveConfig();
     broadcastUpdate();
-    if (config.aiEnabled) {
-        setTimeout(runStartupAITraining, 2000);
-    }
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
@@ -1646,6 +1830,39 @@ app.post('/dns/groq/keys/remove', (req, res) => {
     saveConfig();
     broadcastUpdate();
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
+});
+
+app.post('/dns/groq/train-keys/add', (req, res) => {
+    const key = req.query.key;
+    if (!key || !key.trim()) {
+        return res.status(400).json({ error: 'Missing key parameter' });
+    }
+    const trimmedKey = key.trim();
+    if (!Array.isArray(config.groqTrainKeys)) config.groqTrainKeys = [];
+    if (config.groqTrainKeys.includes(trimmedKey)) {
+        return res.status(400).json({ error: 'Key already exists' });
+    }
+    config.groqTrainKeys.push(trimmedKey);
+    saveConfig();
+    broadcastUpdate();
+    if (config.aiEnabled) {
+        setTimeout(runStartupAITraining, 2000);
+    }
+    res.json({ count: config.groqTrainKeys.length });
+});
+
+app.post('/dns/groq/train-keys/remove', (req, res) => {
+    const index = parseInt(req.query.index, 10);
+    if (isNaN(index) || index < 0) {
+        return res.status(400).json({ error: 'Invalid index' });
+    }
+    if (!Array.isArray(config.groqTrainKeys) || index >= config.groqTrainKeys.length) {
+        return res.status(400).json({ error: 'Index out of range' });
+    }
+    config.groqTrainKeys.splice(index, 1);
+    saveConfig();
+    broadcastUpdate();
+    res.json({ count: config.groqTrainKeys.length });
 });
 
 function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {

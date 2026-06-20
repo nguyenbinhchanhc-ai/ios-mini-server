@@ -742,6 +742,32 @@
                                     <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;">
                                     </div>
                                 </div>
+
+                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                                        <h4 style="font-size: 0.9rem; color: var(--text-muted);">API Keys Huấn luyện <span id="groqTrainKeyCount" style="color: #c084fc; font-weight: bold;">0</span></h4>
+                                        <span id="groqTrainStatusBadge" style="font-size: 0.75rem; color: var(--text-muted);">Đang dừng</span>
+                                    </div>
+                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Các API Key này chuyên dùng chạy ngầm huấn luyện AI. Thêm nhiều key giúp huấn luyện nhanh hơn (luân phiên xoay vòng giảm thời gian chờ).</p>
+                                    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+                                        <input type="password" id="newGroqTrainKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                                        <button onclick="addGroqTrainKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #c084fc; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
+                                    </div>
+                                    <div id="groqTrainKeysList" style="display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem;">
+                                    </div>
+                                    
+                                    <!-- Active Training Status display -->
+                                    <div id="aiTrainingProgressContainer" style="padding: 0.75rem; border-radius: 8px; background: rgba(192, 132, 252, 0.05); border: 1px solid rgba(192, 132, 252, 0.15); display: none; margin-top: 0.75rem;">
+                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem; font-size: 0.8rem;">
+                                            <span style="color: #c084fc; font-weight: bold;">⚡ Đang huấn luyện AI ngầm...</span>
+                                            <span id="aiTrainProgressText" style="color: var(--text-muted);">0/0</span>
+                                        </div>
+                                        <div style="font-size: 0.75rem; color: #fff; line-height: 1.4;">
+                                            <div><strong>Tên miền đang quét:</strong> <span id="aiTrainCurrentDomain" style="color: #a78bfa; font-family: monospace;">-</span></div>
+                                            <div><strong>API Key đang chạy:</strong> <span id="aiTrainCurrentKey" style="color: #a78bfa; font-family: monospace;">-</span></div>
+                                        </div>
+                                    </div>
+                                </div>
                                 
                                 <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
                                     <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử AI Guard</h4>
@@ -776,6 +802,27 @@
                                             </thead>
                                             <tbody id="aiLearningList">
                                                 <!-- Dynamic learning rows -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Nhật ký Huấn luyện AI ngầm (Đã học)</h4>
+                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Danh sách các tên miền đã được huấn luyện ngầm bằng các API Key huấn luyện của bạn:</p>
+                                    <div style="max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.25); border-radius: 8px; border: 1px solid var(--card-border); font-size: 0.75rem;">
+                                        <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                                            <thead>
+                                                <tr style="border-bottom: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">
+                                                    <th style="padding: 0.4rem 0.5rem; width: 30px;">#</th>
+                                                    <th style="padding: 0.4rem 0.5rem;">Tên miền đã học</th>
+                                                    <th style="padding: 0.4rem 0.5rem; width: 100px;">Hành vi</th>
+                                                    <th style="padding: 0.4rem 0.5rem; width: 120px;">API Key sử dụng</th>
+                                                    <th style="padding: 0.4rem 0.5rem; width: 85px;">Thời gian</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="aiTrainLogList">
+                                                <tr><td colspan="5" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu huấn luyện ngầm.</td></tr>
                                             </tbody>
                                         </table>
                                     </div>
@@ -897,6 +944,48 @@
         }
     }
 
+    let isSyncingTrainKeys = false;
+    function syncTrainKeysWithServer() {
+        if (isSyncingTrainKeys) return;
+        
+        let localKeys = [];
+        try {
+            localKeys = JSON.parse(localStorage.getItem('groq_train_keys') || '[]');
+        } catch (e) {}
+        if (!Array.isArray(localKeys) || localKeys.length === 0) return;
+        
+        const serverMaskedKeys = dnsConfig.groqTrainKeys || [];
+        
+        const missingKeys = localKeys.filter(localKey => {
+            return !serverMaskedKeys.some(maskedKey => keyMatchesMask(localKey, maskedKey));
+        });
+        
+        if (missingKeys.length > 0) {
+            isSyncingTrainKeys = true;
+            console.log(`Syncing ${missingKeys.length} missing training keys from localStorage to server...`);
+            showToast(`Khôi phục ${missingKeys.length} API Key Huấn luyện tự động...`, 'info');
+            
+            let promiseChain = Promise.resolve();
+            missingKeys.forEach(key => {
+                promiseChain = promiseChain.then(() => {
+                    return fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.error) console.error("Sync train key error:", data.error);
+                        });
+                });
+            });
+            
+            promiseChain.then(() => {
+                isSyncingTrainKeys = false;
+                fetchDNSConfig();
+            }).catch(err => {
+                isSyncingTrainKeys = false;
+                console.error("Error syncing training keys:", err);
+            });
+        }
+    }
+
     let isSyncingLearning = false;
     function syncLearningWithServer() {
         if (isSyncingLearning) return;
@@ -945,6 +1034,7 @@
                 dnsConfig = data;
                 updateDNSUI();
                 syncKeysWithServer();
+                syncTrainKeysWithServer();
                 syncLearningWithServer();
             })
             .catch(err => {
@@ -1044,6 +1134,56 @@
         document.getElementById('groqKeyCount').innerText = keyCount;
         document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
         renderGroqKeys(dnsConfig.groqApiKeys || []);
+        
+        // Update training keys info
+        const trainKeyCount = dnsConfig.groqTrainKeysCount || 0;
+        document.getElementById('groqTrainKeyCount').innerText = trainKeyCount;
+        renderGroqTrainKeys(dnsConfig.groqTrainKeys || []);
+        
+        // Update Training progress status
+        const trainBadge = document.getElementById('groqTrainStatusBadge');
+        const trainProgressContainer = document.getElementById('aiTrainingProgressContainer');
+        const status = dnsConfig.aiTrainingStatus || {};
+        
+        if (status.isRunning) {
+            trainBadge.innerText = 'Đang chạy';
+            trainBadge.style.color = '#c084fc';
+            trainBadge.style.fontWeight = 'bold';
+            trainProgressContainer.style.display = 'block';
+            document.getElementById('aiTrainProgressText').innerText = `${status.currentIndex || 0}/${status.totalCandidates || 0}`;
+            document.getElementById('aiTrainCurrentDomain').innerText = status.currentDomain || '-';
+            document.getElementById('aiTrainCurrentKey').innerText = status.currentKey || '-';
+        } else {
+            trainBadge.innerText = 'Đã hoàn thành / Dừng';
+            trainBadge.style.color = 'var(--text-muted)';
+            trainBadge.style.fontWeight = 'normal';
+            trainProgressContainer.style.display = 'none';
+        }
+        
+        // Render Offline Training Log Table
+        const trainLogList = document.getElementById('aiTrainLogList');
+        const trainedList = status.trainedList || [];
+        if (trainedList.length === 0) {
+            trainLogList.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu huấn luyện ngầm.</td></tr>';
+        } else {
+            trainLogList.innerHTML = trainedList.map((item, i) => {
+                const isSuccess = item.success;
+                const decisionText = item.blocked ? 'Đã chặn' : 'Hợp lệ';
+                const badgeStyle = item.blocked 
+                    ? 'color: #ef4444; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);' 
+                    : 'color: #10b981; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2);';
+                
+                return `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
+                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-weight: bold;">#${i + 1}</td>
+                        <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: #c084fc; word-break: break-all;">${item.domain}</td>
+                        <td style="padding: 0.4rem 0.5rem;"><span style="font-size: 0.7rem; font-weight: bold; padding: 0.1rem 0.3rem; border-radius: 4px; ${badgeStyle}">${isSuccess ? decisionText : 'Lỗi kết nối'}</span></td>
+                        <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: var(--text-muted);">${item.keyUsed}</td>
+                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted);">${item.time}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
         
         // Update AI Learning List
         const learningList = document.getElementById('aiLearningList');
@@ -1420,6 +1560,96 @@
                     <code style="font-size: 0.8rem; color: #a78bfa;">${key}</code>
                 </div>
                 <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 1rem; padding: 0 0.3rem;" title="Xóa key này">✕</button>
+            </div>
+        `).join('');
+    }
+
+    function addGroqTrainKey() {
+        const keyInput = document.getElementById('newGroqTrainKey');
+        const key = keyInput.value.trim();
+        if (!key) {
+            showToast('Vui lòng nhập API Key', 'error');
+            return;
+        }
+        if (!key.startsWith('gsk_')) {
+            showToast('API Key phải bắt đầu bằng gsk_', 'error');
+            return;
+        }
+        
+        fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast(data.error, 'error');
+                } else {
+                    showToast('Đã thêm API Key Huấn luyện thành công!');
+                    keyInput.value = '';
+                    
+                    // Add to localStorage
+                    let localKeys = [];
+                    try {
+                        localKeys = JSON.parse(localStorage.getItem('groq_train_keys') || '[]');
+                    } catch (e) {}
+                    if (!localKeys.includes(key)) {
+                        localKeys.push(key);
+                        localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
+                    }
+                    
+                    fetchDNSConfig();
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
+            });
+    }
+
+    function removeGroqTrainKey(index) {
+        if (!confirm('Bạn có chắc muốn xóa API Key Huấn luyện này không?')) return;
+        const serverMaskedKeys = dnsConfig.groqTrainKeys || [];
+        const maskedKeyToDelete = serverMaskedKeys[index];
+        
+        fetch(`/dns/groq/train-keys/remove?index=${index}`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast(data.error, 'error');
+                } else {
+                    showToast(`Đã xóa API Key Huấn luyện!`);
+                    
+                    // Remove matching key from localStorage
+                    let localKeys = [];
+                    try {
+                        localKeys = JSON.parse(localStorage.getItem('groq_train_keys') || '[]');
+                    } catch (e) {}
+                    
+                    if (maskedKeyToDelete) {
+                        localKeys = localKeys.filter(localKey => !keyMatchesMask(localKey, maskedKeyToDelete));
+                        localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
+                    }
+                    
+                    fetchDNSConfig();
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                showToast('Lỗi kết nối', 'error');
+            });
+    }
+
+    function renderGroqTrainKeys(maskedKeys) {
+        const container = document.getElementById('groqTrainKeysList');
+        if (!maskedKeys || maskedKeys.length === 0) {
+            container.innerHTML = '<div style="text-align: center; padding: 0.75rem; color: var(--text-muted); font-size: 0.8rem;">Chưa có API Key huấn luyện nào. Hãy thêm ít nhất 1 key để chạy huấn luyện AI ngầm.</div>';
+            return;
+        }
+        container.innerHTML = maskedKeys.map((key, i) => `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px;">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="font-size: 0.7rem; background: #c084fc; color: #fff; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold;">#${i + 1}</span>
+                    <code style="font-size: 0.8rem; color: #c084fc;">${key}</code>
+                </div>
+                <button onclick="removeGroqTrainKey(${i})" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 1rem; padding: 0 0.3rem;" title="Xóa key này">✕</button>
             </div>
         `).join('');
     }
