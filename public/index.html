@@ -1145,7 +1145,17 @@
         const trainProgressContainer = document.getElementById('aiTrainingProgressContainer');
         const status = dnsConfig.aiTrainingStatus || {};
         
-        if (status.isRunning) {
+        if (!dnsConfig.aiEnabled) {
+            trainBadge.innerText = 'AI Tắt';
+            trainBadge.style.color = 'var(--text-muted)';
+            trainBadge.style.fontWeight = 'normal';
+            trainProgressContainer.style.display = 'none';
+        } else if (trainKeyCount === 0) {
+            trainBadge.innerText = 'Chưa có API Key huấn luyện';
+            trainBadge.style.color = '#f59e0b';
+            trainBadge.style.fontWeight = 'bold';
+            trainProgressContainer.style.display = 'none';
+        } else if (status.isRunning) {
             trainBadge.innerText = 'Đang chạy';
             trainBadge.style.color = '#c084fc';
             trainBadge.style.fontWeight = 'bold';
@@ -1155,8 +1165,8 @@
             document.getElementById('aiTrainCurrentKey').innerText = status.currentKey || '-';
         } else {
             trainBadge.innerText = 'Đã hoàn thành / Dừng';
-            trainBadge.style.color = 'var(--text-muted)';
-            trainBadge.style.fontWeight = 'normal';
+            trainBadge.style.color = '#10b981';
+            trainBadge.style.fontWeight = 'bold';
             trainProgressContainer.style.display = 'none';
         }
         

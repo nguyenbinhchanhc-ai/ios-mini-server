@@ -336,10 +336,30 @@ function runStartupAITraining() {
         aiTrainingStatus.currentIndex = index + 1;
         
         // Only train if not already in learnedExamples to avoid wasting tokens
-        const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === domain.toLowerCase());
-        if (alreadyLearned) {
+        const learnedItem = learnedExamples.find(ex => ex.domain.toLowerCase() === domain.toLowerCase());
+        if (learnedItem) {
+            const now = new Date();
+            const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+            const timeStr = vnTime.toISOString().substring(11, 19);
+            
+            aiTrainingStatus.trainedList.unshift({
+                domain: domain,
+                keyUsed: "N/A (Đã lưu bộ nhớ)",
+                time: timeStr,
+                success: true,
+                blocked: learnedItem.blocked,
+                reason: `Đã học (${learnedItem.reason || (learnedItem.blocked ? 'Chặn' : 'Bỏ qua')})`
+            });
+            if (aiTrainingStatus.trainedList.length > 50) {
+                aiTrainingStatus.trainedList.pop();
+            }
+            
+            aiTrainingStatus.currentDomain = domain;
+            aiTrainingStatus.currentKey = "N/A (Đã lưu bộ nhớ)";
+            broadcastUpdate();
+            
             index++;
-            trainNext();
+            trainingTimeoutId = setTimeout(trainNext, 100);
             return;
         }
         
@@ -381,8 +401,8 @@ function runStartupAITraining() {
         });
     }
     
-    // Start after 10 seconds delay to let the server boot up completely
-    trainingTimeoutId = setTimeout(trainNext, 10000);
+    // Start after 1 second delay to let the server boot up completely
+    trainingTimeoutId = setTimeout(trainNext, 1000);
 }
 
 function checkDomainWithGroqForTraining(domain, apiKey, callback) {
@@ -1991,8 +2011,12 @@ app.post('/dns/ai/learning/remove', (req, res) => {
 app.post('/dns/ai/learning/clear', (req, res) => {
     learnedExamples.length = 0;
     seedDefaultAILearning();
+    aiTrainingStatus.trainedList = [];
     broadcastUpdate();
     res.send("AI learning log reset to defaults.");
+    if (config.aiEnabled) {
+        setTimeout(runStartupAITraining, 1000);
+    }
 });
 
 app.post('/dns/ai/cache/clear', (req, res) => {
