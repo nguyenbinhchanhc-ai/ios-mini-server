@@ -42,6 +42,11 @@ const aiTrainingStatus = {
     trainedList: []
 };
 
+let trainingQueue = [];
+let totalTrainingEnqueued = 0;
+let totalTrainingProcessed = 0;
+
+
 // WebSocket client registry
 const wsClients = new Set();
 
@@ -296,9 +301,13 @@ function runStartupAITraining() {
         return;
     }
     
+    if (aiTrainingStatus.isRunning) {
+        return; // Already running
+    }
+    
     console.log("[AI Training] Starting background training loop using dedicated Training API Keys...");
     
-    const trainingList = [
+    const staticCandidates = [
         "ads.tiktok.com", "analytics.google.com", "ads.youtube.com", "pixel.facebook.com",
         "telemetry.microsoft.com", "stats.g.doubleclick.net", "adserver.admicro.vn", "ad.adtima.vn",
         "scam-banking-verify.xyz", "vietcombank-login-online.cc", "momo-nhan-qua.top",
@@ -306,10 +315,21 @@ function runStartupAITraining() {
         "api-auth.mbbank.cc", "shopee-tri-an.xyz", "mbcheck-banking.info", "adservice.google.com.vn"
     ];
     
-    aiTrainingStatus.isRunning = true;
-    aiTrainingStatus.totalCandidates = trainingList.length;
+    // Seed queue with static candidates if it's completely fresh
+    if (trainingQueue.length === 0 && totalTrainingEnqueued === 0) {
+        staticCandidates.forEach(domain => {
+            const d = domain.trim().toLowerCase();
+            const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
+            if (!alreadyLearned) {
+                trainingQueue.push(d);
+                totalTrainingEnqueued++;
+            }
+        });
+    }
     
-    let index = 0;
+    aiTrainingStatus.isRunning = true;
+    aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
+    
     let keyRotationIndex = 0;
     
     if (trainingTimeoutId) clearTimeout(trainingTimeoutId);
@@ -323,8 +343,8 @@ function runStartupAITraining() {
             return;
         }
         
-        if (index >= trainingList.length) {
-            console.log("[AI Training] Training loop completed.");
+        if (trainingQueue.length === 0) {
+            console.log("[AI Training] Training queue is empty. Suspending training loop.");
             aiTrainingStatus.isRunning = false;
             aiTrainingStatus.currentDomain = null;
             aiTrainingStatus.currentKey = null;
@@ -332,8 +352,11 @@ function runStartupAITraining() {
             return;
         }
         
-        const domain = trainingList[index];
-        aiTrainingStatus.currentIndex = index + 1;
+        const domain = trainingQueue.shift();
+        totalTrainingProcessed++;
+        
+        aiTrainingStatus.currentIndex = totalTrainingProcessed;
+        aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
         
         // Only train if not already in learnedExamples to avoid wasting tokens
         const learnedItem = learnedExamples.find(ex => ex.domain.toLowerCase() === domain.toLowerCase());
@@ -358,7 +381,6 @@ function runStartupAITraining() {
             aiTrainingStatus.currentKey = "N/A (Đã lưu bộ nhớ)";
             broadcastUpdate();
             
-            index++;
             trainingTimeoutId = setTimeout(trainNext, 100);
             return;
         }
@@ -391,8 +413,6 @@ function runStartupAITraining() {
                 aiTrainingStatus.trainedList.pop();
             }
             
-            index++;
-            
             // Rotate keys to speed up training. Safe delay per key is 15 seconds.
             const delayPerKey = 15000;
             const delay = Math.max(3000, Math.round(delayPerKey / keys.length));
@@ -403,6 +423,30 @@ function runStartupAITraining() {
     
     // Start after 1 second delay to let the server boot up completely
     trainingTimeoutId = setTimeout(trainNext, 1000);
+}
+
+function enqueueDomainForTraining(domain) {
+    const d = domain.trim().toLowerCase();
+    if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
+    if (d.endsWith('.local') || d.endsWith('.localhost')) return;
+    if (whitelistSet.has(d)) return;
+    if (isSafeDomain(d)) return;
+    
+    // Check if already in learnedExamples
+    const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
+    if (alreadyLearned) return;
+    
+    // Check if already in trainingQueue
+    if (trainingQueue.includes(d)) return;
+    
+    console.log(`[AI Training] Enqueuing domain for real-time training: ${d}`);
+    trainingQueue.unshift(d);
+    totalTrainingEnqueued++;
+    
+    // Auto start training loop if not running
+    if (!aiTrainingStatus.isRunning) {
+        runStartupAITraining();
+    }
 }
 
 function checkDomainWithGroqForTraining(domain, apiKey, callback) {
@@ -1558,6 +1602,11 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         if (config.aiEnabled && config.groqApiKeys && config.groqApiKeys.length > 0) {
             enqueueGroqCheck(domain);
         }
+        
+        // Trigger background AI training for new domains using dedicated training keys
+        if (config.aiEnabled && config.groqTrainKeys && config.groqTrainKeys.length > 0) {
+            enqueueDomainForTraining(domain);
+        }
     };
     
     if (isBlocked) {
@@ -2012,6 +2061,9 @@ app.post('/dns/ai/learning/clear', (req, res) => {
     learnedExamples.length = 0;
     seedDefaultAILearning();
     aiTrainingStatus.trainedList = [];
+    trainingQueue = [];
+    totalTrainingEnqueued = 0;
+    totalTrainingProcessed = 0;
     broadcastUpdate();
     res.send("AI learning log reset to defaults.");
     if (config.aiEnabled) {
