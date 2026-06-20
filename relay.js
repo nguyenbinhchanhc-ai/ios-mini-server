@@ -224,6 +224,15 @@ function broadcastUpdate() {
     }
 }
 
+let broadcastTimeout = null;
+function throttledBroadcastUpdate() {
+    if (broadcastTimeout) return;
+    broadcastTimeout = setTimeout(() => {
+        broadcastTimeout = null;
+        broadcastUpdate();
+    }, 1000);
+}
+
 function getServerStatus() {
     const memUsage = process.memoryUsage().heapUsed; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
@@ -379,7 +388,7 @@ function runStartupAITraining() {
             
             aiTrainingStatus.currentDomain = domain;
             aiTrainingStatus.currentKey = "N/A (Đã lưu bộ nhớ)";
-            broadcastUpdate();
+            throttledBroadcastUpdate();
             
             trainingTimeoutId = setTimeout(trainNext, 100);
             return;
@@ -449,7 +458,14 @@ function enqueueDomainForTraining(domain) {
     }
 }
 
-function checkDomainWithGroqForTraining(domain, apiKey, callback) {
+function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContext = null) {
+    if (internetContext === null) {
+        gatherInternetContext(domain).then((context) => {
+            checkDomainWithGroqForTraining(domain, apiKey, callback, context);
+        });
+        return;
+    }
+    
     const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
     const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-2);
     const recentExamples = [...blockedEx, ...allowedEx];
@@ -468,7 +484,7 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback) {
         model: "llama-3.1-8b-instant",
         messages: [
             { role: "system", content: systemContent },
-            { role: "user", content: buildAIAnalysisContext(domain) }
+            { role: "user", content: buildAIAnalysisContext(domain, internetContext) }
         ],
         response_format: { type: "json_object" }
     });
@@ -1160,7 +1176,67 @@ function processGroqQueue() {
     }, QUEUE_DELAY_MS);
 }
 
-function buildAIAnalysisContext(domain) {
+function gatherInternetContext(domain) {
+    return new Promise((resolve) => {
+        const result = {
+            resolvedIPs: [],
+            httpStatus: null,
+            serverHeader: null,
+            contentType: null,
+            htmlTitle: null,
+            error: null
+        };
+
+        const dns = require('dns');
+        dns.resolve4(domain, (dnsErr, addresses) => {
+            if (!dnsErr && addresses) {
+                result.resolvedIPs = addresses.slice(0, 3);
+            }
+
+            const http = require('http');
+            const url = `http://${domain}/`;
+            let reqFinished = false;
+
+            const req = http.get(url, { timeout: 1500 }, (res) => {
+                reqFinished = true;
+                result.httpStatus = res.statusCode;
+                result.serverHeader = res.headers['server'] || null;
+                result.contentType = res.headers['content-type'] || null;
+
+                let data = '';
+                res.on('data', (chunk) => {
+                    data += chunk.toString('utf8');
+                    if (data.length > 2000) {
+                        res.destroy();
+                    }
+                });
+                res.on('end', () => {
+                    const match = data.match(/<title>([^<]+)<\/title>/i);
+                    if (match && match[1]) {
+                        result.htmlTitle = match[1].trim();
+                    }
+                    resolve(result);
+                });
+            });
+
+            req.on('error', (err) => {
+                reqFinished = true;
+                result.error = err.code || err.message;
+                resolve(result);
+            });
+
+            req.on('timeout', () => {
+                if (!reqFinished) {
+                    req.destroy();
+                    result.error = "TIMEOUT";
+                    resolve(result);
+                }
+            });
+        });
+    });
+}
+
+function buildAIAnalysisContext(domain, internetContext = null) {
     const d = domain.trim().toLowerCase();
     const parts = d.split('.');
     const tld = parts[parts.length - 1];
@@ -1211,10 +1287,27 @@ function buildAIAnalysisContext(domain) {
         contextualPrompt += `- Subdomain pattern: Abnormally long host label (Potential DGA/tracking endpoint: YES)\n`;
     }
     
+    if (internetContext) {
+        contextualPrompt += `\nReal-time Internet Probe Data (Live connection status):\n`;
+        contextualPrompt += `- DNS Resolved IPs: ${JSON.stringify(internetContext.resolvedIPs)}\n`;
+        contextualPrompt += `- HTTP GET Connection Error: ${internetContext.error || "None"}\n`;
+        contextualPrompt += `- HTTP Response Status Code: ${internetContext.httpStatus || "N/A"}\n`;
+        contextualPrompt += `- HTTP Server Header: ${internetContext.serverHeader || "N/A"}\n`;
+        contextualPrompt += `- HTTP Content-Type Header: ${internetContext.contentType || "N/A"}\n`;
+        contextualPrompt += `- HTML Title tag (<title>): "${internetContext.htmlTitle || "N/A"}"\n`;
+    }
+    
     return contextualPrompt;
 }
 
-function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0) {
+function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetContext = null) {
+    if (internetContext === null) {
+        gatherInternetContext(domain).then((context) => {
+            checkDomainWithGroq(domain, apiKey, callback, modelIndex, context);
+        });
+        return;
+    }
+    
     if (!apiKey) {
         aiDecisionCache.delete(domain);
         if (callback) callback();
@@ -1272,7 +1365,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0) {
             },
             {
                 role: "user",
-                content: buildAIAnalysisContext(domain)
+                content: buildAIAnalysisContext(domain, internetContext)
             }
         ],
         response_format: { type: "json_object" }
@@ -1295,7 +1388,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0) {
         if (!fallbackCalled) {
             fallbackCalled = true;
             console.warn(`[AI Guard] Groq model ${model} failed for ${domain} (${reason}). Trying fallback...`);
-            checkDomainWithGroq(domain, apiKey, callback, modelIndex + 1);
+            checkDomainWithGroq(domain, apiKey, callback, modelIndex + 1, internetContext);
         }
     };
     
@@ -1397,7 +1490,7 @@ function logQuery(domain, blocked, clientIP, source = "upstream") {
     if (logs.length > 100) {
         logs.shift();
     }
-    broadcastUpdate(); // Instant real-time UI updates
+    throttledBroadcastUpdate(); // Throttled UI updates under heavy traffic
 }
 
 let lastSaveTimeout = null;

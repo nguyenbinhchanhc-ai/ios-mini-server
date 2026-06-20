@@ -1091,29 +1091,28 @@
         btnRefreshSubs.disabled = dnsConfig.isUpdating;
         
         // Update stats
-        document.getElementById('dnsStatTotal').innerText = dnsConfig.stats.total;
-        document.getElementById('dnsStatBlocked').innerText = dnsConfig.stats.blocked;
-        document.getElementById('dnsStatPercent').innerText = dnsConfig.stats.blockedPercent.toFixed(1) + '%';
+        const stats = dnsConfig.stats || { total: 0, blocked: 0, blockedPercent: 0, cacheHitRate: 0, avgLatency: 0 };
+        document.getElementById('dnsStatTotal').innerText = stats.total !== undefined ? stats.total : 0;
+        document.getElementById('dnsStatBlocked').innerText = stats.blocked !== undefined ? stats.blocked : 0;
+        document.getElementById('dnsStatPercent').innerText = (stats.blockedPercent !== undefined ? stats.blockedPercent : 0).toFixed(1) + '%';
         document.getElementById('dnsStatActive').innerText = (dnsConfig.blockedCount !== undefined ? dnsConfig.blockedCount : (dnsConfig.blocked ? dnsConfig.blocked.length : 0)) + ' tên miền';
-        document.getElementById('dnsStatCacheHit').innerText = (dnsConfig.stats.cacheHitRate !== undefined ? dnsConfig.stats.cacheHitRate.toFixed(1) : '0.0') + '%';
-        document.getElementById('dnsStatLatency').innerText = (dnsConfig.stats.avgLatency !== undefined ? dnsConfig.stats.avgLatency.toFixed(1) : '0.0') + ' ms';
+        document.getElementById('dnsStatCacheHit').innerText = (stats.cacheHitRate !== undefined ? stats.cacheHitRate : 0).toFixed(1) + '%';
+        document.getElementById('dnsStatLatency').innerText = (stats.avgLatency !== undefined ? stats.avgLatency : 0).toFixed(1) + ' ms';
         
         // Update Server RAM
-        document.getElementById('dnsStatServerMemory').innerText = (dnsConfig.serverStatus ? dnsConfig.serverStatus.memoryUsage : 0) + ' MB / 512 MB';
+        const serverStatus = dnsConfig.serverStatus || { memoryUsage: 0, status: 'Ngoại tuyến', statusClass: 'offline' };
+        document.getElementById('dnsStatServerMemory').innerText = (serverStatus.memoryUsage || 0) + ' MB / 512 MB';
         
         // Update Server Health Status
         const statusEl = document.getElementById('dnsStatServerStatus');
-        if (dnsConfig.serverStatus) {
-            statusEl.innerText = dnsConfig.serverStatus.status;
-            if (dnsConfig.serverStatus.statusClass === 'overloaded') {
-                statusEl.style.color = '#ef4444';
-            } else if (dnsConfig.serverStatus.statusClass === 'warning') {
-                statusEl.style.color = '#f59e0b';
-            } else {
-                statusEl.style.color = '#10b981';
-            }
+        statusEl.innerText = serverStatus.status || 'Ngoại tuyến';
+        if (serverStatus.statusClass === 'overloaded') {
+            statusEl.style.color = '#ef4444';
+        } else if (serverStatus.statusClass === 'warning') {
+            statusEl.style.color = '#f59e0b';
+        } else if (serverStatus.statusClass === 'stable') {
+            statusEl.style.color = '#10b981';
         } else {
-            statusEl.innerText = 'Ngoại tuyến';
             statusEl.style.color = '#ef4444';
         }
 
@@ -1122,7 +1121,7 @@
         document.getElementById('dnsStatAIQueue').innerText = (dnsConfig.aiQueueLength !== undefined ? dnsConfig.aiQueueLength : 0) + ' yêu cầu' +
             (dnsConfig.activeGroqRequests ? ` (đang quét ${dnsConfig.activeGroqRequests})` : '');
 
-        if (!isConfigLoaded) {
+        if (!isConfigLoaded && dnsConfig.upstream) {
             document.getElementById('upstreamInput').value = dnsConfig.upstream;
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
             document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.3-70b-versatile";
