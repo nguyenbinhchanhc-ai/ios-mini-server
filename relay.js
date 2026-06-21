@@ -154,7 +154,7 @@ let isQueuePaused = false;
 let queueTimeoutId = null;
 const FALLBACK_MODELS = [
     "llama-3.1-8b-instant",
-    "gemma2-9b-it"
+    "llama3-8b-8192"
 ];
 
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
