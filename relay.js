@@ -287,6 +287,120 @@ function setCache(domain, qtype, responseBuffer, ttl) {
     });
 }
 
+// Parse IP address to byte array (supports IPv4 and IPv6)
+function parseIPToBytes(ip) {
+    try {
+        if (ip.includes(':')) {
+            let address = ip.trim();
+            const zoneIdx = address.indexOf('%');
+            if (zoneIdx !== -1) {
+                address = address.substring(0, zoneIdx);
+            }
+            
+            const parts = address.split(':');
+            let result = [];
+            
+            let nonEmptyCount = parts.filter(p => p !== '').length;
+            let missingCount = 8 - nonEmptyCount;
+            
+            let inserted = false;
+            for (let i = 0; i < parts.length; i++) {
+                if (parts[i] === '') {
+                    if (!inserted) {
+                        for (let j = 0; j < missingCount; j++) {
+                            result.push(0);
+                            result.push(0);
+                        }
+                        inserted = true;
+                    }
+                } else {
+                    const val = parseInt(parts[i], 16);
+                    result.push((val >> 8) & 0xff);
+                    result.push(val & 0xff);
+                }
+            }
+            
+            while (result.length < 16) {
+                result.push(0);
+            }
+            return result;
+        } else {
+            const parts = ip.split('.');
+            if (parts.length !== 4) return null;
+            const bytes = [];
+            for (let i = 0; i < 4; i++) {
+                const val = parseInt(parts[i], 10);
+                if (isNaN(val) || val < 0 || val > 255) return null;
+                bytes.push(val);
+            }
+            return bytes;
+        }
+    } catch (e) {
+        return null;
+    }
+}
+
+// Add EDNS Client Subnet (ECS) option to DNS query buffer
+function addECS(dnsQueryBuffer, clientIP) {
+    try {
+        if (!clientIP || clientIP === "127.0.0.1" || clientIP === "::1") {
+            return dnsQueryBuffer;
+        }
+        
+        const parsed = parseDNSQuery(dnsQueryBuffer);
+        if (!parsed) return dnsQueryBuffer;
+        
+        const questionEnd = parsed.questionEndOffset + 4;
+        let cleanQuery = Buffer.alloc(questionEnd);
+        dnsQueryBuffer.copy(cleanQuery, 0, 0, questionEnd);
+        
+        cleanQuery.writeUInt16BE(0, 10); // Clear ARCOUNT in header
+        
+        const isIPv6 = clientIP.includes(':');
+        let family = 1;
+        let prefix = 24;
+        let ipBytes = parseIPToBytes(clientIP);
+        
+        if (!ipBytes) return dnsQueryBuffer;
+        
+        if (isIPv6) {
+            family = 2;
+            prefix = 48; // /48 subnet for IPv6 GeoIP
+            ipBytes = ipBytes.slice(0, 6);
+        } else {
+            family = 1;
+            prefix = 24; // /24 subnet for IPv4 GeoIP
+            ipBytes = ipBytes.slice(0, 3);
+        }
+        
+        const ecsOptionLen = 4 + ipBytes.length; // family (2) + source (1) + scope (1) + address
+        const ecsOption = Buffer.alloc(4 + ecsOptionLen);
+        ecsOption.writeUInt16BE(8, 0); // Option Code 8
+        ecsOption.writeUInt16BE(ecsOptionLen, 2); // Option Length
+        ecsOption.writeUInt16BE(family, 4); // Family
+        ecsOption[6] = prefix; // Source Prefix
+        ecsOption[7] = 0; // Scope Prefix
+        for (let i = 0; i < ipBytes.length; i++) {
+            ecsOption[8 + i] = ipBytes[i];
+        }
+        
+        const optRrHeader = Buffer.alloc(11);
+        optRrHeader[0] = 0; // Name .
+        optRrHeader.writeUInt16BE(41, 1); // Type OPT
+        optRrHeader.writeUInt16BE(4096, 3); // Payload size 4096
+        optRrHeader.writeUInt32BE(0, 5); // Extended RCODE & Flags
+        optRrHeader.writeUInt16BE(ecsOption.length, 9); // RDATA Length
+        
+        const finalQuery = Buffer.concat([cleanQuery, optRrHeader, ecsOption]);
+        finalQuery.writeUInt16BE(1, 10); // Set ARCOUNT to 1
+        
+        return finalQuery;
+    } catch (e) {
+        console.error("[ECS] Failed to add EDNS Client Subnet:", e);
+        return dnsQueryBuffer;
+    }
+}
+
 // DNS Packet Parsers & Builders
 function parseDNSQuery(buffer) {
     if (buffer.length < 12) return null;
@@ -1246,7 +1360,14 @@ app.use(express.static(path.join(__dirname, 'public')));
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
 function handleDoH(queryData, clientIP, hostHeader, callback) {
     const startTime = Date.now();
-    const parsed = parseDNSQuery(queryData);
+    
+    // Inject EDNS Client Subnet (ECS) to preserve local GeoDNS routing for the client
+    let queryWithEcs = queryData;
+    if (clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1") {
+        queryWithEcs = addECS(queryData, clientIP);
+    }
+    
+    const parsed = parseDNSQuery(queryWithEcs);
     if (!parsed) {
         callback(Buffer.alloc(0));
         return;
@@ -1312,23 +1433,23 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
             rotated.push(first);
             config.gslbRecords[domain] = rotated;
             
-            const gslbResponse = buildGslbResponse(queryData, parsed.questionEndOffset, rotated);
+            const gslbResponse = buildGslbResponse(queryWithEcs, parsed.questionEndOffset, rotated);
             completeQuery(gslbResponse, false, true, rotated.join(', '));
             return;
         }
     }
     
     // 1. Check local cache
-    const cachedResponseObj = checkCache(originalDomain, qtype, queryData);
+    const cachedResponseObj = checkCache(originalDomain, qtype, queryWithEcs);
     if (cachedResponseObj) {
         config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
         const clientResponse = Buffer.from(cachedResponseObj.responseBuffer);
-        clientResponse[0] = queryData[0];
-        clientResponse[1] = queryData[1];
+        clientResponse[0] = queryWithEcs[0];
+        clientResponse[1] = queryWithEcs[1];
         completeQuery(clientResponse, true, false, "", cachedResponseObj.fromStale ? "stale" : "cache");
     } else {
         // 2. Fetch from chosen upstream DNS
-        fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, targetDNS, (response, isSecondary) => {
+        fetchFromUpstreamDeduplicated(queryWithEcs, originalDomain, qtype, targetDNS, (response, isSecondary) => {
             if (response) {
                 if (isSecondary) {
                     config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
