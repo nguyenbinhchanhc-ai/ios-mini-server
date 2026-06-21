@@ -1,1799 +1,889 @@
-        <!DOCTYPE html>
-        <html lang="vi">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>iOS Mini Server Portal</title>
-            <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-            <style>
-                :root {
-                    --bg-color: #0b0f19;
-                    --card-bg: rgba(20, 26, 46, 0.6);
-                    --card-border: rgba(255, 255, 255, 0.08);
-                    --primary: #8b5cf6;
-                    --primary-glow: rgba(139, 92, 246, 0.4);
-                    --success: #10b981;
-                    --danger: #ef4444;
-                    --text-main: #f3f4f6;
-                    --text-muted: #9ca3af;
-                }
-                
-                * {
-                    box-sizing: border-box;
-                    margin: 0;
-                    padding: 0;
-                    font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                }
-                
-                body {
-                    background: radial-gradient(circle at top right, #1e1b4b, var(--bg-color));
-                    color: var(--text-main);
-                    min-height: 100vh;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    padding: 2rem 1rem;
-                    overflow-x: hidden;
-                }
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iOS Mini Server Portal - DNS Load Balancer & AI Router</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 26, 46, 0.6);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --primary: #8b5cf6;
+            --primary-glow: rgba(139, 92, 246, 0.4);
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --info: #3b82f6;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        
+        body {
+            background: radial-gradient(circle at top right, #1e1b4b, var(--bg-color));
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+            overflow-x: hidden;
+        }
 
-                .container {
-                    width: 100%;
-                    max-width: 900px;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 2rem;
-                }
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
 
-                header {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    background: var(--card-bg);
-                    border: 1px solid var(--card-border);
-                    backdrop-filter: blur(16px);
-                    padding: 1.5rem 2rem;
-                    border-radius: 20px;
-                    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-                }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            backdrop-filter: blur(16px);
+            padding: 1.5rem 2rem;
+            border-radius: 20px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
 
-                .logo-section h1 {
-                    font-size: 1.5rem;
-                    font-weight: 700;
-                    background: linear-gradient(135deg, #a78bfa, #6366f1);
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                }
+        .logo-section h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a78bfa, #6366f1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
 
-                .logo-section p {
-                    font-size: 0.85rem;
-                    color: var(--text-muted);
-                    margin-top: 0.25rem;
-                }
+        .logo-section p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
 
-                .status-badge {
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                    background: rgba(16, 185, 129, 0.1);
-                    color: var(--success);
-                    padding: 0.5rem 1rem;
-                    border-radius: 30px;
-                    font-size: 0.85rem;
-                    font-weight: 500;
-                    border: 1px solid rgba(16, 185, 129, 0.2);
-                }
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+            padding: 0.5rem 1rem;
+            border-radius: 30px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
 
-                .status-dot {
-                    width: 8px;
-                    height: 8px;
-                    background-color: var(--success);
-                    border-radius: 50%;
-                    animation: pulse 1.5s infinite;
-                }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background-color: var(--success);
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
 
-                @keyframes pulse {
-                    0% { transform: scale(0.9); opacity: 0.6; }
-                    50% { transform: scale(1.2); opacity: 1; }
-                    100% { transform: scale(0.9); opacity: 0.6; }
-                }
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 0.6; }
+            50% { transform: scale(1.2); opacity: 1; }
+            100% { transform: scale(0.9); opacity: 0.6; }
+        }
 
-                .grid {
-                    display: grid;
-                    grid-template-columns: 1fr;
-                    gap: 2rem;
-                }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+        }
 
-                @media (min-width: 768px) {
-                    .grid {
-                        grid-template-columns: 1fr 1.5fr;
-                    }
-                }
+        @media (min-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr 1.5fr;
+            }
+        }
 
-                .card {
-                    background: var(--card-bg);
-                    border: 1px solid var(--card-border);
-                    backdrop-filter: blur(16px);
-                    border-radius: 24px;
-                    padding: 2rem;
-                    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-                    transition: transform 0.3s ease, box-shadow 0.3s ease;
-                }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            backdrop-filter: blur(16px);
+            border-radius: 24px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
 
-                .card:hover {
-                    box-shadow: 0 12px 40px 0 rgba(139, 92, 246, 0.1);
-                }
+        .card:hover {
+            box-shadow: 0 12px 40px 0 rgba(139, 92, 246, 0.1);
+        }
 
-                .card h2 {
-                    font-size: 1.25rem;
-                    margin-bottom: 1.5rem;
-                    font-weight: 600;
-                    display: flex;
-                    align-items: center;
-                    gap: 0.5rem;
-                }
+        .card h2 {
+            font-size: 1.25rem;
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
 
-                .upload-area {
-                    border: 2px dashed rgba(139, 92, 246, 0.3);
-                    border-radius: 16px;
-                    padding: 2.5rem 1.5rem;
-                    text-align: center;
-                    cursor: pointer;
-                    transition: all 0.3s ease;
-                    position: relative;
-                    overflow: hidden;
-                    background: rgba(139, 92, 246, 0.02);
-                }
+        .dns-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            width: 100%;
+        }
+        @media (min-width: 600px) {
+            .dns-stats-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+        .stat-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.25rem 0.75rem;
+            text-align: center;
+            transition: all 0.2s ease;
+        }
+        .stat-card:hover {
+            background: rgba(255, 255, 255, 0.05);
+            transform: translateY(-2px);
+        }
+        .stat-card-title {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .stat-card-val {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+        .stat-card-val.blue-val {
+            color: #60a5fa;
+        }
+        .stat-card-val.purple-val {
+            color: #c084fc;
+        }
+        .stat-card-val.green-val {
+            color: var(--success);
+        }
 
-                .upload-area:hover, .upload-area.dragover {
-                    border-color: var(--primary);
-                    background: rgba(139, 92, 246, 0.05);
-                    box-shadow: 0 0 20px var(--primary-glow);
-                }
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            width: 100%;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 0.5rem;
+            overflow-x: auto;
+        }
+        .tab {
+            padding: 0.6rem 1.2rem;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-muted);
+            transition: all 0.25s ease;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+        .tab.active {
+            color: var(--text-main);
+            background: var(--primary);
+            border-color: var(--primary);
+            box-shadow: 0 0 15px var(--primary-glow);
+        }
+        .tab:hover:not(.active) {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-main);
+        }
+        .subtab-content {
+            display: none;
+            width: 100%;
+            animation: fadeIn 0.3s ease;
+        }
+        .subtab-content.active {
+            display: block;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
 
-                .upload-icon {
-                    font-size: 3rem;
-                    margin-bottom: 1rem;
-                    display: inline-block;
-                    animation: float 3s ease-in-out infinite;
-                }
+        .btn-toggle {
+            width: 100%;
+            padding: 0.8rem;
+            border-radius: 12px;
+            border: none;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            background: var(--primary);
+            box-shadow: 0 4px 12px var(--primary-glow);
+        }
+        .btn-toggle:hover {
+            transform: translateY(-2px);
+        }
 
-                @keyframes float {
-                    0% { transform: translateY(0px); }
-                    50% { transform: translateY(-5px); }
-                    100% { transform: translateY(0px); }
-                }
+        /* List Items & Pools */
+        .dns-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background: rgba(255,255,255,0.02);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.04);
+            transition: background 0.2s;
+        }
+        .dns-list-item:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        .dns-list-item span {
+            font-size: 0.9rem;
+            color: var(--text-main);
+            word-break: break-all;
+        }
+        .btn-unblock {
+            background: transparent;
+            border: none;
+            color: var(--danger);
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.85rem;
+            padding: 0.3rem 0.6rem;
+            border-radius: 6px;
+            transition: background 0.2s;
+        }
+        .btn-unblock:hover {
+            background: rgba(239, 68, 68, 0.1);
+        }
+        
+        .dns-log-table {
+            width: 100%;
+            font-family: monospace;
+            font-size: 0.82rem;
+            border-collapse: collapse;
+        }
+        .dns-log-table th {
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 0.5rem;
+            font-size: 0.75rem;
+            text-align: left;
+            color: var(--text-muted);
+        }
+        .dns-log-table td {
+            padding: 0.6rem 0.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+        }
+        .dns-log-table tr:hover td {
+            background: rgba(255, 255, 255, 0.03);
+        }
+        .dns-status-badge {
+            font-weight: bold;
+            font-size: 0.72rem;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            display: inline-block;
+        }
+        .dns-status-badge.routed {
+            background: rgba(59, 130, 246, 0.15);
+            color: #60a5fa;
+        }
+        .dns-status-badge.cached {
+            background: rgba(167, 139, 250, 0.15);
+            color: #a78bfa;
+        }
+        .dns-status-badge.gslb {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success);
+        }
 
-                .upload-area p {
-                    font-size: 0.95rem;
-                    font-weight: 500;
-                    margin-bottom: 0.5rem;
-                }
+        .latency-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 0.35rem;
+        }
+        .latency-dot.green { background-color: var(--success); }
+        .latency-dot.yellow { background-color: var(--warning); }
+        .latency-dot.red { background-color: var(--danger); }
 
-                .upload-area span {
-                    font-size: 0.8rem;
-                    color: var(--text-muted);
-                }
+        .toast-container {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            z-index: 1000;
+        }
+        .toast {
+            background: rgba(20, 26, 46, 0.9);
+            border: 1px solid var(--card-border);
+            backdrop-filter: blur(20px);
+            padding: 1rem 1.5rem;
+            border-radius: 14px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            color: var(--text-main);
+            min-width: 250px;
+            animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            font-weight: 500;
+        }
+        @keyframes slideIn {
+            from { transform: translateX(120%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .toast.success { border-left: 4px solid var(--success); }
+        .toast.error { border-left: 4px solid var(--danger); }
+        .toast.info { border-left: 4px solid var(--primary); }
 
-                #fileInput {
-                    display: none;
-                }
+        .svg-icon {
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo-section">
+                <h1>
+                    <svg class="svg-icon" viewBox="0 0 24 24" style="width: 24px; height: 24px; fill: var(--primary);"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                    Render DNS Load Balancer & AI Router
+                </h1>
+                <p>Cân bằng tải DNS & Định hướng lưu lượng thông minh</p>
+            </div>
+            <div class="status-badge">
+                <div class="status-dot"></div>
+                <span>Hoạt động</span>
+            </div>
+        </header>
 
-                .progress-container {
-                    margin-top: 1.5rem;
-                    display: none;
-                }
-
-                .progress-bar-bg {
-                    background: rgba(255, 255, 255, 0.1);
-                    height: 8px;
-                    border-radius: 4px;
-                    overflow: hidden;
-                    margin-bottom: 0.5rem;
-                }
-
-                .progress-bar-fill {
-                    background: linear-gradient(90deg, var(--primary), #6366f1);
-                    width: 0%;
-                    height: 100%;
-                    border-radius: 4px;
-                    transition: width 0.1s ease;
-                    box-shadow: 0 0 8px var(--primary);
-                }
-
-                .progress-text {
-                    font-size: 0.8rem;
-                    color: var(--text-muted);
-                    display: flex;
-                    justify-content: space-between;
-                }
-
-                .files-table-wrapper {
-                    overflow-x: auto;
-                    margin-top: 1rem;
-                }
-
-                table {
-                    width: 100%;
-                    border-collapse: collapse;
-                    text-align: left;
-                }
-
-                th {
-                    padding: 1rem;
-                    font-size: 0.8rem;
-                    text-transform: uppercase;
-                    color: var(--text-muted);
-                    font-weight: 600;
-                    border-bottom: 1px solid var(--card-border);
-                }
-
-                td {
-                    padding: 1.2rem 1rem;
-                    font-size: 0.9rem;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-                    white-space: nowrap;
-                }
-
-                tr:hover td {
-                    background: rgba(255, 255, 255, 0.02);
-                }
-
-                .file-name {
-                    font-weight: 500;
-                    color: var(--text-main);
-                    max-width: 250px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                }
-
-                .file-info {
-                    font-size: 0.8rem;
-                    color: var(--text-muted);
-                }
-
-                .actions {
-                    display: flex;
-                    gap: 0.75rem;
-                }
-
-                .btn-icon {
-                    background: rgba(255, 255, 255, 0.05);
-                    border: 1px solid var(--card-border);
-                    width: 36px;
-                    height: 36px;
-                    border-radius: 10px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    cursor: pointer;
-                    color: var(--text-main);
-                    transition: all 0.2s ease;
-                }
-
-                .btn-icon:hover {
-                    background: var(--primary);
-                    border-color: var(--primary);
-                    box-shadow: 0 0 10px var(--primary-glow);
-                    transform: translateY(-2px);
-                }
-
-                .btn-icon.btn-delete:hover {
-                    background: var(--danger);
-                    border-color: var(--danger);
-                    box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
-                    transform: translateY(-2px);
-                }
-
-                .empty-state {
-                    text-align: center;
-                    padding: 4rem 2rem;
-                    color: var(--text-muted);
-                }
-
-                .empty-icon {
-                    font-size: 3rem;
-                    margin-bottom: 1rem;
-                    opacity: 0.5;
-                }
-
-                .toast-container {
-                    position: fixed;
-                    bottom: 2rem;
-                    right: 2rem;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 0.75rem;
-                    z-index: 1000;
-                }
-
-                .toast {
-                    background: rgba(20, 26, 46, 0.9);
-                    border: 1px solid var(--card-border);
-                    backdrop-filter: blur(20px);
-                    padding: 1rem 1.5rem;
-                    border-radius: 14px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-                    display: flex;
-                    align-items: center;
-                    gap: 0.75rem;
-                    color: var(--text-main);
-                    min-width: 250px;
-                    animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-                    font-weight: 500;
-                }
-
-                @keyframes slideIn {
-                    from { transform: translateX(120%); opacity: 0; }
-                    to { transform: translateX(0); opacity: 1; }
-                }
-
-                .toast.success { border-left: 4px solid var(--success); }
-                .toast.error { border-left: 4px solid var(--danger); }
-                .toast.info { border-left: 4px solid var(--primary); }
-
-                .svg-icon {
-                    width: 18px;
-                    height: 18px;
-                    fill: currentColor;
-                }
-
-                /* Tabbed Navigation Styles */
-                .tabs {
-                    display: flex;
-                    gap: 0.75rem;
-                    margin-top: 1rem;
-                    margin-bottom: 0.5rem;
-                    width: 100%;
-                    border-bottom: 1px solid var(--card-border);
-                    padding-bottom: 0.5rem;
-                }
-                .tab {
-                    padding: 0.6rem 1.2rem;
-                    border-radius: 12px;
-                    cursor: pointer;
-                    font-weight: 600;
-                    color: var(--text-muted);
-                    transition: all 0.25s ease;
-                    background: rgba(255, 255, 255, 0.02);
-                    border: 1px solid var(--card-border);
-                    font-size: 0.9rem;
-                }
-                .tab.active {
-                    color: var(--text-main);
-                    background: var(--primary);
-                    border-color: var(--primary);
-                    box-shadow: 0 0 15px var(--primary-glow);
-                }
-                .tab:hover:not(.active) {
-                    background: rgba(255, 255, 255, 0.06);
-                    color: var(--text-main);
-                }
-                .tab-content {
-                    display: none;
-                    width: 100%;
-                    animation: fadeIn 0.3s ease;
-                }
-                .tab-content.active {
-                    display: block;
-                }
-                @keyframes fadeIn {
-                    from { opacity: 0; transform: translateY(5px); }
-                    to { opacity: 1; transform: translateY(0); }
-                }
-
-                /* DNS Settings & Stats Styles */
-                .dns-stats-grid {
-                    display: grid;
-                    grid-template-columns: repeat(2, 1fr);
-                    gap: 1rem;
-                    margin-bottom: 1.5rem;
-                    width: 100%;
-                }
-                @media (min-width: 600px) {
-                    .dns-stats-grid {
-                        grid-template-columns: repeat(4, 1fr);
-                    }
-                }
-                .stat-card {
-                    background: rgba(255, 255, 255, 0.02);
-                    border: 1px solid var(--card-border);
-                    border-radius: 16px;
-                    padding: 1.25rem 0.75rem;
-                    text-align: center;
-                }
-                .stat-card-title {
-                    font-size: 0.75rem;
-                    color: var(--text-muted);
-                    margin-bottom: 0.5rem;
-                    font-weight: 600;
-                    text-transform: uppercase;
-                }
-                .stat-card-val {
-                    font-size: 1.4rem;
-                    font-weight: 700;
-                    color: var(--text-main);
-                }
-                .stat-card-val.blocked-num {
-                    color: var(--danger);
-                }
-                .stat-card-val.allowed-num {
-                    color: var(--success);
-                }
-
-                .badge {
-                    padding: 0.3rem 0.85rem;
-                    border-radius: 20px;
-                    font-size: 0.8rem;
-                    font-weight: 600;
-                    display: inline-block;
-                }
-                .badge.success {
-                    background: rgba(16, 185, 129, 0.1);
-                    color: var(--success);
-                    border: 1px solid rgba(16, 185, 129, 0.2);
-                }
-                .badge.danger {
-                    background: rgba(239, 68, 68, 0.1);
-                    color: var(--danger);
-                    border: 1px solid rgba(239, 68, 68, 0.2);
-                }
-                .dns-status-panel {
-                    background: rgba(0,0,0,0.15);
-                    padding: 1.25rem;
-                    border-radius: 16px;
-                    border: 1px solid var(--card-border);
-                }
-                .status-row {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    margin-bottom: 1rem;
-                    font-size: 0.95rem;
-                }
-                .btn-toggle {
-                    flex: 1;
-                    padding: 0.8rem;
-                    border-radius: 12px;
-                    border: none;
-                    color: white;
-                    font-weight: 600;
-                    cursor: pointer;
-                    transition: all 0.2s ease;
-                    background: var(--primary);
-                    box-shadow: 0 4px 12px var(--primary-glow);
-                }
-                .btn-toggle.running {
-                    background: var(--danger);
-                    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
-                }
-                .btn-toggle:hover {
-                    transform: translateY(-2px);
-                }
-                .dns-list-item {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                    padding: 0.6rem 1rem;
-                    background: rgba(255,255,255,0.02);
-                    border-radius: 10px;
-                    border: 1px solid rgba(255,255,255,0.04);
-                    transition: background 0.2s;
-                }
-                .dns-list-item:hover {
-                    background: rgba(255,255,255,0.05);
-                }
-                .dns-list-item span {
-                    font-size: 0.9rem;
-                    color: var(--text-main);
-                    word-break: break-all;
-                    padding-right: 0.5rem;
-                }
-                .btn-unblock {
-                    background: transparent;
-                    border: none;
-                    color: var(--danger);
-                    cursor: pointer;
-                    font-weight: 600;
-                    font-size: 0.85rem;
-                    padding: 0.3rem 0.6rem;
-                    border-radius: 6px;
-                    transition: background 0.2s;
-                }
-                .btn-unblock:hover {
-                    background: rgba(239, 68, 68, 0.1);
-                }
-                
-                .dns-log-table {
-                    width: 100%;
-                    font-family: monospace;
-                    font-size: 0.85rem;
-                }
-                .dns-log-table th {
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                    padding: 0.5rem;
-                    font-size: 0.75rem;
-                }
-                .dns-log-table td {
-                    padding: 0.6rem 0.5rem;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
-                }
-                .dns-log-table tr:hover td {
-                    background: rgba(255, 255, 255, 0.03);
-                }
-                .dns-status-badge {
-                    font-weight: bold;
-                    font-size: 0.75rem;
-                    padding: 0.2rem 0.4rem;
-                    border-radius: 4px;
-                }
-                .dns-status-badge.allowed {
-                    background: rgba(16, 185, 129, 0.1);
-                    color: var(--success);
-                }
-                .dns-status-badge.blocked {
-                    background: rgba(239, 68, 68, 0.1);
-                    color: var(--danger);
-                }
-                .dns-status-badge.cached {
-                    background: rgba(167, 139, 250, 0.1);
-                    color: #a78bfa;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <header>
-        <div class="logo-section">
-            <h1>
-                <svg class="svg-icon" viewBox="0 0 24 24" style="width: 24px; height: 24px; fill: var(--primary);"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-                Render DNS Ad-Blocker
-            </h1>
-            <p>Cloud-hosted DNS Ad-Blocker & Security Filtering</p>
+        <!-- Stats Grid -->
+        <div class="dns-stats-grid">
+            <div class="stat-card">
+                <div class="stat-card-title">Tổng truy vấn</div>
+                <div class="stat-card-val" id="dnsStatTotal">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Tỷ lệ Cache</div>
+                <div class="stat-card-val green-val" id="dnsStatCacheHit">0%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Độ trễ trung bình</div>
+                <div class="stat-card-val" id="dnsStatLatency">0 ms</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Thuật toán LB</div>
+                <div class="stat-card-val blue-val" id="dnsStatAlgo" style="font-size: 1.1rem; padding-top: 0.2rem;">least-latency</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">RAM Máy Chủ</div>
+                <div class="stat-card-val" id="dnsStatServerMemory" style="color: #60a5fa;">0 MB / 512 MB</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Trạng thái Server</div>
+                <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Phân loại AI</div>
+                <div class="stat-card-val purple-val" id="dnsStatAICache">0 tên miền</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Hàng đợi AI</div>
+                <div class="stat-card-val" id="dnsStatAIQueue">0 yêu cầu</div>
+            </div>
         </div>
-        <div class="status-badge">
-            <div class="status-dot"></div>
-            <span>Hoạt động</span>
-        </div>
-    </header>
 
-                <!-- Tabs Navigation Removed -->
-                    <div class="tab" onclick="switchTab('dns-tab')">🛡️ DNS Ad-Blocker</div>
+        <div class="grid">
+            <div class="card">
+                <h2>Cấu hình Server</h2>
+                <div style="background: rgba(0,0,0,0.15); padding: 1.25rem; border-radius: 16px; border: 1px solid var(--card-border); display: flex; flex-direction: column; gap: 1rem;">
+                    <div>
+                        <span style="font-size: 0.85rem; color: var(--text-muted);">Trạng thái máy chủ:</span>
+                        <span id="dnsRunningBadge" class="badge success" style="margin-left: 0.5rem; font-weight: bold; color: var(--success);">Đang chạy</span>
+                    </div>
+                    <button onclick="resetStats()" style="padding: 0.75rem 1rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; cursor: pointer; font-weight: 600; font-size: 0.85rem;">Reset Thống kê</button>
                 </div>
+                
+                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
+                    <h3>Chọn Thuật toán Cân bằng tải</h3>
+                    <select id="lbAlgoSelector" onchange="changeLbAlgorithm()" style="width: 100%; margin-top: 0.5rem; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem; font-weight: 500;">
+                        <option value="least-latency">Least Latency (Nhanh nhất)</option>
+                        <option value="round-robin">Round-Robin (Xoay vòng)</option>
+                        <option value="ai-routing">AI Routing (Định tuyến AI)</option>
+                        <option value="random">Random (Ngẫu nhiên)</option>
+                    </select>
+                </div>
+            </div>
 
-                <div id="dns-tab" class="tab-content active">
-                    <!-- Stats Grid -->
-                    <div class="dns-stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-card-title">Tổng truy vấn</div>
-                            <div class="stat-card-val" id="dnsStatTotal">0</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Đã chặn</div>
-                            <div class="stat-card-val blocked-num" id="dnsStatBlocked">0</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Tỷ lệ chặn</div>
-                            <div class="stat-card-val blocked-num" id="dnsStatPercent">0%</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Bộ lọc đang hoạt động</div>
-                            <div class="stat-card-val allowed-num" id="dnsStatActive">0</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Tỷ lệ Cache</div>
-                            <div class="stat-card-val allowed-num" id="dnsStatCacheHit">0%</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Độ trễ trung bình</div>
-                            <div class="stat-card-val" id="dnsStatLatency">0 ms</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">RAM Máy Chủ</div>
-                            <div class="stat-card-val" id="dnsStatServerMemory" style="color: #60a5fa;">0 MB / 512 MB</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Trạng thái Server</div>
-                            <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Bộ nhớ phân loại AI</div>
-                            <div class="stat-card-val" id="dnsStatAICache" style="font-weight: bold; color: #c084fc;">0 tên miền</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-card-title">Hàng đợi quét AI</div>
-                            <div class="stat-card-val" id="dnsStatAIQueue" style="font-weight: bold; color: #fb7185;">0 yêu cầu</div>
+            <div class="card">
+                <h2>Bảng Điều Khiển</h2>
+                <div class="tabs">
+                    <div class="tab active" id="tab-logs" onclick="switchTab('logs')">Query Logs</div>
+                    <div class="tab" id="tab-upstream" onclick="switchTab('upstream')">Điều phối DNS</div>
+                    <div class="tab" id="tab-gslb" onclick="switchTab('gslb')">Cân bằng tải GSLB</div>
+                    <div class="tab" id="tab-ai" onclick="switchTab('ai')">Trí tuệ AI</div>
+                </div>
+                
+                <!-- Logs subtab -->
+                <div id="panel-logs" class="subtab-content active">
+                    <div style="height: 280px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; border: 1px solid var(--card-border);">
+                        <table class="dns-log-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 70px; padding-left: 0.75rem;">Giờ</th>
+                                    <th style="width: 90px;">Thiết bị</th>
+                                    <th>Tra cứu điều phối</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dnsLogsList">
+                                <!-- Query rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Upstream Pool subtab -->
+                <div id="panel-upstream" class="subtab-content">
+                    <div style="margin-bottom: 1rem;">
+                        <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Danh sách nhóm máy chủ DNS Thượng nguồn</h4>
+                        <div id="dnsPoolList" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 180px; overflow-y: auto; margin-bottom: 1rem;">
+                            <!-- Pool list items -->
                         </div>
                     </div>
-
-                    <div class="grid">
-                        <div class="card">
-                            <h2>Trạng thái DNS</h2>
-                            <div class="dns-status-panel">
-                                <div class="status-row">
-                                    <span>Trạng thái:</span>
-                                    <span id="dnsRunningBadge" class="badge danger">Đã dừng</span>
-                                </div>
-                                <div style="display: flex; gap: 0.5rem; margin-top: 1rem; margin-bottom: 1rem;">
-                                    <button id="btnToggleDNS" class="btn-toggle" onclick="toggleDNSServer()">Khởi động</button>
-                                    <button onclick="resetDNSStats()" style="padding: 0.8rem 1rem; border-radius: 12px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; cursor: pointer; font-weight: 600; font-size: 0.85rem;">Reset Stats</button>
-                                </div>
-                            </div>
-                            
-                            <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
-                                <h3>DNS Thượng Nguồn (Upstream)</h3>
-                                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-                                    <input type="text" id="upstreamInput" placeholder="Ví dụ: 1.1.1.1" style="flex: 1; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem;">
-                                    <button onclick="setUpstreamDNS()" style="padding: 0.75rem 1.25rem; border-radius: 10px; background: var(--primary); color: #fff; border: none; font-weight: 600; cursor: pointer;">Lưu</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="card">
-                            <h2>Bảng Điều Khiển DNS</h2>
-                            <div class="tabs" style="border-bottom: none; gap: 0.3rem; margin-top: 0; margin-bottom: 1rem; overflow-x: auto;">
-                                <div class="tab active" id="subtab-logs" onclick="switchSubTab('logs')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Query Logs</div>
-                                <div class="tab" id="subtab-subs" onclick="switchSubTab('subs')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Bộ lọc URL</div>
-                                <div class="tab" id="subtab-list" onclick="switchSubTab('list')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Chặn tùy chỉnh</div>
-                                <div class="tab" id="subtab-white" onclick="switchSubTab('white')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Danh sách trắng</div>
-                                <div class="tab" id="subtab-ai" onclick="switchSubTab('ai')" style="padding: 0.5rem 0.75rem; font-size: 0.8rem; white-space: nowrap;">Trí tuệ AI</div>
-                            </div>
-                            
-                            <!-- Logs panel -->
-                            <div id="dns-logs-panel" class="subtab-content">
-                                <div style="height: 280px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; border: 1px solid var(--card-border);">
-                                    <table class="dns-log-table">
-                                        <thead>
-                                            <tr>
-                                                <th style="width: 70px;">Giờ</th>
-                                                <th style="width: 100px;">Thiết bị</th>
-                                                <th>Tên miền</th>
-                                                <th style="width: 80px;">T.Thái</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="dnsLogsList">
-                                            <!-- Populate rows -->
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                            
-                            <!-- Subscriptions panel -->
-                            <div id="dns-subs-panel" class="subtab-content" style="display: none;">
-                                <div style="margin-bottom: 1rem; display: flex; gap: 0.5rem; justify-content: space-between; align-items: center;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Nguồn danh sách chặn (.hosts / adblock)</h4>
-                                    <button onclick="refreshSubscriptions()" id="btnRefreshSubs" style="padding: 0.5rem 1rem; border-radius: 8px; background: var(--success); color: white; border: none; font-size: 0.8rem; font-weight: bold; cursor: pointer;">Cập nhật bộ lọc</button>
-                                </div>
-                                <div id="dnsSubsList" style="max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
-                                    <!-- Subscription list -->
-                                </div>
-                                <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
-                                    <input type="text" id="subInput" placeholder="Nhập URL bộ lọc (.hosts / adblock)" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                    <button onclick="addSubscription()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Thêm</button>
-                                </div>
-                            </div>
-                            
-                            <!-- Custom blocklist panel -->
-                            <div id="dns-list-panel" class="subtab-content" style="display: none;">
-                                <div style="margin-bottom: 0.5rem; display: flex; gap: 0.5rem; justify-content: space-between;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Chặn thủ công</h4>
-                                </div>
-                                <div id="dnsBlockedList" style="max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
-                                    <!-- Custom Blocked List -->
-                                </div>
-                                <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
-                                    <input type="text" id="domainInput" placeholder="Ví dụ: ads.doubleclick.net" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                    <button onclick="blockDomain()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Chặn</button>
-                                </div>
-                            </div>
-                            
-                            <!-- Whitelist panel -->
-                            <div id="dns-white-panel" class="subtab-content" style="display: none;">
-                                <div style="margin-bottom: 0.5rem; display: flex; gap: 0.5rem; justify-content: space-between;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Danh sách tên miền tin cậy</h4>
-                                </div>
-                                <div id="dnsWhiteList" style="max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem;">
-                                    <!-- Whitelist -->
-                                </div>
-                                <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem;">
-                                    <input type="text" id="whiteInput" placeholder="Ví dụ: google.com" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                    <button onclick="addWhitelist()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Thêm</button>
-                                </div>
-                            </div>
-
-                            <!-- AI Configuration panel -->
-                            <div id="dns-ai-panel" class="subtab-content" style="display: none;">
-                                <div style="margin-bottom: 0.5rem; display: flex; gap: 0.5rem; justify-content: space-between;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted);">Trí tuệ nhân tạo Groq AI Guard</h4>
-                                </div>
-                                <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.4;">
-                                    Groq AI Guard tự động phân tích tên miền mới chưa có trong danh sách chặn ở chế độ chạy ngầm (độ trễ 0ms). Thêm nhiều API Key để xử lý song song — mỗi key hỗ trợ <strong style="color:#a78bfa;">3 luồng đồng thời</strong>.
-                                </p>
-                                
-                                <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
-                                    <div style="display: flex; align-items: center; gap: 0.5rem;">
-                                        <input type="checkbox" id="aiEnabled" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
-                                        <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer;">Kích hoạt AI Security Guard</label>
-                                    </div>
-                                    
-                                    <div style="display: flex; flex-direction: column; gap: 0.35rem;">
-                                        <label style="font-size: 0.8rem; color: var(--text-muted);">Bộ não AI chính (Tốc độ cao & Hạn mức lớn):</label>
-                                        <div style="padding: 0.65rem 0.8rem; border-radius: 8px; background: rgba(167, 139, 250, 0.05); border: 1px solid rgba(167, 139, 250, 0.2); color: #a78bfa; font-size: 0.85rem; font-weight: bold; display: flex; align-items: center; gap: 0.5rem;">
-                                            <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;"></span>
-                                            Llama 3.1 8B Instant (Tránh quá tải / Rate Limit)
-                                        </div>
-                                        <input type="hidden" id="groqModel" value="llama-3.1-8b-instant">
-                                    </div>
-                                </div>
-                                <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
-                                
-                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-                                        <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq API Keys <span id="groqKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
-                                        <span id="groqConcurrencyInfo" style="font-size: 0.75rem; color: var(--text-muted);">0 luồng xử lý song song</span>
-                                    </div>
-                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Mỗi API Key sẽ được luân phiên sử dụng (Round-Robin) để xử lý các yêu cầu AI Guard đồng thời. Hãy thêm nhiều key để mở rộng khả năng xử lý!</p>
-                                    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-                                        <input type="password" id="newGroqKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                        <button onclick="addGroqKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
-                                    </div>
-                                    <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;">
-                                    </div>
-                                </div>
-
-                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-                                        <h4 style="font-size: 0.9rem; color: var(--text-muted);">API Keys Huấn luyện <span id="groqTrainKeyCount" style="color: #c084fc; font-weight: bold;">0</span></h4>
-                                        <span id="groqTrainStatusBadge" style="font-size: 0.75rem; color: var(--text-muted);">Đang dừng</span>
-                                    </div>
-                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Các API Key này chuyên dùng chạy ngầm huấn luyện AI. Thêm nhiều key giúp huấn luyện nhanh hơn (luân phiên xoay vòng giảm thời gian chờ).</p>
-                                    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-                                        <input type="password" id="newGroqTrainKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                        <button onclick="addGroqTrainKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #c084fc; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
-                                    </div>
-                                    <div id="groqTrainKeysList" style="display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.75rem;">
-                                    </div>
-                                    
-                                    <!-- Active Training Status display -->
-                                    <div id="aiTrainingProgressContainer" style="padding: 0.75rem; border-radius: 8px; background: rgba(192, 132, 252, 0.05); border: 1px solid rgba(192, 132, 252, 0.15); display: none; margin-top: 0.75rem;">
-                                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem; font-size: 0.8rem;">
-                                            <span style="color: #c084fc; font-weight: bold;">⚡ Đang huấn luyện AI ngầm...</span>
-                                            <span id="aiTrainProgressText" style="color: var(--text-muted);">0/0</span>
-                                        </div>
-                                        <div style="font-size: 0.75rem; color: #fff; line-height: 1.4;">
-                                            <div><strong>Tên miền đang quét:</strong> <span id="aiTrainCurrentDomain" style="color: #a78bfa; font-family: monospace;">-</span></div>
-                                            <div><strong>API Key đang chạy:</strong> <span id="aiTrainCurrentKey" style="color: #a78bfa; font-family: monospace;">-</span></div>
-                                        </div>
-                                    </div>
-                                </div>
-                                
-                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử AI Guard</h4>
-                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Kiểm tra xem khóa Groq API của bạn có hoạt động chính xác không bằng cách quét trực tiếp một tên miền mẫu.</p>
-                                    <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-                                        <input type="text" id="aiTestDomain" placeholder="Ví dụ: evil-malware-phishing.com" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                                        <button onclick="testGroqAI()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #1f2937; color: #fff; border: 1px solid var(--card-border); font-weight: bold; cursor: pointer; font-size: 0.85rem;">Quét thử</button>
-                                    </div>
-                                    <div id="aiTestResult" style="padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); font-size: 0.8rem; color: var(--text-muted); display: none; line-height: 1.4;">
-                                    </div>
-                                </div>
-                                
-                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-                                        <h4 style="font-size: 0.9rem; color: var(--text-muted);">Nhật ký AI Learning (In-Context)</h4>
-                                        <div style="display: flex; gap: 0.5rem;">
-                                            <button onclick="clearAICache()" style="padding: 0.25rem 0.5rem; border-radius: 6px; background: rgba(192, 132, 252, 0.1); border: 1px solid rgba(192, 132, 252, 0.2); color: #c084fc; font-size: 0.7rem; font-weight: bold; cursor: pointer;">Xóa Cache AI</button>
-                                            <button onclick="clearAILearning()" style="padding: 0.25rem 0.5rem; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; font-size: 0.7rem; font-weight: bold; cursor: pointer;">Reset Tri thức</button>
-                                        </div>
-                                    </div>
-                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Các hành vi AI tự động nhận biết, học hỏi từ thực tế để huấn luyện lại Llama 3.3:</p>
-                                    <div style="max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.25); border-radius: 8px; border: 1px solid var(--card-border); font-size: 0.75rem;">
-                                        <table style="width: 100%; border-collapse: collapse; text-align: left;">
-                                            <thead>
-                                                <tr style="border-bottom: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">
-                                                    <th style="padding: 0.4rem 0.5rem; width: 30px;">#</th>
-                                                    <th style="padding: 0.4rem 0.5rem;">Tên miền đã học</th>
-                                                    <th style="padding: 0.4rem 0.5rem; width: 100px;">Hành vi</th>
-                                                    <th style="padding: 0.4rem 0.5rem; width: 85px;">Trạng thái</th>
-                                                    <th style="padding: 0.4rem 0.5rem; width: 40px; text-align: center;">Xóa</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="aiLearningList">
-                                                <!-- Dynamic learning rows -->
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-
-                                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Nhật ký Huấn luyện AI ngầm (Đã học)</h4>
-                                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem;">Danh sách các tên miền đã được huấn luyện ngầm bằng các API Key huấn luyện của bạn:</p>
-                                    <div style="max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.25); border-radius: 8px; border: 1px solid var(--card-border); font-size: 0.75rem;">
-                                        <table style="width: 100%; border-collapse: collapse; text-align: left;">
-                                            <thead>
-                                                <tr style="border-bottom: 1px solid var(--card-border); color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase;">
-                                                    <th style="padding: 0.4rem 0.5rem; width: 30px;">#</th>
-                                                    <th style="padding: 0.4rem 0.5rem;">Tên miền đã học</th>
-                                                    <th style="padding: 0.4rem 0.5rem; width: 100px;">Hành vi</th>
-                                                    <th style="padding: 0.4rem 0.5rem; width: 120px;">API Key sử dụng</th>
-                                                    <th style="padding: 0.4rem 0.5rem; width: 85px;">Thời gian</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody id="aiTrainLogList">
-                                                <tr><td colspan="5" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu huấn luyện ngầm.</td></tr>
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                            </div>
+                    <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem; flex-direction: column;">
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">Thêm máy chủ DNS thượng nguồn:</span>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <input type="text" id="upstreamIpInput" placeholder="Ví dụ: 8.8.4.4" style="flex: 1.2; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <input type="text" id="upstreamNameInput" placeholder="Tên (Ví dụ: Google Secondary)" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <button onclick="addUpstreamPoolServer()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">Thêm</button>
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <div class="toast-container" id="toastContainer"></div>
-
-            <script>
-    const toastContainer = document.getElementById('toastContainer');
-
-    function showToast(message, type = 'success') {
-        const toast = document.createElement('div');
-        toast.className = `toast ${type}`;
-        let icon = '✔️';
-        if (type === 'error') icon = '❌';
-        if (type === 'info') icon = 'ℹ️';
-        
-        toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
-        toastContainer.appendChild(toast);
-        
-        setTimeout(() => {
-            toast.style.animation = 'slideIn 0.3s reverse forwards';
-            setTimeout(() => toast.remove(), 300);
-        }, 3000);
-    }
-
-    // DNS Tab Logic
-    function switchSubTab(type) {
-        document.querySelectorAll('.subtab-content').forEach(el => el.style.display = 'none');
-        document.querySelectorAll('.tab-content .tabs > .tab').forEach(el => {
-            if(el.id && el.id.startsWith('subtab-')) el.classList.remove('active');
-        });
-        
-        if (type === 'logs') {
-            document.getElementById('subtab-logs').classList.add('active');
-            document.getElementById('dns-logs-panel').style.display = 'block';
-        } else if (type === 'subs') {
-            document.getElementById('subtab-subs').classList.add('active');
-            document.getElementById('dns-subs-panel').style.display = 'block';
-        } else if (type === 'list') {
-            document.getElementById('subtab-list').classList.add('active');
-            document.getElementById('dns-list-panel').style.display = 'block';
-        } else if (type === 'white') {
-            document.getElementById('subtab-white').classList.add('active');
-            document.getElementById('dns-white-panel').style.display = 'block';
-        } else if (type === 'ai') {
-            document.getElementById('subtab-ai').classList.add('active');
-            document.getElementById('dns-ai-panel').style.display = 'block';
-        }
-    }
-
-    let dnsConfig = { 
-        running: true, 
-        blocked: [], 
-        whitelist: [], 
-        subscriptions: [], 
-        upstream: "1.1.1.1", 
-        logs: [], 
-        stats: { total: 0, blocked: 0, allowed: 0, blockedPercent: 0.0 }, 
-        isUpdating: false 
-    };
-    let isConfigLoaded = false;
-
-    function keyMatchesMask(rawKey, maskedKey) {
-        if (!maskedKey || maskedKey.length < 10) return false;
-        const prefix = maskedKey.substring(0, 8);
-        const dotIndex = maskedKey.indexOf('...');
-        if (dotIndex === -1) return false;
-        const suffix = maskedKey.substring(dotIndex + 3);
-        return rawKey.startsWith(prefix) && rawKey.endsWith(suffix);
-    }
-
-    let isSyncingKeys = false;
-    function syncKeysWithServer() {
-        if (isSyncingKeys) return;
-        
-        let localKeys = [];
-        try {
-            localKeys = JSON.parse(localStorage.getItem('groq_api_keys') || '[]');
-        } catch (e) {}
-        if (!Array.isArray(localKeys) || localKeys.length === 0) return;
-        
-        const serverMaskedKeys = dnsConfig.groqApiKeys || [];
-        
-        // Find local keys that are not present on the server
-        const missingKeys = localKeys.filter(localKey => {
-            return !serverMaskedKeys.some(maskedKey => keyMatchesMask(localKey, maskedKey));
-        });
-        
-        if (missingKeys.length > 0) {
-            isSyncingKeys = true;
-            console.log(`Syncing ${missingKeys.length} missing keys from localStorage to server...`);
-            showToast(`Khôi phục ${missingKeys.length} API Key tự động từ trình duyệt...`, 'info');
-            
-            // Add them sequentially to avoid concurrency collisions
-            let promiseChain = Promise.resolve();
-            missingKeys.forEach(key => {
-                promiseChain = promiseChain.then(() => {
-                    return fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
-                        .then(res => res.json())
-                        .then(data => {
-                            if (data.error) console.error("Sync key error:", data.error);
-                        });
-                });
-            });
-            
-            promiseChain.then(() => {
-                isSyncingKeys = false;
-                fetchDNSConfig();
-            }).catch(err => {
-                isSyncingKeys = false;
-                console.error("Error syncing keys:", err);
-            });
-        }
-    }
-
-    let isSyncingTrainKeys = false;
-    function syncTrainKeysWithServer() {
-        if (isSyncingTrainKeys) return;
-        
-        let localKeys = [];
-        try {
-            localKeys = JSON.parse(localStorage.getItem('groq_train_keys') || '[]');
-        } catch (e) {}
-        if (!Array.isArray(localKeys) || localKeys.length === 0) return;
-        
-        const serverMaskedKeys = dnsConfig.groqTrainKeys || [];
-        
-        const missingKeys = localKeys.filter(localKey => {
-            return !serverMaskedKeys.some(maskedKey => keyMatchesMask(localKey, maskedKey));
-        });
-        
-        if (missingKeys.length > 0) {
-            isSyncingTrainKeys = true;
-            console.log(`Syncing ${missingKeys.length} missing training keys from localStorage to server...`);
-            showToast(`Khôi phục ${missingKeys.length} API Key Huấn luyện tự động...`, 'info');
-            
-            let promiseChain = Promise.resolve();
-            missingKeys.forEach(key => {
-                promiseChain = promiseChain.then(() => {
-                    return fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
-                        .then(res => res.json())
-                        .then(data => {
-                            if (data.error) console.error("Sync train key error:", data.error);
-                        });
-                });
-            });
-            
-            promiseChain.then(() => {
-                isSyncingTrainKeys = false;
-                fetchDNSConfig();
-            }).catch(err => {
-                isSyncingTrainKeys = false;
-                console.error("Error syncing training keys:", err);
-            });
-        }
-    }
-
-    let isSyncingLearning = false;
-    function syncLearningWithServer() {
-        if (isSyncingLearning) return;
-        
-        let localExamples = [];
-        try {
-            localExamples = JSON.parse(localStorage.getItem('ai_learned_examples') || '[]');
-        } catch (e) {}
-        if (!Array.isArray(localExamples) || localExamples.length === 0) return;
-        
-        const serverExamples = dnsConfig.learnedExamples || [];
-        const missingExamples = localExamples.filter(localEx => {
-            return !serverExamples.some(serverEx => serverEx.domain.toLowerCase() === localEx.domain.toLowerCase());
-        });
-        
-        if (missingExamples.length > 0) {
-            isSyncingLearning = true;
-            console.log(`Syncing ${missingExamples.length} missing learned examples to server...`);
-            
-            fetch('/dns/ai/learning/sync', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(missingExamples)
-            })
-            .then(res => res.json())
-            .then(data => {
-                isSyncingLearning = false;
-                if (data.success) {
-                    console.log(`Synced learning successfully. Total: ${data.count}`);
-                    fetchDNSConfig();
-                }
-            })
-            .catch(err => {
-                isSyncingLearning = false;
-                console.error("Error syncing learning:", err);
-            });
-        }
-    }
-
-    function fetchDNSConfig() {
-        fetch('/dns/config')
-            .then(res => res.json())
-            .then(data => {
-                dnsConfig = data;
-                updateDNSUI();
-                syncKeysWithServer();
-                syncTrainKeysWithServer();
-                syncLearningWithServer();
-            })
-            .catch(err => {
-                console.error("Lỗi cấu hình DNS:", err);
-            });
-    }
-
-    function parseDNSLog(line) {
-        // Expect format: [HH:mm:ss] [ClientIP] Status - Domain
-        const match = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(.*?)\s+-\s+(.*?)$/);
-        if (match) {
-            const time = match[1];
-            const ip = match[2];
-            const status = match[3];
-            const domain = match[4];
-            
-            let textStatus = 'ALLOWED';
-            if (status.includes('BLOCKED') || status.includes('❌')) {
-                textStatus = 'BLOCKED';
-            } else if (status.includes('CACHED') || status.includes('⚡')) {
-                textStatus = 'CACHED';
-            }
-            const isBlocked = textStatus === 'BLOCKED';
-            return { time, ip, domain, isBlocked, textStatus };
-        }
-        
-        // Fallback for general logs: [HH:mm:ss] message
-        const fallbackMatch = line.match(/^\[(.*?)\]\s+(.*?)$/);
-        if (fallbackMatch) {
-            return { time: fallbackMatch[1], ip: 'System', domain: fallbackMatch[2], isBlocked: false, textStatus: 'INFO' };
-        }
-        
-        return { time: '', ip: 'System', domain: line, isBlocked: false, textStatus: 'INFO' };
-    }
-
-    function updateDNSUI() {
-        const runningBadge = document.getElementById('dnsRunningBadge');
-        const btnToggle = document.getElementById('btnToggleDNS');
-        const btnRefreshSubs = document.getElementById('btnRefreshSubs');
-        
-        if (dnsConfig.running) {
-            runningBadge.className = 'badge success';
-            runningBadge.innerText = 'Đang hoạt động';
-            btnToggle.className = 'btn-toggle running';
-            btnToggle.innerText = 'Dừng DNS Server';
-        } else {
-            runningBadge.className = 'badge danger';
-            runningBadge.innerText = 'Đã dừng';
-            btnToggle.className = 'btn-toggle';
-            btnToggle.innerText = 'Khởi động DNS Server';
-        }
-        
-        btnRefreshSubs.innerText = dnsConfig.isUpdating ? 'Đang cập nhật...' : 'Cập nhật bộ lọc';
-        btnRefreshSubs.disabled = dnsConfig.isUpdating;
-        
-        // Update stats
-        const stats = dnsConfig.stats || { total: 0, blocked: 0, blockedPercent: 0, cacheHitRate: 0, avgLatency: 0 };
-        document.getElementById('dnsStatTotal').innerText = stats.total !== undefined ? stats.total : 0;
-        document.getElementById('dnsStatBlocked').innerText = stats.blocked !== undefined ? stats.blocked : 0;
-        document.getElementById('dnsStatPercent').innerText = (stats.blockedPercent !== undefined ? stats.blockedPercent : 0).toFixed(1) + '%';
-        document.getElementById('dnsStatActive').innerText = (dnsConfig.blockedCount !== undefined ? dnsConfig.blockedCount : (dnsConfig.blocked ? dnsConfig.blocked.length : 0)) + ' tên miền';
-        document.getElementById('dnsStatCacheHit').innerText = (stats.cacheHitRate !== undefined ? stats.cacheHitRate : 0).toFixed(1) + '%';
-        document.getElementById('dnsStatLatency').innerText = (stats.avgLatency !== undefined ? stats.avgLatency : 0).toFixed(1) + ' ms';
-        
-        // Update Server RAM
-        const serverStatus = dnsConfig.serverStatus || { memoryUsage: 0, status: 'Ngoại tuyến', statusClass: 'offline' };
-        document.getElementById('dnsStatServerMemory').innerText = (serverStatus.memoryUsage || 0) + ' MB / 512 MB';
-        
-        // Update Server Health Status
-        const statusEl = document.getElementById('dnsStatServerStatus');
-        statusEl.innerText = serverStatus.status || 'Ngoại tuyến';
-        if (serverStatus.statusClass === 'overloaded') {
-            statusEl.style.color = '#ef4444';
-        } else if (serverStatus.statusClass === 'warning') {
-            statusEl.style.color = '#f59e0b';
-        } else if (serverStatus.statusClass === 'stable') {
-            statusEl.style.color = '#10b981';
-        } else {
-            statusEl.style.color = '#ef4444';
-        }
-
-        // Update AI stats
-        document.getElementById('dnsStatAICache').innerText = (dnsConfig.aiCacheCount !== undefined ? dnsConfig.aiCacheCount : 0) + ' tên miền';
-        document.getElementById('dnsStatAIQueue').innerText = (dnsConfig.aiQueueLength !== undefined ? dnsConfig.aiQueueLength : 0) + ' yêu cầu' +
-            (dnsConfig.activeGroqRequests ? ` (đang quét ${dnsConfig.activeGroqRequests})` : '');
-
-        if (!isConfigLoaded && dnsConfig.upstream) {
-            document.getElementById('upstreamInput').value = dnsConfig.upstream;
-            document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
-            document.getElementById('groqModel').value = dnsConfig.groqModel || "llama-3.3-70b-versatile";
-            isConfigLoaded = true;
-        }
-        
-        // Always update key counter and concurrency info
-        const keyCount = dnsConfig.groqApiKeysCount || 0;
-        document.getElementById('groqKeyCount').innerText = keyCount;
-        document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
-        renderGroqKeys(dnsConfig.groqApiKeys || []);
-        
-        // Update training keys info
-        const trainKeyCount = dnsConfig.groqTrainKeysCount || 0;
-        document.getElementById('groqTrainKeyCount').innerText = trainKeyCount;
-        renderGroqTrainKeys(dnsConfig.groqTrainKeys || []);
-        
-        // Update Training progress status
-        const trainBadge = document.getElementById('groqTrainStatusBadge');
-        const trainProgressContainer = document.getElementById('aiTrainingProgressContainer');
-        const status = dnsConfig.aiTrainingStatus || {};
-        
-        if (!dnsConfig.aiEnabled) {
-            trainBadge.innerText = 'AI Tắt';
-            trainBadge.style.color = 'var(--text-muted)';
-            trainBadge.style.fontWeight = 'normal';
-            trainProgressContainer.style.display = 'none';
-        } else if (trainKeyCount === 0) {
-            trainBadge.innerText = 'Chưa có API Key huấn luyện';
-            trainBadge.style.color = '#f59e0b';
-            trainBadge.style.fontWeight = 'bold';
-            trainProgressContainer.style.display = 'none';
-        } else if (status.isRunning) {
-            trainBadge.innerText = 'Đang chạy';
-            trainBadge.style.color = '#c084fc';
-            trainBadge.style.fontWeight = 'bold';
-            trainProgressContainer.style.display = 'block';
-            document.getElementById('aiTrainProgressText').innerText = `${status.currentIndex || 0}/${status.totalCandidates || 0}`;
-            document.getElementById('aiTrainCurrentDomain').innerText = status.currentDomain || '-';
-            document.getElementById('aiTrainCurrentKey').innerText = status.currentKey || '-';
-        } else {
-            trainBadge.innerText = 'Đã hoàn thành / Dừng';
-            trainBadge.style.color = '#10b981';
-            trainBadge.style.fontWeight = 'bold';
-            trainProgressContainer.style.display = 'none';
-        }
-        
-        // Render Offline Training Log Table
-        const trainLogList = document.getElementById('aiTrainLogList');
-        const trainedList = status.trainedList || [];
-        if (trainedList.length === 0) {
-            trainLogList.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu huấn luyện ngầm.</td></tr>';
-        } else {
-            trainLogList.innerHTML = trainedList.map((item, i) => {
-                const isSuccess = item.success;
-                const decisionText = item.blocked ? 'Đã chặn' : 'Hợp lệ';
-                const badgeStyle = item.blocked 
-                    ? 'color: #ef4444; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);' 
-                    : 'color: #10b981; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2);';
                 
-                return `
-                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-weight: bold;">#${i + 1}</td>
-                        <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: #c084fc; word-break: break-all;">${item.domain}</td>
-                        <td style="padding: 0.4rem 0.5rem;"><span style="font-size: 0.7rem; font-weight: bold; padding: 0.1rem 0.3rem; border-radius: 4px; ${badgeStyle}">${isSuccess ? decisionText : 'Lỗi kết nối'}</span></td>
-                        <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: var(--text-muted);">${item.keyUsed}</td>
-                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted);">${item.time}</td>
-                    </tr>
-                `;
-            }).join('');
-        }
-        
-        // Update AI Learning List
-        const learningList = document.getElementById('aiLearningList');
-        if (!dnsConfig.learnedExamples || dnsConfig.learnedExamples.length === 0) {
-            learningList.innerHTML = '<tr><td colspan="5" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có dữ liệu học động. Hoạt động khi AI tự động chặn.</td></tr>';
-        } else {
-            learningList.innerHTML = dnsConfig.learnedExamples.map((ex, i) => {
-                const isBlocked = ex.blocked === true;
-                const reasonColor = isBlocked ? '#ef4444' : '#10b981';
-                const badgeStyle = isBlocked 
-                    ? 'color: #ef4444; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2);' 
-                    : 'color: #10b981; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2);';
-                const badgeText = isBlocked ? 'Đã chặn' : 'Hợp lệ';
-                return `
-                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                        <td style="padding: 0.4rem 0.5rem; color: var(--text-muted); font-weight: bold;">#${i + 1}</td>
-                        <td style="padding: 0.4rem 0.5rem; font-family: monospace; color: #a78bfa; word-break: break-all;">${ex.domain}</td>
-                        <td style="padding: 0.4rem 0.5rem; color: ${reasonColor}; font-weight: 500;">${ex.reason}</td>
-                        <td style="padding: 0.4rem 0.5rem;"><span style="font-size: 0.7rem; font-weight: bold; padding: 0.1rem 0.3rem; border-radius: 4px; ${badgeStyle}">${badgeText}</span></td>
-                        <td style="padding: 0.4rem 0.5rem; text-align: center;">
-                            <button onclick="removeAILearning('${ex.domain}')" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 0.9rem;" title="Xóa tri thức này">✕</button>
-                        </td>
-                    </tr>
-                `;
-            }).reverse().join('');
-        }
-        
-        // Log table rows
-        const logsList = document.getElementById('dnsLogsList');
-        if (!dnsConfig.logs || dnsConfig.logs.length === 0) {
-            logsList.innerHTML = '<tr><td colspan="4" style="color: var(--text-muted); text-align: center; padding: 1.5rem;">Chưa có truy vấn nào được ghi nhận.</td></tr>';
-        } else {
-            logsList.innerHTML = dnsConfig.logs.map(logLine => {
-                const parsed = parseDNSLog(logLine);
-                const badgeClass = parsed.textStatus === 'BLOCKED' ? 'blocked' : 
-                                   (parsed.textStatus === 'CACHED' ? 'cached' : 
-                                   (parsed.textStatus === 'ALLOWED' ? 'allowed' : ''));
-                return `
-                    <tr>
-                        <td>${parsed.time}</td>
-                        <td>${parsed.ip}</td>
-                        <td style="white-space: normal; word-break: break-all;">${parsed.domain}</td>
-                        <td><span class="dns-status-badge ${badgeClass}">${parsed.textStatus}</span></td>
-                    </tr>
-                `;
-            }).reverse().join('');
-        }
-        
-        // Subscription source list
-        const subsList = document.getElementById('dnsSubsList');
-        if (!dnsConfig.subscriptions || dnsConfig.subscriptions.length === 0) {
-            subsList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa có nguồn bộ lọc nào.</div>';
-        } else {
-            subsList.innerHTML = dnsConfig.subscriptions.map(url => `
-                <div class="dns-list-item">
-                    <span title="${url}">${url}</span>
-                    <button class="btn-unblock" onclick="removeSubscription('${url}')">Xóa</button>
+                <!-- GSLB subtab -->
+                <div id="panel-gslb" class="subtab-content">
+                    <div style="margin-bottom: 1rem;">
+                        <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Custom GSLB (Cân bằng tải tên miền nội bộ)</h4>
+                        <div id="gslbList" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 180px; overflow-y: auto; margin-bottom: 1rem;">
+                            <!-- Gslb maps -->
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; border-top: 1px solid var(--card-border); padding-top: 1rem; flex-direction: column;">
+                        <span style="font-size: 0.8rem; color: var(--text-muted);">Thêm máy chủ backend cho tên miền:</span>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <input type="text" id="gslbDomainInput" placeholder="Ví dụ: myapp.local" style="flex: 1.2; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <input type="text" id="gslbIpInput" placeholder="IP (Ví dụ: 192.168.1.50)" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <button onclick="addGslbMapping()" style="padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">Thêm IP</button>
+                        </div>
+                    </div>
                 </div>
-            `).join('');
-        }
-        
-        // Custom blocked list
-        const blockedList = document.getElementById('dnsBlockedList');
-        if (!dnsConfig.blocked || dnsConfig.blocked.length === 0) {
-            blockedList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa chặn thủ công tên miền nào.</div>';
-        } else {
-            const displayBlocked = dnsConfig.blocked.slice(0, 100);
-            blockedList.innerHTML = displayBlocked.map(domain => `
-                <div class="dns-list-item">
-                    <span>${domain}</span>
-                    <button class="btn-unblock" onclick="unblockDomain('${domain}')">Xóa</button>
+
+                <!-- AI Config subtab -->
+                <div id="panel-ai" class="subtab-content">
+                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Định tuyến thông minh Groq AI Router</h4>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.4;">
+                        AI Router tự động phân tích và phân loại các tên miền để định hướng chính xác đến máy chủ DNS tối ưu (Ví dụ: Security -> Quad9, Media -> Google/Cloudflare).
+                    </p>
+                    
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <input type="checkbox" id="aiEnabled" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
+                            <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer;">Kích hoạt AI Security & Media Router</label>
+                        </div>
+                    </div>
+                    <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
+                    
+                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq API Keys <span id="groqKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
+                            <span id="groqConcurrencyInfo" style="font-size: 0.75rem; color: var(--text-muted);">0 luồng xử lý song song</span>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+                            <input type="password" id="newGroqKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <button onclick="addGroqKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
+                        </div>
+                        <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;"></div>
+                    </div>
+
+                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                        <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử phân loại AI</h4>
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+                            <input type="text" id="aiTestDomain" placeholder="Ví dụ: scam-bank.com" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <button onclick="testGroqAI()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #1f2937; color: #fff; border: 1px solid var(--card-border); font-weight: bold; cursor: pointer; font-size: 0.85rem;">Phân loại thử</button>
+                        </div>
+                        <div id="aiTestResult" style="padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); font-size: 0.8rem; color: var(--text-muted); display: none; line-height: 1.4;"></div>
+                    </div>
                 </div>
-            `).join('') + (dnsConfig.blocked.length > 100 ? `<div style="text-align: center; font-size: 0.75rem; color: var(--text-muted); padding-top: 0.5rem;">...và ${dnsConfig.blocked.length - 100} tên miền khác</div>` : '');
-        }
-        
-        // Whitelist
-        const whitelistContainer = document.getElementById('dnsWhiteList');
-        if (!dnsConfig.whitelist || dnsConfig.whitelist.length === 0) {
-            whitelistContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.9rem; text-align: center; padding: 1rem;">Chưa cấu hình danh sách trắng.</div>';
-        } else {
-            whitelistContainer.innerHTML = dnsConfig.whitelist.map(domain => `
-                <div class="dns-list-item">
-                    <span>${domain}</span>
-                    <button class="btn-unblock" onclick="removeWhitelist('${domain}')">Xóa</button>
-                </div>
-            `).join('');
-        }
-
-        // Save/merge server learned examples into localStorage for persistence
-        if (dnsConfig.learnedExamples && dnsConfig.learnedExamples.length > 0) {
-            let localExamples = [];
-            try {
-                localExamples = JSON.parse(localStorage.getItem('ai_learned_examples') || '[]');
-            } catch (e) {}
-            
-            // Merge and avoid duplicates
-            dnsConfig.learnedExamples.forEach(serverEx => {
-                const exists = localExamples.some(localEx => localEx.domain.toLowerCase() === serverEx.domain.toLowerCase());
-                if (!exists) {
-                    localExamples.push(serverEx);
-                }
-            });
-            
-            if (localExamples.length > 1000) {
-                localExamples.splice(0, localExamples.length - 1000);
-            }
-            localStorage.setItem('ai_learned_examples', JSON.stringify(localExamples));
-        }
-    }
-
-    function toggleDNSServer() {
-        showToast('Đám mây DNS Server hoạt động 24/7 và không thể dừng.', 'info');
-    }
-
-    function blockDomain() {
-        const input = document.getElementById('domainInput');
-        const domain = input.value.trim();
-        if (!domain) return;
-        
-        fetch(`/dns/block?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast(`Đã thêm chặn: ${domain}`);
-                    input.value = '';
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi khi chặn tên miền', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function unblockDomain(domain) {
-        fetch(`/dns/unblock?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast(`Đã bỏ chặn: ${domain}`);
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi khi bỏ chặn', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function addWhitelist() {
-        const input = document.getElementById('whiteInput');
-        const domain = input.value.trim();
-        if (!domain) return;
-        
-        fetch(`/dns/whitelist/add?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast(`Đã bỏ qua chặn cho: ${domain}`);
-                    input.value = '';
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi thêm danh sách trắng', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function removeWhitelist(domain) {
-        fetch(`/dns/whitelist/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast(`Đã xóa khỏi danh sách trắng: ${domain}`);
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi khi xóa', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function addSubscription() {
-        const input = document.getElementById('subInput');
-        const url = input.value.trim();
-        if (!url) return;
-        
-        fetch(`/dns/sub/add?url=${encodeURIComponent(url)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã thêm nguồn bộ lọc thành công');
-                    input.value = '';
-                    fetchDNSConfig();
-                } else {
-                    showToast('Thêm nguồn thất bại', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function removeSubscription(url) {
-        if (!confirm('Bạn có muốn xóa nguồn bộ lọc này không?')) return;
-        fetch(`/dns/sub/remove?url=${encodeURIComponent(url)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã xóa nguồn bộ lọc');
-                    fetchDNSConfig();
-                } else {
-                    showToast('Xóa nguồn thất bại', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function refreshSubscriptions() {
-        showToast('Đang tải và cập nhật các nguồn bộ lọc...', 'info');
-        fetch('/dns/sub/refresh', { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Cập nhật bộ lọc hoàn tất');
-                    fetchDNSConfig();
-                } else {
-                    showToast('Cập nhật thất bại', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối mạng', 'error');
-            });
-    }
-
-    function setUpstreamDNS() {
-        const ip = document.getElementById('upstreamInput').value.trim();
-        if (!ip) return;
-        fetch(`/dns/upstream?ip=${encodeURIComponent(ip)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã lưu DNS thượng nguồn');
-                    isConfigLoaded = false;
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi cấu hình Upstream', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function resetDNSStats() {
-        if (!confirm('Bạn có muốn reset các số liệu thống kê không?')) return;
-        fetch('/dns/stats/reset', { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã reset thống kê');
-                    fetchDNSConfig();
-                }
-            });
-    }
-
-    function saveGroqConfig() {
-        const enabled = document.getElementById('aiEnabled').checked;
-        const model = document.getElementById('groqModel').value;
-        
-        fetch(`/dns/groq?enabled=${enabled}&model=${encodeURIComponent(model)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã lưu cấu hình Groq AI');
-                    isConfigLoaded = false;
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi khi lưu cấu hình', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi mạng', 'error');
-            });
-    }
-
-    function addGroqKey() {
-        const input = document.getElementById('newGroqKey');
-        const key = input.value.trim();
-        if (!key) {
-            showToast('Vui lòng nhập API Key', 'error');
-            return;
-        }
-        
-        fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    showToast(data.error, 'error');
-                } else {
-                    input.value = '';
-                    showToast(`Đã thêm API Key! Tổng: ${data.count} key (${data.maxConcurrent} luồng song song)`);
-                    
-                    // Save to localStorage
-                    let localKeys = [];
-                    try {
-                        localKeys = JSON.parse(localStorage.getItem('groq_api_keys') || '[]');
-                    } catch (e) {}
-                    if (!localKeys.includes(key)) {
-                        localKeys.push(key);
-                        localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
-                    }
-                    
-                    fetchDNSConfig();
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
-
-    function removeGroqKey(index) {
-        if (!confirm('Bạn có muốn xóa API Key này không?')) return;
-        
-        const serverMaskedKeys = dnsConfig.groqApiKeys || [];
-        const maskedKeyToDelete = serverMaskedKeys[index];
-        
-        fetch(`/dns/groq/keys/remove?index=${index}`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    showToast(data.error, 'error');
-                } else {
-                    showToast(`Đã xóa API Key! Còn lại: ${data.count} key`);
-                    
-                    // Remove matching key from localStorage
-                    let localKeys = [];
-                    try {
-                        localKeys = JSON.parse(localStorage.getItem('groq_api_keys') || '[]');
-                    } catch (e) {}
-                    
-                    if (maskedKeyToDelete) {
-                        localKeys = localKeys.filter(localKey => !keyMatchesMask(localKey, maskedKeyToDelete));
-                        localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
-                    }
-                    
-                    fetchDNSConfig();
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
-
-    function renderGroqKeys(maskedKeys) {
-        const container = document.getElementById('groqKeysList');
-        if (!maskedKeys || maskedKeys.length === 0) {
-            container.innerHTML = '<div style="text-align: center; padding: 0.75rem; color: var(--text-muted); font-size: 0.8rem;">Chưa có API Key nào. Hãy thêm ít nhất 1 key để kích hoạt AI Guard.</div>';
-            return;
-        }
-        container.innerHTML = maskedKeys.map((key, i) => `
-            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px;">
-                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                    <span style="font-size: 0.7rem; background: var(--primary); color: #fff; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold;">#${i + 1}</span>
-                    <code style="font-size: 0.8rem; color: #a78bfa;">${key}</code>
-                </div>
-                <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 1rem; padding: 0 0.3rem;" title="Xóa key này">✕</button>
             </div>
-        `).join('');
-    }
+        </div>
+    </div>
 
-    function addGroqTrainKey() {
-        const keyInput = document.getElementById('newGroqTrainKey');
-        const key = keyInput.value.trim();
-        if (!key) {
-            showToast('Vui lòng nhập API Key', 'error');
-            return;
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        const toastContainer = document.getElementById('toastContainer');
+        let dnsConfig = {};
+
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            let icon = '✔️';
+            if (type === 'error') icon = '❌';
+            if (type === 'info') icon = 'ℹ️';
+            
+            toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
+            toastContainer.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.animation = 'slideIn 0.3s reverse forwards';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
         }
-        if (!key.startsWith('gsk_')) {
-            showToast('API Key phải bắt đầu bằng gsk_', 'error');
-            return;
+
+        function switchTab(tabId) {
+            document.querySelectorAll('.subtab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(`tab-${tabId}`).classList.add('active');
+            document.getElementById(`panel-${tabId}`).classList.add('active');
         }
-        
-        fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    showToast(data.error, 'error');
-                } else {
-                    showToast('Đã thêm API Key Huấn luyện thành công!');
-                    keyInput.value = '';
-                    
-                    // Add to localStorage
-                    let localKeys = [];
-                    try {
-                        localKeys = JSON.parse(localStorage.getItem('groq_train_keys') || '[]');
-                    } catch (e) {}
-                    if (!localKeys.includes(key)) {
-                        localKeys.push(key);
-                        localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
-                    }
-                    
-                    fetchDNSConfig();
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
 
-    function removeGroqTrainKey(index) {
-        if (!confirm('Bạn có chắc muốn xóa API Key Huấn luyện này không?')) return;
-        const serverMaskedKeys = dnsConfig.groqTrainKeys || [];
-        const maskedKeyToDelete = serverMaskedKeys[index];
-        
-        fetch(`/dns/groq/train-keys/remove?index=${index}`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    showToast(data.error, 'error');
-                } else {
-                    showToast(`Đã xóa API Key Huấn luyện!`);
-                    
-                    // Remove matching key from localStorage
-                    let localKeys = [];
-                    try {
-                        localKeys = JSON.parse(localStorage.getItem('groq_train_keys') || '[]');
-                    } catch (e) {}
-                    
-                    if (maskedKeyToDelete) {
-                        localKeys = localKeys.filter(localKey => !keyMatchesMask(localKey, maskedKeyToDelete));
-                        localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
-                    }
-                    
-                    fetchDNSConfig();
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
-
-    function renderGroqTrainKeys(maskedKeys) {
-        const container = document.getElementById('groqTrainKeysList');
-        if (!maskedKeys || maskedKeys.length === 0) {
-            container.innerHTML = '<div style="text-align: center; padding: 0.75rem; color: var(--text-muted); font-size: 0.8rem;">Chưa có API Key huấn luyện nào. Hãy thêm ít nhất 1 key để chạy huấn luyện AI ngầm.</div>';
-            return;
-        }
-        container.innerHTML = maskedKeys.map((key, i) => `
-            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 8px;">
-                <div style="display: flex; align-items: center; gap: 0.5rem;">
-                    <span style="font-size: 0.7rem; background: #c084fc; color: #fff; padding: 0.1rem 0.4rem; border-radius: 4px; font-weight: bold;">#${i + 1}</span>
-                    <code style="font-size: 0.8rem; color: #c084fc;">${key}</code>
-                </div>
-                <button onclick="removeGroqTrainKey(${i})" style="background: none; border: none; color: #ef4444; cursor: pointer; font-size: 1rem; padding: 0 0.3rem;" title="Xóa key này">✕</button>
-            </div>
-        `).join('');
-    }
-
-    function testGroqAI() {
-        const domain = document.getElementById('aiTestDomain').value.trim();
-        if (!domain) {
-            showToast('Vui lòng nhập tên miền muốn kiểm tra', 'error');
-            return;
-        }
-        
-        const resultDiv = document.getElementById('aiTestResult');
-        resultDiv.style.display = 'block';
-        resultDiv.style.color = 'var(--text-muted)';
-        resultDiv.innerText = 'Đang gửi yêu cầu đến Groq AI...';
-        
-        fetch(`/dns/groq/test?domain=${encodeURIComponent(domain)}`)
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    resultDiv.style.color = '#ef4444';
-                    resultDiv.innerHTML = `<strong>Lỗi:</strong> ${data.error}<br><small style="font-size:0.7rem;word-break:break-all;">${data.raw || ''}</small>`;
-                } else {
-                    const statusText = data.blocked ? '<span style="color: #ef4444; font-weight: bold;">❌ CHẶN (BLOCKED)</span>' : '<span style="color: #10b981; font-weight: bold;">✅ CHO PHÉP (ALLOWED)</span>';
-                    const modelInfo = data.modelUsed ? `<br><strong>Mô hình sử dụng:</strong> <span style="color: #a78bfa; font-weight: bold;">${data.modelUsed}</span>` : '';
-                    resultDiv.innerHTML = `
-                        <strong>Trạng thái AI phân loại:</strong> ${statusText}<br>
-                        <strong>Lý do:</strong> ${data.reason || 'Không có'}${modelInfo}
-                    `;
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                resultDiv.style.color = '#ef4444';
-                resultDiv.innerText = 'Lỗi kết nối đến máy chủ!';
-            });
-    }
-
-    function removeAILearning(domain) {
-        if (!confirm(`Bạn có muốn xóa tri thức đã học cho tên miền "${domain}" không?`)) return;
-        fetch(`/dns/ai/learning/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast(`Đã xóa tri thức của AI cho: ${domain}`);
-                    fetchDNSConfig();
-                } else {
-                    showToast('Xóa tri thức thất bại', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
-
-    function clearAICache() {
-        if (!confirm('Bạn có muốn xóa sạch toàn bộ bộ nhớ Cache phân loại của AI không? (Hành động này sẽ buộc AI quét lại các tên miền từ đầu)')) return;
-        fetch('/dns/ai/cache/clear', { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã xóa sạch bộ nhớ cache phân loại AI');
-                    fetchDNSConfig();
-                } else {
-                    showToast('Lỗi xóa cache AI', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
-
-    function clearAILearning() {
-        if (!confirm('Bạn có muốn reset toàn bộ các ví dụ tự học của AI về trạng thái mặc định không?')) return;
-        fetch('/dns/ai/learning/clear', { method: 'POST' })
-            .then(res => {
-                if (res.ok) {
-                    showToast('Đã đặt lại dữ liệu tự học AI về mặc định');
-                    fetchDNSConfig();
-                } else {
-                    showToast('Reset tri thức thất bại', 'error');
-                }
-            })
-            .catch(err => {
-                console.error(err);
-                showToast('Lỗi kết nối', 'error');
-            });
-    }
-
-    // Initialize UI on load
-    fetchDNSConfig();
-
-    // WebSocket connection for real-time streaming updates
-    let socket;
-    function connectWS() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}`;
-        socket = new WebSocket(wsUrl);
-        
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'update') {
+        function fetchConfig() {
+            fetch('/dns/config')
+                .then(res => res.json())
+                .then(data => {
                     dnsConfig = data;
-                    updateDNSUI();
+                    updateUI();
+                })
+                .catch(err => console.error("Lỗi khi tải cấu hình:", err));
+        }
+
+        function updateUI() {
+            // Stats
+            const stats = dnsConfig.stats || { total: 0, cacheHitRate: 0, avgLatency: 0 };
+            document.getElementById('dnsStatTotal').innerText = stats.total || 0;
+            document.getElementById('dnsStatCacheHit').innerText = (stats.cacheHitRate || 0).toFixed(1) + '%';
+            document.getElementById('dnsStatLatency').innerText = (stats.avgLatency || 0).toFixed(1) + ' ms';
+            document.getElementById('dnsStatAlgo').innerText = dnsConfig.lbAlgorithm || 'least-latency';
+            document.getElementById('lbAlgoSelector').value = dnsConfig.lbAlgorithm || 'least-latency';
+            
+            // Server RAM & Status
+            const server = dnsConfig.serverStatus || { memoryUsage: 0, status: 'Ổn định', statusClass: 'stable' };
+            document.getElementById('dnsStatServerMemory').innerText = (server.memoryUsage || 0) + ' MB / 512 MB';
+            const statusEl = document.getElementById('dnsStatServerStatus');
+            statusEl.innerText = server.status || 'Ổn định';
+            statusEl.style.color = server.statusClass === 'stable' ? '#10b981' : (server.statusClass === 'warning' ? '#f59e0b' : '#ef4444');
+            
+            // AI Stats
+            document.getElementById('dnsStatAICache').innerText = (dnsConfig.aiCacheCount || 0) + ' tên miền';
+            document.getElementById('dnsStatAIQueue').innerText = (dnsConfig.aiQueueLength || 0) + ' yêu cầu';
+            
+            document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
+            
+            // Upstream Pool List
+            const poolList = document.getElementById('dnsPoolList');
+            const pool = dnsConfig.upstreamPool || [];
+            if (pool.length === 0) {
+                poolList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; text-align: center;">Trống</div>';
+            } else {
+                poolList.innerHTML = pool.map(s => {
+                    const online = s.online !== false;
+                    const latency = s.latency || 0;
+                    let color = 'green';
+                    if (!online || latency >= 9999) color = 'red';
+                    else if (latency > 150) color = 'yellow';
+                    
+                    return `
+                        <div class="dns-list-item">
+                            <span>
+                                <span class="latency-dot ${color}"></span>
+                                <strong>${s.name}</strong> (${s.ip}) - Latency: ${online ? latency + 'ms' : 'Offline'}
+                            </span>
+                            <button class="btn-unblock" onclick="removeUpstreamServer('${s.ip}')">Xóa</button>
+                        </div>
+                    `;
+                }).join('');
+            }
+            
+            // GSLB List
+            const gslbList = document.getElementById('gslbList');
+            const records = dnsConfig.gslbRecords || {};
+            const keys = Object.keys(records);
+            if (keys.length === 0) {
+                gslbList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; text-align: center;">Chưa cấu hình GSLB</div>';
+            } else {
+                gslbList.innerHTML = keys.map(domain => {
+                    const ips = records[domain] || [];
+                    return `
+                        <div class="dns-list-item" style="flex-direction: column; align-items: flex-start; gap: 0.25rem;">
+                            <div style="display: flex; width: 100%; justify-content: space-between; align-items: center;">
+                                <strong>${domain}</strong>
+                                <button class="btn-unblock" onclick="removeGslbMapping('${domain}')">Xóa toàn bộ</button>
+                            </div>
+                            <div style="font-size: 0.8rem; color: var(--text-muted);">
+                                Targets: ${ips.map(ip => `
+                                    <span style="background: rgba(255,255,255,0.05); padding: 0.15rem 0.4rem; border-radius: 4px; margin-right: 0.25rem; display: inline-block;">
+                                        ${ip} <span style="color:var(--danger); cursor:pointer; margin-left:0.25rem;" onclick="removeGslbIp('${domain}', '${ip}')">✕</span>
+                                    </span>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            // Keys
+            document.getElementById('groqKeyCount').innerText = dnsConfig.groqApiKeysCount || 0;
+            document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
+            renderKeysList(dnsConfig.groqApiKeys || []);
+            
+            // Logs
+            const logsList = document.getElementById('dnsLogsList');
+            const logs = dnsConfig.logs || [];
+            if (logs.length === 0) {
+                logsList.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Không có lịch sử định hướng</td></tr>';
+            } else {
+                logsList.innerHTML = logs.map(line => {
+                    // [HH:mm:ss] [ClientIP] Status - Domain
+                    const parts = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(.*?)\s+-\s+(.*?)$/);
+                    if (parts) {
+                        const time = parts[1];
+                        const ip = parts[2];
+                        const status = parts[3];
+                        const domain = parts[4];
+                        
+                        let badgeClass = 'routed';
+                        let label = 'ROUTED';
+                        if (status.includes('CACHED')) {
+                            badgeClass = 'cached';
+                            label = 'CACHED';
+                        } else if (status.includes('GSLB')) {
+                            badgeClass = 'gslb';
+                            label = 'GSLB';
+                        }
+                        
+                        return `
+                            <tr>
+                                <td style="padding-left: 0.75rem; color: var(--text-muted);">${time}</td>
+                                <td style="color: var(--text-muted);">${ip}</td>
+                                <td>
+                                    <span class="dns-status-badge ${badgeClass}">${label}</span>
+                                    <span style="color: var(--text-muted); margin-left: 0.25rem;">[${status.split('[')[1]?.split(']')[0] || ''}]</span>
+                                    <strong style="margin-left: 0.25rem; font-family: monospace;">${domain}</strong>
+                                </td>
+                            </tr>
+                        `;
+                    }
+                    return `<tr><td colspan="3" style="padding-left: 0.75rem; color: var(--text-muted);">${line}</td></tr>`;
+                }).reverse().join('');
+            }
+        }
+
+        function renderKeysList(keys) {
+            const list = document.getElementById('groqKeysList');
+            if (keys.length === 0) {
+                list.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-muted); text-align: center;">Chưa cấu hình API Keys</div>';
+            } else {
+                list.innerHTML = keys.map((k, i) => `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--card-border);">
+                        <span style="font-family: monospace; font-size: 0.8rem;">Key #${i+1}: ${k}</span>
+                        <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-weight: bold; font-size: 0.8rem;">Xóa</button>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function changeLbAlgorithm() {
+            const algo = document.getElementById('lbAlgoSelector').value;
+            fetch(`/dns/lb/algorithm?algo=${algo}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast(`Đã chuyển sang thuật toán: ${algo}`);
+                        fetchConfig();
+                    } else showToast("Đổi thuật toán thất bại", "error");
+                });
+        }
+
+        function addUpstreamPoolServer() {
+            const ipInput = document.getElementById('upstreamIpInput');
+            const nameInput = document.getElementById('upstreamNameInput');
+            const ip = ipInput.value.trim();
+            const name = nameInput.value.trim();
+            if (!ip) return;
+            
+            fetch(`/dns/upstream/pool/add?ip=${encodeURIComponent(ip)}&name=${encodeURIComponent(name)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã thêm máy chủ thượng nguồn mới");
+                        ipInput.value = '';
+                        nameInput.value = '';
+                        fetchConfig();
+                    } else showToast("Thêm thất bại (IP trùng lặp)", "error");
+                });
+        }
+
+        function removeUpstreamServer(ip) {
+            fetch(`/dns/upstream/pool/remove?ip=${encodeURIComponent(ip)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã xóa máy chủ khỏi pool");
+                        fetchConfig();
+                    } else showToast("Xóa thất bại", "error");
+                });
+        }
+
+        function addGslbMapping() {
+            const domainInput = document.getElementById('gslbDomainInput');
+            const ipInput = document.getElementById('gslbIpInput');
+            const domain = domainInput.value.trim();
+            const ip = ipInput.value.trim();
+            if (!domain || !ip) return;
+            
+            fetch(`/dns/gslb/add?domain=${encodeURIComponent(domain)}&ip=${encodeURIComponent(ip)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast(`Đã thêm định tuyến GSLB cho ${domain}`);
+                        ipInput.value = '';
+                        fetchConfig();
+                    } else showToast("Cấu hình thất bại", "error");
+                });
+        }
+
+        function removeGslbMapping(domain) {
+            fetch(`/dns/gslb/remove?domain=${encodeURIComponent(domain)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã xóa bản ghi GSLB");
+                        fetchConfig();
+                    } else showToast("Xóa thất bại", "error");
+                });
+        }
+
+        function removeGslbIp(domain, ip) {
+            fetch(`/dns/gslb/remove?domain=${encodeURIComponent(domain)}&ip=${encodeURIComponent(ip)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast(`Đã xóa IP ${ip} khỏi ${domain}`);
+                        fetchConfig();
+                    } else showToast("Xóa IP thất bại", "error");
+                });
+        }
+
+        function saveGroqConfig() {
+            const enabled = document.getElementById('aiEnabled').checked;
+            fetch(`/dns/groq?enabled=${enabled}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) showToast("Đã lưu cấu hình AI Router");
+                    else showToast("Lưu thất bại", "error");
+                });
+        }
+
+        function addGroqKey() {
+            const input = document.getElementById('newGroqKey');
+            const key = input.value.trim();
+            if (!key) return;
+            fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã thêm API Key thành công");
+                        input.value = '';
+                        fetchConfig();
+                    } else showToast("API Key trùng lặp hoặc lỗi", "error");
+                });
+        }
+
+        function removeGroqKey(idx) {
+            fetch(`/dns/groq/keys/remove?index=${idx}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã xóa API Key");
+                        fetchConfig();
+                    }
+                });
+        }
+
+        function testGroqAI() {
+            const input = document.getElementById('aiTestDomain');
+            const domain = input.value.trim();
+            const resultBox = document.getElementById('aiTestResult');
+            if (!domain) return;
+            
+            resultBox.style.display = 'block';
+            resultBox.innerHTML = '⚡ Đang gửi truy vấn AI phân tích...';
+            
+            fetch(`/dns/groq/test?domain=${encodeURIComponent(domain)}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        resultBox.innerHTML = `<span style="color:var(--danger);">${data.error}</span>`;
+                    } else {
+                        resultBox.innerHTML = `
+                            <strong>Phân loại:</strong> <span style="color:#a78bfa;">${data.category}</span><br>
+                            <strong>Lý do:</strong> ${data.reason}<br>
+                            <strong>Model:</strong> ${data.modelUsed}
+                        `;
+                    }
+                })
+                .catch(() => {
+                    resultBox.innerHTML = '<span style="color:var(--danger);">Lỗi mạng hoặc server không phản hồi.</span>';
+                });
+        }
+
+        function resetStats() {
+            fetch('/dns/stats/reset', { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã reset bộ đếm thống kê");
+                        fetchConfig();
+                    }
+                });
+        }
+
+        // Websocket connection
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+        const wsUrl = `${protocol}://${window.location.host}`;
+        const ws = new WebSocket(wsUrl);
+        
+        ws.onmessage = (event) => {
+            try {
+                const payload = JSON.parse(event.data);
+                if (payload.type === 'update') {
+                    dnsConfig = payload;
+                    updateUI();
                 }
             } catch (e) {
-                console.error('Lỗi khi phân tích WS message:', e);
+                console.error("WS parse error:", e);
             }
         };
-        
-        socket.onclose = () => {
-            console.log('WS connection closed. Reconnecting in 3s...');
-            setTimeout(connectWS, 3000);
-        };
-        
-        socket.onerror = (err) => {
-            console.error('WS error:', err);
-            socket.close();
-        };
-    }
-    
-    // Connect WebSocket
-    try {
-        connectWS();
-    } catch (e) {
-        console.error('Failed to init WS:', e);
-    }
 
-    // Auto-refresh config/logs every 3 seconds only if WS is not active
-    setInterval(() => {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            fetchDNSConfig();
-        }
-    }, 3000);
-</script>
+        // Initial load
+        fetchConfig();
+    </script>
 </body>
 </html>

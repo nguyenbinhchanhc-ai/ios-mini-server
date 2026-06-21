@@ -11,7 +11,7 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// Register global error handlers to prevent process crashes under network drops
+// Register global error handlers to prevent process crashes
 process.on('uncaughtException', (err) => {
     console.error("CRITICAL: Uncaught Exception:", err);
 });
@@ -20,16 +20,11 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
-const SUB_CACHE_PATH = path.join(__dirname, 'subscription_blocklist.txt');
 const AI_LEARNED_PATH = path.join(__dirname, 'ai_learned_examples.json');
 const AI_CACHE_PATH = path.join(__dirname, 'ai_decision_cache.json');
 
 // State variables
 let config = {};
-let customBlockedSet = new Set();
-let whitelistSet = new Set();
-let subscriptionBlockedSet = new Set();
-let isUpdatingList = false;
 let logs = [];
 
 // AI Training State
@@ -46,7 +41,6 @@ let trainingQueue = [];
 let totalTrainingEnqueued = 0;
 let totalTrainingProcessed = 0;
 
-
 // WebSocket client registry
 const wsClients = new Set();
 
@@ -57,7 +51,7 @@ let learnedExamples = [];
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, expiresAt }
 const MAX_CACHE_SIZE = 15000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
-const aiDecisionCache = new Map(); // Key: domain, Value: true/false
+const aiDecisionCache = new Map(); // Key: domain, Value: category string (Security, Media/CDN, General/Search, API/App)
 
 // Load/Save functions for AI persistence
 function loadAILearning() {
@@ -71,8 +65,8 @@ function loadAILearning() {
                     if (ex && typeof ex.domain === 'string') {
                         learnedExamples.push({
                             domain: ex.domain,
-                            blocked: !!ex.blocked,
-                            reason: ex.reason || "Mối nguy hại"
+                            category: ex.category || "General/Search",
+                            reason: ex.reason || "Phân loại chung"
                         });
                     }
                 });
@@ -88,21 +82,16 @@ function loadAILearning() {
 
 function seedDefaultAILearning() {
     const defaults = [
-        { domain: "doubleclick.net", blocked: true, reason: "Quảng cáo Google" },
-        { domain: "log.tiktokv.com", blocked: true, reason: "Theo dõi TikTok" },
-        { domain: "graph.facebook.com/tr", blocked: true, reason: "Facebook Pixel Tracker" },
-        { domain: "google-analytics.com", blocked: true, reason: "Theo dõi Google Analytics" },
-        { domain: "techcombank-verify.cfd", blocked: true, reason: "Giả mạo Techcombank" },
-        { domain: "momo-nhan-qua.xyz", blocked: true, reason: "Lừa đảo Momo" },
-        { domain: "shopee-tri-an.top", blocked: true, reason: "Lừa đảo Shopee" },
-        { domain: "mbcheck-auth.cc", blocked: true, reason: "Giả mạo MB Bank" },
-        { domain: "admicro.vn", blocked: true, reason: "Quảng cáo Việt Nam" },
-        { domain: "adtima.vn", blocked: true, reason: "Quảng cáo Zalo/Adtima" },
-        { domain: "v3.tiktokcdn.com", blocked: false, reason: "CDN Tiktok Video" },
-        { domain: "gateway.fe2.apple-dns.net", blocked: false, reason: "Hệ thống Apple" },
-        { domain: "graph.facebook.com", blocked: false, reason: "API Facebook hợp lệ" },
-        { domain: "sp.shopee.vn", blocked: false, reason: "Dịch vụ Shopee chính" },
-        { domain: "momo.vn", blocked: false, reason: "Dịch vụ ví Momo chính" }
+        { domain: "doubleclick.net", category: "Security", reason: "Mạng quảng cáo" },
+        { domain: "log.tiktokv.com", category: "Security", reason: "Theo dõi hành vi" },
+        { domain: "google-analytics.com", category: "Security", reason: "Thống kê phân tích" },
+        { domain: "techcombank-verify.cfd", category: "Security", reason: "Giả mạo ngân hàng" },
+        { domain: "youtube.com", category: "Media/CDN", reason: "Xem video trực tuyến" },
+        { domain: "v3.tiktokcdn.com", category: "Media/CDN", reason: "CDN Video TikTok" },
+        { domain: "google.com", category: "General/Search", reason: "Tìm kiếm Google" },
+        { domain: "wikipedia.org", category: "General/Search", reason: "Bách khoa toàn thư" },
+        { domain: "api.facebook.com", category: "API/App", reason: "Cổng API Facebook" },
+        { domain: "momo.vn", category: "API/App", reason: "Cổng dịch vụ Momo" }
     ];
     learnedExamples.length = 0;
     defaults.forEach(d => learnedExamples.push(d));
@@ -129,7 +118,7 @@ function loadAICache() {
             const obj = JSON.parse(data);
             aiDecisionCache.clear();
             for (const [k, v] of Object.entries(obj)) {
-                aiDecisionCache.set(k, !!v);
+                aiDecisionCache.set(k, String(v));
             }
             console.log(`Loaded ${aiDecisionCache.size} domains in AI decision cache.`);
         }
@@ -259,30 +248,16 @@ function getServerStatus() {
 }
 
 function getWSUpdatePayload() {
-    const blocked = Array.from(customBlockedSet);
-    const whitelist = Array.from(whitelistSet);
-    const subscriptions = config.subscriptionURLs || [];
-    const upstream = config.upstreamDNS || "1.1.1.1";
-    const isUpdating = isUpdatingList;
     const stats = {
         total: config.stats.total,
-        blocked: config.stats.blocked,
-        allowed: config.stats.allowed,
-        blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
         avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
     return {
         type: 'update',
         running: true,
-        blocked: blocked,
-        blockedCount: customBlockedSet.size + subscriptionBlockedSet.size,
-        whitelist: whitelist,
-        subscriptions: subscriptions,
-        upstream: upstream,
         logs: logs,
         stats: stats,
-        isUpdating: isUpdating,
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
@@ -295,7 +270,12 @@ function getWSUpdatePayload() {
         aiCacheCount: aiDecisionCache.size,
         aiQueueLength: groqQueue.length,
         activeGroqRequests: activeGroqRequests,
-        serverStatus: getServerStatus()
+        serverStatus: getServerStatus(),
+        
+        // Load Balancer fields
+        upstreamPool: config.upstreamPool || [],
+        lbAlgorithm: config.lbAlgorithm || "least-latency",
+        gslbRecords: config.gslbRecords || {}
     };
 }
 
@@ -342,7 +322,6 @@ function runStartupAITraining() {
     
     // Start a worker loop for each key
     config.groqTrainKeys.forEach((apiKey, idx) => {
-        // Space out the initial start of workers slightly to avoid concurrent request spikes on startup
         const startDelay = idx * 1500; 
         const timeoutId = setTimeout(() => {
             runWorker(apiKey);
@@ -361,7 +340,6 @@ function runWorker(apiKey) {
     if (trainingQueue.length === 0) {
         delete activeWorkers[apiKey];
         updateTrainingUIStatus();
-        // If queue is empty, check again in 3 seconds to see if new domains are enqueued
         const timeoutId = setTimeout(() => runWorker(apiKey), 3000);
         trainingWorkerTimeouts.push(timeoutId);
         return;
@@ -384,21 +362,19 @@ function runWorker(apiKey) {
             keyUsed: "N/A (Đã lưu bộ nhớ)",
             time: timeStr,
             success: true,
-            blocked: learnedItem.blocked,
-            reason: `Đã học (${learnedItem.reason || (learnedItem.blocked ? 'Chặn' : 'Bỏ qua')})`
+            category: learnedItem.category || "General/Search",
+            reason: `Đã phân loại (${learnedItem.reason || learnedItem.category})`
         });
         if (aiTrainingStatus.trainedList.length > 50) {
             aiTrainingStatus.trainedList.pop();
         }
         
-        // Broadcast the update and loop immediately for the next domain (no delay for cached ones)
         throttledBroadcastUpdate();
         const timeoutId = setTimeout(() => runWorker(apiKey), 100);
         trainingWorkerTimeouts.push(timeoutId);
         return;
     }
     
-    // Set active status
     activeWorkers[apiKey] = domain;
     updateTrainingUIStatus();
     
@@ -415,18 +391,16 @@ function runWorker(apiKey) {
             keyUsed: maskedKey,
             time: timeStr,
             success: success,
-            blocked: decision ? decision.blocked : false,
+            category: decision ? decision.category : "General/Search",
             reason: decision ? decision.reason : "Lỗi kết nối"
         });
         if (aiTrainingStatus.trainedList.length > 50) {
             aiTrainingStatus.trainedList.pop();
         }
         
-        // Remove from active status
         delete activeWorkers[apiKey];
         updateTrainingUIStatus();
         
-        // Wait 15 seconds per worker (safe RPM for Groq)
         const timeoutId = setTimeout(() => runWorker(apiKey), 15000);
         trainingWorkerTimeouts.push(timeoutId);
     });
@@ -452,21 +426,17 @@ function enqueueDomainForTraining(domain) {
     const d = domain.trim().toLowerCase();
     if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
     if (d.endsWith('.local') || d.endsWith('.localhost')) return;
-    if (whitelistSet.has(d)) return;
     if (isSafeDomain(d)) return;
     
-    // Check if already in learnedExamples
     const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
     if (alreadyLearned) return;
     
-    // Check if already in trainingQueue
     if (trainingQueue.includes(d)) return;
     
     console.log(`[AI Training] Enqueuing domain for real-time training: ${d}`);
     trainingQueue.unshift(d);
     totalTrainingEnqueued++;
     
-    // Auto start training loop if not running
     if (!aiTrainingStatus.isRunning) {
         runStartupAITraining();
     }
@@ -474,33 +444,22 @@ function enqueueDomainForTraining(domain) {
 
 function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContext = null) {
     if (process.env.MOCK_GROQ === 'true' || apiKey.startsWith('gsk_train')) {
-        // Simulate a slow API request (6 seconds) to allow parallel verification
         setTimeout(() => {
-            const isBlocked = domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry');
-            const decision = {
-                blocked: isBlocked,
-                reason: isBlocked ? "Quảng cáo giả lập" : "CDN giả lập"
-            };
-            if (isBlocked) {
-                aiDecisionCache.set(domain, true);
-                saveAICache();
-                customBlockedSet.add(domain);
-                config.customBlockedDomains = Array.from(customBlockedSet);
-                config.stats.blocked += 1;
-                if (config.stats.allowed > 0) {
-                    config.stats.allowed -= 1;
-                }
-                saveConfig();
-                learnedExamples.push({ domain, blocked: true, reason: decision.reason });
-                if (learnedExamples.length > 1000) learnedExamples.shift();
-                saveAILearning();
-            } else {
-                aiDecisionCache.set(domain, false);
-                saveAICache();
-                learnedExamples.push({ domain, blocked: false, reason: decision.reason });
-                if (learnedExamples.length > 1000) learnedExamples.shift();
-                saveAILearning();
+            let category = "General/Search";
+            if (domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry') || domain.includes('bank') || domain.includes('pay') || domain.includes('verify')) {
+                category = "Security";
+            } else if (domain.includes('cdn') || domain.includes('media') || domain.includes('video') || domain.includes('stream') || domain.includes('youtube') || domain.includes('tiktok')) {
+                category = "Media/CDN";
             }
+            const decision = {
+                category: category,
+                reason: category === "Security" ? "Bảo mật & Theo dõi" : (category === "Media/CDN" ? "Tải đa phương tiện" : "Mục đích chung")
+            };
+            aiDecisionCache.set(domain, category);
+            saveAICache();
+            learnedExamples.push({ domain, category, reason: decision.reason });
+            if (learnedExamples.length > 1000) learnedExamples.shift();
+            saveAILearning();
             callback(true, decision);
         }, 6000);
         return;
@@ -513,18 +472,19 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
         return;
     }
     
-    const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
-    const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-2);
+    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-2);
+    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-2);
     const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+        recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, telemetry, phishing, malware, scam, or other harmful activities.\n\n" +
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert. Classify the domain name. Analyze if it belongs to security threats (ad/tracker/telemetry/scam/phishing), media/CDN streaming, general search/social portals, or API/app backend services.\n\n" +
                           "Strict Rules:\n" +
-                          "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
-                          "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services.\n" +
-                          "3. Watch out for Typosquatting/Phishing: If the domain contains a famous brand but looks suspicious or uses a cheap/non-standard TLD, block it.\n" +
-                          "4. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          "1. Category 'Security': trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
+                          "2. Category 'Media/CDN': CDNs, media streams, video streaming, images CDN, static assets.\n" +
+                          "3. Category 'General/Search': search engines, news portals, social networking main sites (not CDNs).\n" +
+                          "4. Category 'API/App': application backend services, transactional APIs, main backend services.\n" +
+                          "5. Respond in strict JSON: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"reason\": \"1-3 words in Vietnamese\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
@@ -562,30 +522,13 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
                     const replyStr = resData.choices?.[0]?.message?.content;
                     if (replyStr) {
                         const decision = JSON.parse(replyStr);
-                        if (decision.blocked === true) {
-                            aiDecisionCache.set(domain, true);
-                            saveAICache();
-                            
-                            customBlockedSet.add(domain);
-                            config.customBlockedDomains = Array.from(customBlockedSet);
-                            
-                            config.stats.blocked += 1;
-                            if (config.stats.allowed > 0) {
-                                config.stats.allowed -= 1;
-                            }
-                            saveConfig();
-                            
-                            learnedExamples.push({ domain, blocked: true, reason: decision.reason || "Mối nguy hại" });
-                            if (learnedExamples.length > 1000) learnedExamples.shift();
-                            saveAILearning();
-                        } else {
-                            aiDecisionCache.set(domain, false);
-                            saveAICache();
-                            
-                            learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
-                            if (learnedExamples.length > 1000) learnedExamples.shift();
-                            saveAILearning();
-                        }
+                        const category = decision.category || "General/Search";
+                        aiDecisionCache.set(domain, category);
+                        saveAICache();
+                        
+                        learnedExamples.push({ domain, category, reason: decision.reason || "Huấn luyện AI" });
+                        if (learnedExamples.length > 1000) learnedExamples.shift();
+                        saveAILearning();
                         callback(true, decision);
                     } else {
                         callback(false, null);
@@ -607,229 +550,13 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
     }
 }
 
-// Load config and caches
-loadConfig();
-loadAILearning();
-loadAICache();
-
-// Load the blocklists on startup
-setTimeout(() => {
-    if (subscriptionBlockedSet.size === 0) {
-        updateBlocklists();
-    }
-}, 2000);
-
-// Schedule AI background pre-training loop on startup
-setTimeout(runStartupAITraining, 15000);
-
-// Raw body parser middleware for DNS binary payloads
-app.use((req, res, next) => {
-    const data = [];
-    req.on('data', chunk => data.push(chunk));
-    req.on('end', () => {
-        req.rawBody = Buffer.concat(data);
-        next();
-    });
-});
-
-// Serve static dashboard web page
-app.use(express.static(path.join(__dirname, 'public')));
-
-// MARK: - DNS Configuration & Cache Load/Save
-
-function loadConfig() {
-    const defaultSubs = [
-        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-        "https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt",
-        "https://v.firebog.net/hosts/AdguardDNS.txt",
-        "https://v.firebog.net/hosts/Easyprivacy.txt",
-        "https://raw.githubusercontent.com/Spam404/lists/master/main-blacklist.txt",
-        "https://urlhaus.abuse.ch/downloads/hostfile/",
-        "https://raw.githubusercontent.com/FadeMind/hosts.extras/master/add.Spam/hosts",
-        "https://v.firebog.net/hosts/Prigent-Crypto.txt",
-        "https://raw.githubusercontent.com/PolishFiltersTeam/KADhosts/master/KADhosts.txt",
-        "https://small.oisd.nl",
-        "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts",
-        "https://abpvn.com/android/abpvn.txt",
-        "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt",
-        "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext",
-        "https://raw.githubusercontent.com/neodevpro/neodevhost/master/host"
-    ];
-
-    try {
-        if (fs.existsSync(CONFIG_PATH)) {
-            const data = fs.readFileSync(CONFIG_PATH, 'utf8');
-            config = JSON.parse(data);
-        } else {
-            config = {
-                customBlockedDomains: [
-                    "doubleclick.net",
-                    "pagead2.googlesyndication.com",
-                    "adservice.google.com",
-                    "ads.youtube.com",
-                    "telemetry.apple.com",
-                    "app-measurement.com"
-                ],
-                whitelistDomains: [],
-                subscriptionURLs: defaultSubs,
-                upstreamDNS: "1.1.1.1",
-                stats: { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 },
-                aiEnabled: false,
-                groqApiKeys: [],
-                groqTrainKeys: [],
-                groqModel: "llama-3.1-8b-instant"
-            };
-            saveConfig();
-        }
-    } catch (e) {
-        console.error("Failed to load config, using defaults:", e);
-        config = {
-            customBlockedDomains: [
-                "doubleclick.net",
-                "pagead2.googlesyndication.com",
-                "adservice.google.com",
-                "ads.youtube.com",
-                "telemetry.apple.com",
-                "app-measurement.com"
-            ],
-            whitelistDomains: [],
-            subscriptionURLs: defaultSubs,
-            upstreamDNS: "1.1.1.1",
-            stats: { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 },
-            aiEnabled: false,
-            groqApiKeys: [],
-            groqTrainKeys: [],
-            groqModel: "llama-3.1-8b-instant"
-        };
-    }
-    
-    // Ensure all variables are fully seeded
-    config.stats = config.stats || {};
-    config.stats.total = config.stats.total || 0;
-    config.stats.blocked = config.stats.blocked || 0;
-    config.stats.allowed = config.stats.allowed || 0;
-    config.stats.cacheHits = config.stats.cacheHits || 0;
-    config.stats.cacheMisses = config.stats.cacheMisses || 0;
-    config.aiEnabled = config.aiEnabled || false;
-    config.groqModel = "llama-3.1-8b-instant"; // Enforce 8B model only to avoid 429 rate limits
-    // Migrate legacy single key to array
-    if (config.groqApiKey && !config.groqApiKeys) {
-        config.groqApiKeys = [config.groqApiKey];
-        delete config.groqApiKey;
-    }
-    if (!Array.isArray(config.groqApiKeys)) {
-        config.groqApiKeys = [];
-    }
-    if (!Array.isArray(config.groqTrainKeys)) {
-        config.groqTrainKeys = [];
-    }
-    
-    // Load keys from environment variable GROQ_API_KEYS (comma separated)
-    if (process.env.GROQ_API_KEYS) {
-        const envKeys = process.env.GROQ_API_KEYS.split(',')
-            .map(k => k.trim())
-            .filter(k => k.length > 0);
-        
-        envKeys.forEach(k => {
-            if (!config.groqApiKeys.includes(k)) {
-                config.groqApiKeys.push(k);
-            }
-        });
-        console.log(`Loaded ${envKeys.length} Groq API keys from environment variable.`);
-    }
-
-    config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
-
-    // Load training keys from environment variable GROQ_TRAIN_KEYS (comma separated)
-    if (process.env.GROQ_TRAIN_KEYS) {
-        const envKeys = process.env.GROQ_TRAIN_KEYS.split(',')
-            .map(k => k.trim())
-            .filter(k => k.length > 0);
-        
-        envKeys.forEach(k => {
-            if (!config.groqTrainKeys.includes(k)) {
-                config.groqTrainKeys.push(k);
-            }
-        });
-        console.log(`Loaded ${envKeys.length} Groq Training API keys from environment variable.`);
-    }
-
-    config.groqTrainKeys = config.groqTrainKeys.filter(k => k && k.trim().length > 0);
-    if (!config.subscriptionURLs || config.subscriptionURLs.length <= 1) {
-        config.subscriptionURLs = [...defaultSubs];
-    }
-    
-    // Automatically inject any missing default subscriptions and prune legacy ones
-    let configUpdated = false;
-    defaultSubs.forEach(sub => {
-        if (!config.subscriptionURLs.includes(sub)) {
-            config.subscriptionURLs.push(sub);
-            configUpdated = true;
-        }
-    });
-    
-    // Clean up legacy 404 URLs if they exist in subscriptionURLs
-    const legacy404Urls = [
-        "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_11_Vietnamese/filter.txt",
-        "https://abpvn.com/filter/abpvn.txt"
-    ];
-    legacy404Urls.forEach(legacyUrl => {
-        if (config.subscriptionURLs.includes(legacyUrl)) {
-            config.subscriptionURLs = config.subscriptionURLs.filter(u => u !== legacyUrl);
-            configUpdated = true;
-        }
-    });
-    
-    if (configUpdated) {
-        saveConfig();
-    }
-    
-    customBlockedSet = new Set(config.customBlockedDomains.map(d => d.toLowerCase()));
-    whitelistSet = new Set(config.whitelistDomains.map(d => d.toLowerCase()));
-    
-    // Load cached blocklists if available
-    loadSubscriptionBlocklistFromDisk();
-}
-
-function saveConfig() {
-    try {
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
-    } catch (e) {
-        console.error("Failed to save config:", e);
-    }
-}
-
-function saveSubscriptionBlocklistToDisk() {
-    try {
-        const data = Array.from(subscriptionBlockedSet).join('\n');
-        fs.writeFileSync(SUB_CACHE_PATH, data, 'utf8');
-    } catch (e) {
-        console.error("Failed to save cached subscription blocklist:", e);
-    }
-}
-
-function loadSubscriptionBlocklistFromDisk() {
-    try {
-        if (fs.existsSync(SUB_CACHE_PATH)) {
-            const data = fs.readFileSync(SUB_CACHE_PATH, 'utf8');
-            const domains = data.split('\n').map(d => d.trim().toLowerCase()).filter(d => d.length > 0);
-            subscriptionBlockedSet = new Set(domains);
-            console.log(`Loaded ${subscriptionBlockedSet.size} cached subscription domains.`);
-        }
-    } catch (e) {
-        console.error("Failed to load cached subscription blocklist:", e);
-    }
-}
-
-// MARK: - Local DNS Cache
-
+// Local DNS Cache
 function checkCache(domain, qtype) {
     const key = `${domain.toLowerCase()}_${qtype}`;
     const cached = dnsCache.get(key);
     if (cached) {
         if (Date.now() < cached.expiresAt) {
             config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
-            // Move to end of Map (most recently used) to preserve LRU order
             dnsCache.delete(key);
             dnsCache.set(key, cached);
             return cached.responseBuffer;
@@ -860,8 +587,7 @@ function setCache(domain, qtype, responseBuffer, ttl) {
     });
 }
 
-// MARK: - DNS Packet Parsers & Builders
-
+// DNS Packet Parsers & Builders
 function parseDNSQuery(buffer) {
     if (buffer.length < 12) return null;
     
@@ -875,7 +601,6 @@ function parseDNSQuery(buffer) {
             break;
         }
         
-        // Handle DNS compression pointers
         if ((len & 0xC0) === 0xC0) {
             offset += 2;
             break;
@@ -907,33 +632,36 @@ function parseDNSQuery(buffer) {
     };
 }
 
-function buildBlockResponse(queryBuffer, questionEndOffset) {
+function buildGslbResponse(queryBuffer, questionEndOffset, ips) {
     const header = Buffer.alloc(12);
-    // Copy transaction ID
     queryBuffer.copy(header, 0, 0, 2);
-    // Flags: 0x8180 (Standard response, no error)
-    header.writeUInt16BE(0x8180, 2);
-    // QDCOUNT = 1, ANCOUNT = 1, NSCOUNT = 0, ARCOUNT = 0
-    header.writeUInt16BE(1, 4);
-    header.writeUInt16BE(1, 6);
+    header.writeUInt16BE(0x8180, 2); // Standard response, no error
+    header.writeUInt16BE(1, 4); // QDCOUNT = 1
+    header.writeUInt16BE(ips.length, 6); // ANCOUNT = ips.length
     header.writeUInt16BE(0, 8);
     header.writeUInt16BE(0, 10);
     
-    // Copy the question from the query
     const questionLength = (questionEndOffset + 4) - 12;
     const question = Buffer.alloc(questionLength);
     queryBuffer.copy(question, 0, 12, questionEndOffset + 4);
     
-    // Answer block pointing back to the query name (offset 12), Type A, Class IN, TTL 300, Length 4, IP 0.0.0.0
-    const answer = Buffer.alloc(16);
-    answer.writeUInt16BE(0xc00c, 0); // Name pointer to question
-    answer.writeUInt16BE(1, 2);      // Type A
-    answer.writeUInt16BE(1, 4);      // Class IN
-    answer.writeUInt32BE(300, 6);    // TTL 300 seconds
-    answer.writeUInt16BE(4, 10);     // Data length = 4
-    answer.writeUInt32BE(0, 12);     // IP Address = 0.0.0.0
+    const answers = [];
+    ips.forEach(ip => {
+        const answer = Buffer.alloc(16);
+        answer.writeUInt16BE(0xc00c, 0); // Name pointer to question
+        answer.writeUInt16BE(1, 2);      // Type A
+        answer.writeUInt16BE(1, 4);      // Class IN
+        answer.writeUInt32BE(60, 6);     // TTL 60s
+        answer.writeUInt16BE(4, 10);     // Length = 4
+        
+        const parts = ip.split('.').map(Number);
+        for (let i = 0; i < 4; i++) {
+            answer[12 + i] = parts[i] || 0;
+        }
+        answers.push(answer);
+    });
     
-    return Buffer.concat([header, question, answer]);
+    return Buffer.concat([header, question, ...answers]);
 }
 
 function extractTTL(responseBuffer, questionEndOffset) {
@@ -943,7 +671,7 @@ function extractTTL(responseBuffer, questionEndOffset) {
         
         let nameByte = responseBuffer[offset];
         if ((nameByte & 0xC0) === 0xC0) {
-            offset += 2; // Pointer
+            offset += 2;
         } else {
             while (offset < responseBuffer.length) {
                 let len = responseBuffer[offset];
@@ -960,7 +688,6 @@ function extractTTL(responseBuffer, questionEndOffset) {
         }
         
         if (offset + 8 > responseBuffer.length) return 300;
-        
         const ttl = responseBuffer.readUInt32BE(offset + 4);
         return ttl > 0 ? ttl : 300;
     } catch (e) {
@@ -968,43 +695,9 @@ function extractTTL(responseBuffer, questionEndOffset) {
     }
 }
 
-// MARK: - Ad-Blocking Tra cứu (Optimized O(K))
-
-function hasDomainOrParent(set, domain) {
-    if (set.has(domain)) return true;
-    let idx = domain.indexOf('.');
-    while (idx !== -1) {
-        const parent = domain.substring(idx + 1);
-        if (set.has(parent)) return true;
-        idx = domain.indexOf('.', idx + 1);
-    }
-    return false;
-}
-
-function shouldBlock(domain) {
-    const lowercaseDomain = domain.toLowerCase();
-    
-    // 0. Safeguard: Local / internal networks are allowed
-    if (IGNORED_DOMAINS.has(lowercaseDomain)) return false;
-    if (lowercaseDomain.endsWith('.local') || lowercaseDomain.endsWith('.localhost')) return false;
-    
-    // 1. Whitelist Check (exact or parent subdomain)
-    if (hasDomainOrParent(whitelistSet, lowercaseDomain)) return false;
-    
-    // 2. Custom Blocklist Check
-    if (hasDomainOrParent(customBlockedSet, lowercaseDomain)) return true;
-    
-    // 3. Subscription Blocklist Check
-    if (hasDomainOrParent(subscriptionBlockedSet, lowercaseDomain)) return true;
-    
-    return false;
-}
-
-// MARK: - Upstream DNS Resolver (UDP) and Deduplication
-
+// Upstream DNS Resolver (UDP) and Deduplication
 function initUpstreamSocket() {
     if (upstreamSocket) return;
-    
     upstreamSocket = dgram.createSocket('udp4');
     
     upstreamSocket.on('message', (msg) => {
@@ -1015,35 +708,28 @@ function initUpstreamSocket() {
             pendingRequests.delete(txId);
             if (req.timer) clearTimeout(req.timer);
             
-            // Restore original client Transaction ID
             const clientResponse = Buffer.from(msg);
             clientResponse[0] = req.originalIDBytes[0];
             clientResponse[1] = req.originalIDBytes[1];
-            
             req.callback(clientResponse);
         }
     });
     
     upstreamSocket.on('error', (err) => {
         console.error("Shared upstream UDP socket error:", err);
-        try {
-            upstreamSocket.close();
-        } catch (e) {}
+        try { upstreamSocket.close(); } catch (e) {}
         upstreamSocket = null;
-        // Delay re-initialization slightly to avoid tight loop
         setTimeout(initUpstreamSocket, 1000);
     });
 }
 
 function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
     initUpstreamSocket();
-    
     if (!upstreamSocket) {
         callback(null);
         return;
     }
     
-    // Find a free Tx ID
     let txId = nextTxId;
     let attempts = 0;
     while (pendingRequests.has(txId) && attempts < 65536) {
@@ -1053,10 +739,7 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
     nextTxId = (txId + 1) % 65536;
     
     const originalIDBytes = Buffer.from([dnsQueryBuffer[0], dnsQueryBuffer[1]]);
-    
-    // Clone the buffer so we don't modify the client's query buffer in-place
     const upstreamQueryBuffer = Buffer.from(dnsQueryBuffer);
-    // Write the new transaction ID
     upstreamQueryBuffer.writeUInt16BE(txId, 0);
     
     const timer = setTimeout(() => {
@@ -1115,8 +798,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     });
 }
 
-// MARK: - Groq AI Security Guard
-
+// Groq AI Routing helpers
 function getNextGroqKey() {
     const keys = config.groqApiKeys;
     if (!keys || keys.length === 0) return null;
@@ -1131,38 +813,57 @@ function getMaxConcurrentGroq() {
     return keys.length * GROQ_CONCURRENCY_PER_KEY;
 }
 
-// Famous safe networks/systems that do not need AI scanning to conserve tokens
+// Load Balancer DNS Selector
+function selectUpstreamDNS(domain) {
+    const pool = config.upstreamPool || [];
+    if (pool.length === 0) return "1.1.1.1";
+    
+    const onlinePool = pool.filter(s => s.online !== false);
+    const activePool = onlinePool.length > 0 ? onlinePool : pool;
+    
+    const algo = config.lbAlgorithm || "least-latency";
+    
+    if (algo === "round-robin") {
+        if (selectUpstreamDNS.index === undefined) selectUpstreamDNS.index = 0;
+        const server = activePool[selectUpstreamDNS.index % activePool.length];
+        selectUpstreamDNS.index = (selectUpstreamDNS.index + 1) % activePool.length;
+        return server.ip;
+    }
+    
+    if (algo === "random") {
+        const idx = Math.floor(Math.random() * activePool.length);
+        return activePool[idx].ip;
+    }
+    
+    if (algo === "ai-routing" && config.aiEnabled) {
+        const category = aiDecisionCache.get(domain);
+        if (category === "Security") {
+            const quad9 = activePool.find(s => s.ip === "9.9.9.9");
+            if (quad9) return quad9.ip;
+        } else if (category === "Media/CDN") {
+            const google = activePool.find(s => s.ip === "8.8.8.8");
+            if (google) return google.ip;
+        }
+    }
+    
+    // Default / Least Latency
+    const sorted = [...activePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
+    return sorted[0].ip;
+}
+
+// Famous safe networks
 const SAFE_DOMAINS_SUFFIXES = [
     ".google.com", ".googleapis.com", ".gstatic.com", ".googleusercontent.com",
-    ".apple.com", ".icloud.com", ".mzstatic.com", ".apple-dns.net", ".itunes.com", ".itunes.apple.com",
-    ".microsoft.com", ".windows.com", ".live.com", ".office.com", ".msn.com", ".windows.net", ".windowsupdate.com",
-    ".cloudflare.com", ".cloudflare-dns.com",
-    ".facebook.com", ".fbcdn.net", ".instagram.com",
-    ".youtube.com", ".ytimg.com", ".ggpht.com",
-    ".netflix.com", ".nflxext.com", ".nflximg.net", ".nflxvideo.net",
-    ".tiktok.com", ".tiktokcdn.com", ".byteoversea.com",
-    ".github.com", ".githubusercontent.com",
-    ".wikipedia.org", ".wikimedia.org",
-    ".zalo.me", ".zaloapp.com", ".zalopay.vn",
-    ".momo.vn",
-    // Major CDNs
-    ".akamai.net", ".akamaihd.net", ".akamaized.net", ".edgesuite.net", ".edgekey.net",
-    ".cloudfront.net", ".fastly.net", ".map.fastly.net",
-    // Safe services
-    ".twimg.com", ".t.co", ".spotify.com", ".scdn.co", ".discord.gg", ".discordapp.com", ".discordapp.net", ".zoom.us",
-    // Safe Vietnamese Banks
-    ".vietcombank.com.vn", ".bidv.com.vn", ".techcombank.com.vn", ".vietinbank.vn", ".sacombank.com.vn", ".agribank.com.vn"
+    ".apple.com", ".icloud.com", ".mzstatic.com", ".apple-dns.net", ".itunes.com",
+    ".microsoft.com", ".windows.com", ".live.com", ".office.com", ".msn.com",
+    ".cloudflare.com", ".facebook.com", ".fbcdn.net", ".instagram.com",
+    ".youtube.com", ".ytimg.com", ".ggpht.com", ".github.com"
 ];
 
 function isSafeDomain(domain) {
     const d = domain.trim().toLowerCase();
-    const exactMatches = [
-        "google.com", "apple.com", "microsoft.com", "cloudflare.com",
-        "facebook.com", "youtube.com", "netflix.com", "tiktok.com",
-        "github.com", "wikipedia.org", "zalo.me", "momo.vn"
-    ];
+    const exactMatches = ["google.com", "apple.com", "microsoft.com", "cloudflare.com", "facebook.com", "youtube.com"];
     if (exactMatches.includes(d)) return true;
-    
     for (const suffix of SAFE_DOMAINS_SUFFIXES) {
         if (d.endsWith(suffix)) return true;
     }
@@ -1174,26 +875,19 @@ function enqueueGroqCheck(domain) {
     if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
     if (d.endsWith('.local') || d.endsWith('.localhost')) return;
     if (aiDecisionCache.has(d)) return;
-    if (whitelistSet.has(d)) return;
     
-    // 1. Skip if already blocked by our blocklists
-    if (shouldBlock(d)) {
-        aiDecisionCache.set(d, true);
-        saveAICache();
-        return;
-    }
-    
-    // 2. Skip if it is a well-known safe domain
     if (isSafeDomain(d)) {
-        aiDecisionCache.set(d, false);
+        let category = "General/Search";
+        if (d.includes('cdn') || d.includes('fbcdn') || d.includes('tiktokcdn') || d.includes('akamai')) {
+            category = "Media/CDN";
+        }
+        aiDecisionCache.set(d, category);
         saveAICache();
         return;
     }
     
     if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
-    
-    // Mark as scanned immediately to avoid duplicate queue insertions
-    aiDecisionCache.set(d, false);
+    aiDecisionCache.set(d, "General/Search");
     
     groqQueue.push(d);
     processGroqQueue();
@@ -1201,10 +895,8 @@ function enqueueGroqCheck(domain) {
 
 function processGroqQueue() {
     if (isQueuePaused) return;
-    
     const maxConcurrent = getMaxConcurrentGroq();
     if (activeGroqRequests >= maxConcurrent || groqQueue.length === 0) return;
-    
     if (queueTimeoutId) return;
     
     const domain = groqQueue.shift();
@@ -1216,7 +908,6 @@ function processGroqQueue() {
         processGroqQueue();
     });
     
-    // Schedule the next check after QUEUE_DELAY_MS to space out queries sequentially
     queueTimeoutId = setTimeout(() => {
         queueTimeoutId = null;
         processGroqQueue();
@@ -1233,45 +924,35 @@ function gatherInternetContext(domain) {
             htmlTitle: null,
             error: null
         };
-
         const dns = require('dns');
         dns.resolve4(domain, (dnsErr, addresses) => {
             if (!dnsErr && addresses) {
                 result.resolvedIPs = addresses.slice(0, 3);
             }
-
             const http = require('http');
             const url = `http://${domain}/`;
             let reqFinished = false;
-
             const req = http.get(url, { timeout: 1500 }, (res) => {
                 reqFinished = true;
                 result.httpStatus = res.statusCode;
                 result.serverHeader = res.headers['server'] || null;
                 result.contentType = res.headers['content-type'] || null;
-
                 let data = '';
-                res.on('data', (chunk) => {
+                res.on('data', chunk => {
                     data += chunk.toString('utf8');
-                    if (data.length > 2000) {
-                        res.destroy();
-                    }
+                    if (data.length > 2000) res.destroy();
                 });
                 res.on('end', () => {
                     const match = data.match(/<title>([^<]+)<\/title>/i);
-                    if (match && match[1]) {
-                        result.htmlTitle = match[1].trim();
-                    }
+                    if (match && match[1]) result.htmlTitle = match[1].trim();
                     resolve(result);
                 });
             });
-
             req.on('error', (err) => {
                 reqFinished = true;
                 result.error = err.code || err.message;
                 resolve(result);
             });
-
             req.on('timeout', () => {
                 if (!reqFinished) {
                     req.destroy();
@@ -1287,89 +968,28 @@ function buildAIAnalysisContext(domain, internetContext = null) {
     const d = domain.trim().toLowerCase();
     const parts = d.split('.');
     const tld = parts[parts.length - 1];
-    
-    // Famous suspicious/low-cost TLDs often used for phishing/scams
-    const suspiciousTlds = new Set(['cfd', 'xyz', 'cc', 'top', 'site', 'icu', 'vip', 'win', 'online', 'tech', 'click', 'info', 'biz', 'tk', 'ml', 'ga', 'cf', 'gq']);
-    
-    // Famous Vietnamese and international brands targeted by phishing
-    const famousBrands = [
-        { brand: 'techcombank', matches: ['techcombank', 'tcb'] },
-        { brand: 'shopee', matches: ['shopee'] },
-        { brand: 'momo', matches: ['momo'] },
-        { brand: 'mbcheck', matches: ['mbcheck', 'mbbank', 'mbb'] },
-        { brand: 'bidv', matches: ['bidv'] },
-        { brand: 'vietcombank', matches: ['vietcombank', 'vcb'] },
-        { brand: 'sacombank', matches: ['sacombank'] },
-        { brand: 'agribank', matches: ['agribank'] },
-        { brand: 'facebook', matches: ['facebook', 'fb'] },
-        { brand: 'apple', matches: ['apple', 'icloud'] },
-        { brand: 'netflix', matches: ['netflix'] },
-        { brand: 'tiktok', matches: ['tiktok'] }
-    ];
-
-    let brandDetected = null;
-    for (const b of famousBrands) {
-        for (const match of b.matches) {
-            if (d.includes(match)) {
-                // Confirm it is not the legitimate primary domain of the brand
-                const isLegit = (d === `${b.brand}.com` || d.endsWith(`.${b.brand}.com`) || d === `${b.brand}.vn` || d.endsWith(`.${b.brand}.vn`) || d === `${b.brand}.com.vn` || d.endsWith(`.${b.brand}.com.vn`));
-                if (!isLegit) {
-                    brandDetected = b.brand;
-                    break;
-                }
-            }
-        }
-        if (brandDetected) break;
-    }
-
-    let contextualPrompt = `Domain to analyze: ${domain}\n`;
-    contextualPrompt += `Metadata:\n`;
-    contextualPrompt += `- TLD: .${tld} (Suspicious: ${suspiciousTlds.has(tld) ? "YES" : "NO"})\n`;
-    if (brandDetected) {
-        contextualPrompt += `- Brand abuse detected: Domain contains brand keywords referencing "${brandDetected}" but is NOT the official domain of ${brandDetected}. (Potential phishing/brand impersonation: YES)\n`;
-    }
-    
-    // Check if the domain length is abnormally long (common for dynamically generated ad/tracking hosts)
-    if (parts[0] && parts[0].length > 25) {
-        contextualPrompt += `- Subdomain pattern: Abnormally long host label (Potential DGA/tracking endpoint: YES)\n`;
-    }
-    
+    let prompt = `Domain to analyze: ${domain}\nTLD: .${tld}\n`;
     if (internetContext) {
-        contextualPrompt += `\nReal-time Internet Probe Data (Live connection status):\n`;
-        contextualPrompt += `- DNS Resolved IPs: ${JSON.stringify(internetContext.resolvedIPs)}\n`;
-        contextualPrompt += `- HTTP GET Connection Error: ${internetContext.error || "None"}\n`;
-        contextualPrompt += `- HTTP Response Status Code: ${internetContext.httpStatus || "N/A"}\n`;
-        contextualPrompt += `- HTTP Server Header: ${internetContext.serverHeader || "N/A"}\n`;
-        contextualPrompt += `- HTTP Content-Type Header: ${internetContext.contentType || "N/A"}\n`;
-        contextualPrompt += `- HTML Title tag (<title>): "${internetContext.htmlTitle || "N/A"}"\n`;
+        prompt += `Live Probe Data:\n- IPs: ${JSON.stringify(internetContext.resolvedIPs)}\n- HTTP: ${internetContext.httpStatus}, Server: ${internetContext.serverHeader}, Title: "${internetContext.htmlTitle || 'N/A'}"\n- Error: ${internetContext.error || 'None'}\n`;
     }
-    
-    return contextualPrompt;
+    return prompt;
 }
 
 function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetContext = null) {
     if (process.env.MOCK_GROQ === 'true' || apiKey.startsWith('gsk_mock')) {
         setTimeout(() => {
-            const isBlocked = domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry');
-            aiDecisionCache.set(domain, isBlocked);
-            saveAICache();
-            if (isBlocked) {
-                customBlockedSet.add(domain);
-                config.customBlockedDomains = Array.from(customBlockedSet);
-                config.stats.blocked += 1;
-                if (config.stats.allowed > 0) {
-                    config.stats.allowed -= 1;
-                }
-                saveConfig();
-                learnedExamples.push({ domain, blocked: true, reason: "Mối nguy hại (MOCK)" });
-                if (learnedExamples.length > 1000) learnedExamples.shift();
-                saveAILearning();
-                logQuery(domain, true, "AI Guard (Auto Blocked)", "blocked");
-            } else {
-                learnedExamples.push({ domain, blocked: false, reason: "CDN / Hợp lệ (MOCK)" });
-                if (learnedExamples.length > 1000) learnedExamples.shift();
-                saveAILearning();
+            let category = "General/Search";
+            if (domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry') || domain.includes('bank') || domain.includes('pay') || domain.includes('verify')) {
+                category = "Security";
+            } else if (domain.includes('cdn') || domain.includes('media') || domain.includes('video') || domain.includes('stream') || domain.includes('youtube') || domain.includes('tiktok')) {
+                category = "Media/CDN";
             }
+            aiDecisionCache.set(domain, category);
+            saveAICache();
+            learnedExamples.push({ domain, category, reason: "Phân loại giả lập" });
+            if (learnedExamples.length > 1000) learnedExamples.shift();
+            saveAILearning();
+            logQuery(domain, category, "System", "Local Cache", "cache");
             if (callback) callback();
         }, 1000);
         return;
@@ -1388,59 +1008,41 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
         return;
     }
     
-    // Check if we exhausted all fallback models
     if (modelIndex >= FALLBACK_MODELS.length) {
-        console.warn(`[AI Guard] All Groq models exhausted for ${domain}. Pausing AI queue for 60s...`);
         isQueuePaused = true;
-        // Re-insert at the beginning of the queue if not already there
-        if (!groqQueue.includes(domain)) {
-            groqQueue.unshift(domain);
-        }
+        if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
         aiDecisionCache.delete(domain);
-        
         if (queueTimeoutId) clearTimeout(queueTimeoutId);
         queueTimeoutId = setTimeout(() => {
             isQueuePaused = false;
             queueTimeoutId = null;
-            console.log("[AI Guard] Resuming AI queue after rate limit cooldown.");
             processGroqQueue();
-        }, 60000); // 60 seconds cooldown
-        
+        }, 60000);
         if (callback) callback();
         return;
     }
     
     const model = FALLBACK_MODELS[modelIndex];
-    console.log(`[AI Guard] Scanning domain: ${domain} via Groq (${model}) [Try #${modelIndex + 1}]...`);
-    
-    // Select exactly 4 dynamic examples (2 blocked, 2 allowed) to keep prompt size small (~350 tokens) and prevent 429 TPM exhaustion
-    const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
-    const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-2);
+    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-2);
+    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-2);
     const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+        recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, telemetry, phishing, malware, scam, or other harmful activities.\n\n" +
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert. Classify the domain name. Analyze if it belongs to security threats (ad/tracker/telemetry/scam/phishing), media/CDN streaming, general search/social portals, or API/app backend services.\n\n" +
                           "Strict Rules:\n" +
-                          "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
-                          "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services (e.g. *.tiktokcdn.com, *.fbcdn.net, *.akamai.net are allowed CDNs; but log.tiktokv.com, graph.facebook.com/tr, ads.youtube.com are blocked trackers/ads).\n" +
-                          "3. Watch out for Typosquatting/Phishing: If the domain contains a famous brand (like techcombank, shopee, momo, mbcheck, apple-dns, bidv, vietcombank, sacombank, facebook) but looks suspicious or uses a cheap/non-standard TLD (like .cfd, .xyz, .cc, .top, .site, .icu, .vip, .win, .online, .tech, .click), block it.\n" +
-                          "4. Watch out for ad networks and trackers in Vietnam: e.g. admicro, eclick, adtima, ants, yomedia, ad.gonet.vn, and other telemetry/tracking subdomains.\n" +
-                          "5. Allow legitimate primary domains and their structural subdomains (e.g. static assets, images, logins) unless they are explicitly ad servers.\n" +
-                          "6. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          "1. Category 'Security': trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
+                          "2. Category 'Media/CDN': CDNs, media streams, video streaming, images CDN, static assets.\n" +
+                          "3. Category 'General/Search': search engines, news portals, social networking main sites (not CDNs).\n" +
+                          "4. Category 'API/App': application backend services, transactional APIs, main backend services.\n" +
+                          "5. Respond in strict JSON: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"reason\": \"1-3 words in Vietnamese\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
         model: model,
         messages: [
-            {
-                role: "system",
-                content: systemContent
-            },
-            {
-                role: "user",
-                content: buildAIAnalysisContext(domain, internetContext)
-            }
+            { role: "system", content: systemContent },
+            { role: "user", content: buildAIAnalysisContext(domain, internetContext) }
         ],
         response_format: { type: "json_object" }
     });
@@ -1458,10 +1060,9 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
     };
     
     let fallbackCalled = false;
-    const triggerFallback = (reason) => {
+    const triggerFallback = () => {
         if (!fallbackCalled) {
             fallbackCalled = true;
-            console.warn(`[AI Guard] Groq model ${model} failed for ${domain} (${reason}). Trying fallback...`);
             checkDomainWithGroq(domain, apiKey, callback, modelIndex + 1, internetContext);
         }
     };
@@ -1473,255 +1074,212 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
-                        triggerFallback(`Status ${res.statusCode}`);
+                        triggerFallback();
                         return;
                     }
-                    
                     const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
                     const replyStr = resData.choices?.[0]?.message?.content;
                     if (replyStr) {
                         const decision = JSON.parse(replyStr);
-                        if (decision.blocked === true) {
-                            aiDecisionCache.set(domain, true);
-                            saveAICache(); // Save AI classification cache to disk
-                            console.log(`[AI Guard] Groq classified ${domain} as BLOCKED via ${model}. Reason: ${decision.reason}`);
-                            
-                            // Auto block the domain
-                            customBlockedSet.add(domain);
-                            config.customBlockedDomains = Array.from(customBlockedSet);
-                            
-                            // Retroactively adjust stats: convert 1 allowed to blocked
-                            config.stats.blocked += 1;
-                            if (config.stats.allowed > 0) {
-                                config.stats.allowed -= 1;
-                            }
-                            saveConfig();
-                            
-                            // Learn from this block dynamically
-                            learnedExamples.push({ domain, blocked: true, reason: decision.reason || "Mối nguy hại" });
-                            if (learnedExamples.length > 1000) {
-                                learnedExamples.shift();
-                            }
-                            saveAILearning(); // Save AI dynamic learning log to disk
-                            
-                            logQuery(domain, true, "AI Guard (Auto Blocked)", "blocked");
-                        } else {
-                            aiDecisionCache.set(domain, false);
-                            saveAICache(); // Save AI classification cache to disk
-                            console.log(`[AI Guard] Groq classified ${domain} as ALLOWED via ${model}.`);
-                            
-                            // Learn from this allowed domain dynamically
-                            learnedExamples.push({ domain, blocked: false, reason: decision.reason || "CDN / Hợp lệ" });
-                            if (learnedExamples.length > 1000) {
-                                learnedExamples.shift();
-                            }
-                            saveAILearning(); // Save AI dynamic learning log to disk
-                            
-                            broadcastUpdate();
-                        }
+                        const category = decision.category || "General/Search";
+                        aiDecisionCache.set(domain, category);
+                        saveAICache();
+                        
+                        learnedExamples.push({ domain, category, reason: decision.reason || "Mối nguy hại" });
+                        if (learnedExamples.length > 1000) learnedExamples.shift();
+                        saveAILearning();
+                        
+                        broadcastUpdate();
                         if (callback) callback();
                     } else {
-                        triggerFallback("Empty response message content");
+                        triggerFallback();
                     }
                 } catch (e) {
-                    console.error("[AI Guard] Failed to parse Groq response:", e);
-                    triggerFallback(`Parse error: ${e.message}`);
+                    triggerFallback();
                 }
             });
         });
-        
-        req.on('error', (e) => {
-            console.error("[AI Guard] Groq API error:", e);
-            triggerFallback(`Request error: ${e.message}`);
-        });
-        
+        req.on('error', triggerFallback);
         req.write(postData);
         req.end();
     } catch (e) {
-        console.error("[AI Guard] Groq API request exception:", e);
-        triggerFallback(`Exception: ${e.message}`);
+        triggerFallback();
     }
 }
 
-// MARK: - Logs and Stats Logging
-
-function logQuery(domain, blocked, clientIP, source = "upstream") {
+// Logs and Stats
+function logQuery(domain, category, clientIP, targetIP, source = "upstream") {
     const now = new Date();
-    // Vietnam timezone (UTC+7)
     const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-    const timeStr = vnTime.toISOString().substring(11, 19); // HH:mm:ss
+    const timeStr = vnTime.toISOString().substring(11, 19);
     
-    let statusText = "✅ ALLOWED";
-    if (blocked) {
-        statusText = "❌ BLOCKED";
-    } else if (source === "cache") {
-        statusText = "⚡ CACHED";
+    let statusText = `✈️ ROUTED [${targetIP}]`;
+    if (source === "cache") {
+        statusText = `⚡ CACHED`;
+    } else if (source === "gslb") {
+        statusText = `🔄 GSLB [${targetIP}]`;
     }
     
-    const msg = `[${timeStr}] [${clientIP}] ${statusText} - ${domain}`;
+    const categoryText = category ? `[${category}]` : "[General/Search]";
+    const msg = `[${timeStr}] [${clientIP}] ${statusText} ${categoryText} - ${domain}`;
     
     logs.push(msg);
     if (logs.length > 100) {
         logs.shift();
     }
-    throttledBroadcastUpdate(); // Throttled UI updates under heavy traffic
+    throttledBroadcastUpdate();
 }
 
-let lastSaveTimeout = null;
-function incrementStats(blocked) {
-    config.stats.total += 1;
-    if (blocked) {
-        config.stats.blocked += 1;
-    } else {
-        config.stats.allowed += 1;
-    }
-    
-    // Throttle config writes to once every 5 seconds under heavy load
-    if (!lastSaveTimeout) {
-        lastSaveTimeout = setTimeout(() => {
-            lastSaveTimeout = null;
+// DNS Configuration & Cache Load/Save
+function loadConfig() {
+    const defaultPool = [
+        { ip: "1.1.1.1", name: "Cloudflare", latency: 0, online: true },
+        { ip: "8.8.8.8", name: "Google", latency: 0, online: true },
+        { ip: "9.9.9.9", name: "Quad9", latency: 0, online: true },
+        { ip: "208.67.222.222", name: "OpenDNS", latency: 0, online: true }
+    ];
+
+    try {
+        if (fs.existsSync(CONFIG_PATH)) {
+            const data = fs.readFileSync(CONFIG_PATH, 'utf8');
+            config = JSON.parse(data);
+        } else {
+            config = {
+                upstreamPool: defaultPool,
+                lbAlgorithm: "least-latency",
+                gslbRecords: {},
+                stats: { total: 0, cacheHits: 0, cacheMisses: 0 },
+                aiEnabled: false,
+                groqApiKeys: [],
+                groqTrainKeys: [],
+                groqModel: "llama-3.1-8b-instant"
+            };
             saveConfig();
-        }, 5000);
-    }
-}
-
-// MARK: - Subscription Sync and Parsers
-
-function updateBlocklists(callback) {
-    if (isUpdatingList) {
-        if (callback) callback();
-        return;
-    }
-    isUpdatingList = true;
-    broadcastUpdate(); // Instant real-time UI notification
-    console.log("Starting blocklist subscription sync sequentially to preserve memory...");
-    
-    const urls = config.subscriptionURLs || [];
-    let newBlocked = new Set();
-    let index = 0;
-    
-    if (urls.length === 0) {
-        isUpdatingList = false;
-        broadcastUpdate();
-        if (callback) callback();
-        return;
-    }
-    
-    function downloadNext() {
-        if (index >= urls.length) {
-            isUpdatingList = false;
-            if (newBlocked.size > 0) {
-                subscriptionBlockedSet = newBlocked;
-                saveSubscriptionBlocklistToDisk();
-            }
-            console.log(`Sync completed. Total active rules: ${subscriptionBlockedSet.size}`);
-            broadcastUpdate();
-            if (callback) callback();
-            return;
         }
-        
-        const urlString = urls[index];
-        console.log(`[Sync] Downloading ${index + 1}/${urls.length}: ${urlString}...`);
-        downloadURL(urlString, (content) => {
-            if (content) {
-                const lines = content.split(/\r?\n/);
-                let parsedCount = 0;
-                lines.forEach(line => {
-                    let trimmed = line.trim();
-                    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('//')) {
-                        return;
-                    }
-                    
-                    let parts = trimmed.split(/\s+/);
-                    if (parts.length >= 2) {
-                        let ip = parts[0];
-                        let domain = parts[1].toLowerCase();
-                        if ((ip === "0.0.0.0" || ip === "127.0.0.1") && isValidDomain(domain)) {
-                            if (!IGNORED_DOMAINS.has(domain) && !domain.endsWith('.local') && !domain.endsWith('.localhost')) {
-                                newBlocked.add(domain);
-                                parsedCount++;
-                            }
-                        }
-                    } else if (parts.length === 1) {
-                        let domain = parts[0].toLowerCase();
-                        if (domain.startsWith('||')) {
-                            let endIdx = domain.search(/[\^\/\$]/);
-                            if (endIdx !== -1) {
-                                domain = domain.substring(2, endIdx);
-                            } else {
-                                domain = domain.substring(2);
-                            }
-                        }
-                        if (isValidDomain(domain)) {
-                            if (!IGNORED_DOMAINS.has(domain) && !domain.endsWith('.local') && !domain.endsWith('.localhost')) {
-                                newBlocked.add(domain);
-                                parsedCount++;
-                            }
-                        }
-                    }
-                });
-                console.log(`[Sync] Successfully parsed ${parsedCount} domains from ${urlString}`);
-            } else {
-                console.error(`[Sync] Failed to download or parse from ${urlString}`);
-            }
-            
-            index++;
-            // Yield execution to allow garbage collection and event processing
-            setTimeout(downloadNext, 100);
+    } catch (e) {
+        console.error("Failed to load config, using defaults:", e);
+        config = {
+            upstreamPool: defaultPool,
+            lbAlgorithm: "least-latency",
+            gslbRecords: {},
+            stats: { total: 0, cacheHits: 0, cacheMisses: 0 },
+            aiEnabled: false,
+            groqApiKeys: [],
+            groqTrainKeys: [],
+            groqModel: "llama-3.1-8b-instant"
+        };
+    }
+    
+    config.stats = config.stats || {};
+    config.stats.total = config.stats.total || 0;
+    config.stats.cacheHits = config.stats.cacheHits || 0;
+    config.stats.cacheMisses = config.stats.cacheMisses || 0;
+    config.aiEnabled = config.aiEnabled || false;
+    config.groqModel = "llama-3.1-8b-instant";
+    config.upstreamPool = config.upstreamPool || defaultPool;
+    config.lbAlgorithm = config.lbAlgorithm || "least-latency";
+    config.gslbRecords = config.gslbRecords || {};
+    
+    if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
+    if (!Array.isArray(config.groqTrainKeys)) config.groqTrainKeys = [];
+    
+    if (process.env.GROQ_API_KEYS) {
+        const envKeys = process.env.GROQ_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
+        envKeys.forEach(k => {
+            if (!config.groqApiKeys.includes(k)) config.groqApiKeys.push(k);
         });
     }
-    
-    downloadNext();
+    config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
+
+    if (process.env.GROQ_TRAIN_KEYS) {
+        const envKeys = process.env.GROQ_TRAIN_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
+        envKeys.forEach(k => {
+            if (!config.groqTrainKeys.includes(k)) config.groqTrainKeys.push(k);
+        });
+    }
+    config.groqTrainKeys = config.groqTrainKeys.filter(k => k && k.trim().length > 0);
 }
 
-function downloadURL(urlString, callback) {
-    const fetch = (targetUrl) => {
-        try {
-            const req = https.get(targetUrl, (res) => {
-                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                    // Follow redirects (like raw.githubusercontent.com)
-                    fetch(res.headers.location);
-                    return;
-                }
-                
-                if (res.statusCode !== 200) {
-                    console.error(`Failed to download ${targetUrl}, Status: ${res.statusCode}`);
-                    callback(null);
-                    return;
-                }
-                
-                let data = [];
-                res.on('data', chunk => data.push(chunk));
-                res.on('end', () => {
-                    callback(Buffer.concat(data).toString('utf8'));
-                });
-            });
-            
-            req.on('error', (err) => {
-                console.error(`Error downloading ${targetUrl}:`, err);
-                callback(null);
-            });
-            
-            req.end();
-        } catch (e) {
-            console.error(`Exception during download from ${targetUrl}:`, e);
-            callback(null);
+function saveConfig() {
+    try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+    } catch (e) {
+        console.error("Failed to save config:", e);
+    }
+}
+
+// Background latency measurements
+function buildQueryBufferForMeasure(domain) {
+    const header = Buffer.alloc(12);
+    header.writeUInt16BE(Math.floor(Math.random() * 65535), 0);
+    header.writeUInt16BE(0x0100, 2);
+    header.writeUInt16BE(1, 4);
+    
+    const parts = domain.split('.');
+    const buffers = [header];
+    parts.forEach(part => {
+        buffers.push(Buffer.from([part.length]));
+        buffers.push(Buffer.from(part, 'ascii'));
+    });
+    buffers.push(Buffer.from([0]));
+    buffers.push(Buffer.from([0, 1])); // Type A
+    buffers.push(Buffer.from([0, 1])); // Class IN
+    
+    return Buffer.concat(buffers);
+}
+
+function measureUpstreamLatency(ip) {
+    const queryBuffer = buildQueryBufferForMeasure("google.com");
+    const start = Date.now();
+    queryUpstream(queryBuffer, ip, (response) => {
+        const elapsed = Date.now() - start;
+        const server = config.upstreamPool.find(s => s.ip === ip);
+        if (server) {
+            if (response) {
+                server.latency = elapsed;
+                server.online = true;
+            } else {
+                server.latency = 9999;
+                server.online = false;
+            }
+            broadcastUpdate();
         }
-    };
-    
-    fetch(urlString);
+    });
 }
 
-function isValidDomain(domain) {
-    const domainRegEx = /^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,63}$/;
-    return domainRegEx.test(domain);
+function measureUpstreamPool() {
+    if (!config.upstreamPool || config.upstreamPool.length === 0) return;
+    config.upstreamPool.forEach(server => {
+        measureUpstreamLatency(server.ip);
+    });
 }
+
+// Startup Initialization
+loadConfig();
+loadAILearning();
+loadAICache();
+
+// Periodic Latency Checking
+setInterval(measureUpstreamPool, 30000);
+setTimeout(measureUpstreamPool, 3000); // Check shortly after start
+
+setTimeout(runStartupAITraining, 15000);
+
+// Raw body parser middleware for DNS binary payloads
+app.use((req, res, next) => {
+    const data = [];
+    req.on('data', chunk => data.push(chunk));
+    req.on('end', () => {
+        req.rawBody = Buffer.concat(data);
+        next();
+    });
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
-
 function handleDoH(queryData, clientIP, hostHeader, callback) {
     const startTime = Date.now();
-    
     const parsed = parseDNSQuery(queryData);
     if (!parsed) {
         callback(Buffer.alloc(0));
@@ -1731,7 +1289,6 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
     const originalDomain = parsed.domain;
     const qtype = parsed.qtype;
     
-    // Clean domain by removing local and host-header search suffixes
     let domain = originalDomain.trim().toLowerCase();
     if (hostHeader) {
         const host = hostHeader.toLowerCase().split(':')[0];
@@ -1750,60 +1307,76 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         }
     }
     
-    const isBlocked = shouldBlock(domain);
+    const targetDNS = selectUpstreamDNS(domain);
     
-    const completeQuery = (responseBuffer, fromCache = false, isBlockedQuery = false) => {
+    const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "") => {
         const latency = Date.now() - startTime;
         totalLatency += latency;
         latencyCount++;
         
-        // Log both clean and original domain for better transparency
         const logDomain = (domain !== originalDomain) ? `${domain} (${originalDomain})` : domain;
-        const source = isBlockedQuery ? "blocked" : (fromCache ? "cache" : "upstream");
-        logQuery(logDomain, isBlockedQuery, clientIP, source);
-        incrementStats(isBlockedQuery);
+        const source = isGslb ? "gslb" : (fromCache ? "cache" : "upstream");
+        const targetIP = isGslb ? gslbIPs : (fromCache ? "Local Cache" : targetDNS);
+        const category = aiDecisionCache.get(domain) || "General/Search";
+        
+        logQuery(logDomain, category, clientIP, targetIP, source);
+        config.stats.total += 1;
+        
+        let lastSaveTimeout = null;
+        if (!lastSaveTimeout) {
+            lastSaveTimeout = setTimeout(() => {
+                lastSaveTimeout = null;
+                saveConfig();
+            }, 5000);
+        }
         
         callback(responseBuffer);
         
-        // Trigger background AI Guard check for ALL domains (blocked or not, cached or not)
         if (config.aiEnabled && config.groqApiKeys && config.groqApiKeys.length > 0) {
             enqueueGroqCheck(domain);
         }
-        
-        // Trigger background AI training for new domains using dedicated training keys
         if (config.aiEnabled && config.groqTrainKeys && config.groqTrainKeys.length > 0) {
             enqueueDomainForTraining(domain);
         }
     };
     
-    if (isBlocked) {
-        const blockResponse = buildBlockResponse(queryData, parsed.questionEndOffset);
-        completeQuery(blockResponse, false, true);
-    } else {
-        // 1. Check local memory DNS Cache using originalDomain to ensure matching transaction name
-        const cachedResponse = checkCache(originalDomain, qtype);
-        if (cachedResponse) {
-            // Rewrite transaction ID
-            const clientResponse = Buffer.from(cachedResponse);
-            clientResponse[0] = queryData[0];
-            clientResponse[1] = queryData[1];
-            completeQuery(clientResponse, true, false);
-        } else {
-            // 2. Fetch using Upstream request coalescing
-            fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, config.upstreamDNS, (response) => {
-                if (response) {
-                    const ttl = extractTTL(response, parsed.questionEndOffset);
-                    setCache(originalDomain, qtype, response, ttl);
-                    completeQuery(response, false, false);
-                } else {
-                    completeQuery(Buffer.alloc(0), false, false);
-                }
-            });
+    // Check GSLB records (only Type A IPv4 queries)
+    if (qtype === 1 && config.gslbRecords && config.gslbRecords[domain]) {
+        const ips = config.gslbRecords[domain];
+        if (ips && ips.length > 0) {
+            const rotated = [...ips];
+            const first = rotated.shift();
+            rotated.push(first);
+            config.gslbRecords[domain] = rotated;
+            
+            const gslbResponse = buildGslbResponse(queryData, parsed.questionEndOffset, rotated);
+            completeQuery(gslbResponse, false, true, rotated.join(', '));
+            return;
         }
+    }
+    
+    // 1. Check local cache
+    const cachedResponse = checkCache(originalDomain, qtype);
+    if (cachedResponse) {
+        const clientResponse = Buffer.from(cachedResponse);
+        clientResponse[0] = queryData[0];
+        clientResponse[1] = queryData[1];
+        completeQuery(clientResponse, true, false);
+    } else {
+        // 2. Fetch from chosen upstream DNS
+        fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, targetDNS, (response) => {
+            if (response) {
+                const ttl = extractTTL(response, parsed.questionEndOffset);
+                setCache(originalDomain, qtype, response, ttl);
+                completeQuery(response, false, false);
+            } else {
+                completeQuery(Buffer.alloc(0), false, false);
+            }
+        });
     }
 }
 
-// DoH POST endpoint
+// POST endpoint for DoH
 app.post('/dns-query', (req, res) => {
     const clientIP = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || req.ip;
     const queryData = req.rawBody;
@@ -1811,7 +1384,6 @@ app.post('/dns-query', (req, res) => {
         res.status(400).send("Bad Request: Empty binary payload");
         return;
     }
-    
     handleDoH(queryData, clientIP, req.headers.host, (responseData) => {
         res.setHeader('Content-Type', 'application/dns-message');
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1819,7 +1391,7 @@ app.post('/dns-query', (req, res) => {
     });
 });
 
-// DoH GET endpoint
+// GET endpoint for DoH
 app.get('/dns-query', (req, res) => {
     const clientIP = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || req.ip;
     const dnsParam = req.query.dns;
@@ -1827,18 +1399,10 @@ app.get('/dns-query', (req, res) => {
         res.status(400).send("Bad Request: Missing 'dns' parameter");
         return;
     }
-    
-    // Decode base64url to Buffer
-    let base64 = dnsParam
-        .replace(/-/g, '+')
-        .replace(/_/g, '/');
+    let base64 = dnsParam.replace(/-/g, '+').replace(/_/g, '/');
     const mod = base64.length % 4;
-    if (mod > 0) {
-        base64 += "=".repeat(4 - mod);
-    }
-    
+    if (mod > 0) base64 += "=".repeat(4 - mod);
     const queryData = Buffer.from(base64, 'base64');
-    
     handleDoH(queryData, clientIP, req.headers.host, (responseData) => {
         res.setHeader('Content-Type', 'application/dns-message');
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1846,34 +1410,17 @@ app.get('/dns-query', (req, res) => {
     });
 });
 
-// MARK: - Dashboard Config and API Endpoints
-
+// MARK: - Dashboard API Endpoints
 app.get('/dns/config', (req, res) => {
-    const blocked = Array.from(customBlockedSet);
-    const whitelist = Array.from(whitelistSet);
-    const subscriptions = config.subscriptionURLs || [];
-    const upstream = config.upstreamDNS || "1.1.1.1";
-    const isUpdating = isUpdatingList;
-    
     const stats = {
         total: config.stats.total,
-        blocked: config.stats.blocked,
-        allowed: config.stats.allowed,
-        blockedPercent: config.stats.total > 0 ? (config.stats.blocked / config.stats.total * 100) : 0,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
         avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
-    
     res.json({
         running: true,
-        blocked: blocked,
-        blockedCount: customBlockedSet.size + subscriptionBlockedSet.size,
-        whitelist: whitelist,
-        subscriptions: subscriptions,
-        upstream: upstream,
         logs: logs,
         stats: stats,
-        isUpdating: isUpdating,
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
@@ -1883,153 +1430,112 @@ app.get('/dns/config', (req, res) => {
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
-        serverStatus: getServerStatus()
+        serverStatus: getServerStatus(),
+        
+        // Load Balancer fields
+        upstreamPool: config.upstreamPool || [],
+        lbAlgorithm: config.lbAlgorithm || "least-latency",
+        gslbRecords: config.gslbRecords || {},
+        aiCacheCount: aiDecisionCache.size
     });
 });
 
-app.post('/dns/block', (req, res) => {
-    const domain = req.query.domain;
-    if (domain) {
-        const d = domain.trim().toLowerCase();
-        if (d) {
-            customBlockedSet.add(d);
-            config.customBlockedDomains = Array.from(customBlockedSet);
-            saveConfig();
-            
-            // Teach the AI immediately (RL-Admin)
-            const exists = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
-            if (!exists) {
-                learnedExamples.push({ domain: d, blocked: true, reason: "Chặn thủ công (RL-Admin)" });
-                if (learnedExamples.length > 1000) learnedExamples.shift();
-                saveAILearning();
-            }
-            
-            broadcastUpdate();
-            res.send(`Blocked ${d}`);
-        } else {
-            res.status(400).send("Invalid Domain");
-        }
-    } else {
-        res.status(400).send("Missing domain parameter");
-    }
+// Upstream pool endpoints
+app.get('/dns/upstream/pool', (req, res) => {
+    res.json(config.upstreamPool || []);
 });
 
-app.post('/dns/unblock', (req, res) => {
-    const domain = req.query.domain;
-    if (domain) {
-        const d = domain.trim().toLowerCase();
-        customBlockedSet.delete(d);
-        config.customBlockedDomains = Array.from(customBlockedSet);
-        saveConfig();
-        broadcastUpdate();
-        res.send(`Unblocked ${d}`);
-    } else {
-        res.status(400).send("Missing domain parameter");
-    }
-});
-
-app.post('/dns/whitelist/add', (req, res) => {
-    const domain = req.query.domain;
-    if (domain) {
-        const d = domain.trim().toLowerCase();
-        if (d) {
-            whitelistSet.add(d);
-            config.whitelistDomains = Array.from(whitelistSet);
-            saveConfig();
-            
-            // Teach the AI immediately (RL-Admin)
-            const exists = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
-            if (!exists) {
-                learnedExamples.push({ domain: d, blocked: false, reason: "Tin cậy thủ công (RL-Admin)" });
-                if (learnedExamples.length > 1000) learnedExamples.shift();
-                saveAILearning();
-            }
-            
-            broadcastUpdate();
-            res.send(`Whitelisted ${d}`);
-        } else {
-            res.status(400).send("Invalid Domain");
-        }
-    } else {
-        res.status(400).send("Missing domain parameter");
-    }
-});
-
-app.post('/dns/whitelist/remove', (req, res) => {
-    const domain = req.query.domain;
-    if (domain) {
-        const d = domain.trim().toLowerCase();
-        whitelistSet.delete(d);
-        config.whitelistDomains = Array.from(whitelistSet);
-        saveConfig();
-        broadcastUpdate();
-        res.send(`Removed ${d} from Whitelist`);
-    } else {
-        res.status(400).send("Missing domain parameter");
-    }
-});
-
-app.post('/dns/sub/add', (req, res) => {
-    const url = req.query.url;
-    if (url) {
-        const trimmed = url.trim();
-        if (trimmed && !config.subscriptionURLs.includes(trimmed)) {
-            config.subscriptionURLs.push(trimmed);
-            saveConfig();
-            broadcastUpdate();
-            res.send("Subscription added");
-        } else {
-            res.status(400).send("Invalid or duplicate URL");
-        }
-    } else {
-        res.status(400).send("Missing url parameter");
-    }
-});
-
-app.post('/dns/sub/remove', (req, res) => {
-    const url = req.query.url;
-    if (url) {
-        const trimmed = url.trim();
-        config.subscriptionURLs = config.subscriptionURLs.filter(u => u !== trimmed);
-        saveConfig();
-        broadcastUpdate();
-        res.send("Subscription removed");
-    } else {
-        res.status(400).send("Missing url parameter");
-    }
-});
-
-app.post('/dns/sub/refresh', (req, res) => {
-    updateBlocklists(() => {
-        res.send("Refreshed");
-    });
-});
-
-app.post('/dns/upstream', (req, res) => {
+app.post('/dns/upstream/pool/add', (req, res) => {
     const ip = req.query.ip;
+    const name = req.query.name || "DNS Server";
+    if (!ip) return res.status(400).send("Missing ip parameter");
+    
+    config.upstreamPool = config.upstreamPool || [];
+    if (config.upstreamPool.some(s => s.ip === ip)) {
+        return res.status(400).send("IP already exists in pool");
+    }
+    
+    config.upstreamPool.push({ ip, name, latency: 0, online: true });
+    saveConfig();
+    measureUpstreamLatency(ip);
+    broadcastUpdate();
+    res.send(`Added ${ip} to pool`);
+});
+
+app.post('/dns/upstream/pool/remove', (req, res) => {
+    const ip = req.query.ip;
+    if (!ip) return res.status(400).send("Missing ip parameter");
+    
+    config.upstreamPool = (config.upstreamPool || []).filter(s => s.ip !== ip);
+    saveConfig();
+    broadcastUpdate();
+    res.send(`Removed ${ip} from pool`);
+});
+
+app.post('/dns/lb/algorithm', (req, res) => {
+    const algo = req.query.algo;
+    const validAlgos = ["round-robin", "least-latency", "random", "ai-routing"];
+    if (!algo || !validAlgos.includes(algo)) {
+        return res.status(400).send("Invalid algorithm");
+    }
+    config.lbAlgorithm = algo;
+    saveConfig();
+    broadcastUpdate();
+    res.send(`Updated LB algorithm to ${algo}`);
+});
+
+// GSLB endpoints
+app.get('/dns/gslb', (req, res) => {
+    res.json(config.gslbRecords || {});
+});
+
+app.post('/dns/gslb/add', (req, res) => {
+    const domain = req.query.domain;
+    const ip = req.query.ip;
+    if (!domain || !ip) return res.status(400).send("Missing domain or ip parameter");
+    
+    const d = domain.trim().toLowerCase();
+    const cleanIp = ip.trim();
+    
+    config.gslbRecords = config.gslbRecords || {};
+    config.gslbRecords[d] = config.gslbRecords[d] || [];
+    if (!config.gslbRecords[d].includes(cleanIp)) {
+        config.gslbRecords[d].push(cleanIp);
+    }
+    saveConfig();
+    broadcastUpdate();
+    res.send(`Added GSLB mapping: ${d} -> ${cleanIp}`);
+});
+
+app.post('/dns/gslb/remove', (req, res) => {
+    const domain = req.query.domain;
+    const ip = req.query.ip;
+    if (!domain) return res.status(400).send("Missing domain parameter");
+    
+    const d = domain.trim().toLowerCase();
+    config.gslbRecords = config.gslbRecords || {};
+    
     if (ip) {
-        const trimmed = ip.trim();
-        const ipRegEx = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
-        if (ipRegEx.test(trimmed)) {
-            config.upstreamDNS = trimmed;
-            saveConfig();
-            broadcastUpdate();
-            res.send("Upstream updated");
-        } else {
-            res.status(400).send("Invalid IP format");
+        const cleanIp = ip.trim();
+        if (config.gslbRecords[d]) {
+            config.gslbRecords[d] = config.gslbRecords[d].filter(x => x !== cleanIp);
+            if (config.gslbRecords[d].length === 0) {
+                delete config.gslbRecords[d];
+            }
         }
     } else {
-        res.status(400).send("Missing ip parameter");
+        delete config.gslbRecords[d];
     }
+    saveConfig();
+    broadcastUpdate();
+    res.send(`Removed GSLB mapping for ${d}`);
 });
 
 app.post('/dns/groq', (req, res) => {
     const enabled = req.query.enabled === 'true';
     const model = req.query.model || "llama-3.1-8b-instant";
-    
     config.aiEnabled = enabled;
     config.groqModel = model;
-    
     saveConfig();
     broadcastUpdate();
     if (enabled) {
@@ -2040,14 +1546,10 @@ app.post('/dns/groq', (req, res) => {
 
 app.post('/dns/groq/keys/add', (req, res) => {
     const key = req.query.key;
-    if (!key || !key.trim()) {
-        return res.status(400).json({ error: 'Missing key parameter' });
-    }
+    if (!key || !key.trim()) return res.status(400).json({ error: 'Missing key parameter' });
     const trimmedKey = key.trim();
     if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
-    if (config.groqApiKeys.includes(trimmedKey)) {
-        return res.status(400).json({ error: 'Key already exists' });
-    }
+    if (config.groqApiKeys.includes(trimmedKey)) return res.status(400).json({ error: 'Key already exists' });
     config.groqApiKeys.push(trimmedKey);
     saveConfig();
     broadcastUpdate();
@@ -2056,12 +1558,8 @@ app.post('/dns/groq/keys/add', (req, res) => {
 
 app.post('/dns/groq/keys/remove', (req, res) => {
     const index = parseInt(req.query.index, 10);
-    if (isNaN(index) || index < 0) {
-        return res.status(400).json({ error: 'Invalid index' });
-    }
-    if (!Array.isArray(config.groqApiKeys) || index >= config.groqApiKeys.length) {
-        return res.status(400).json({ error: 'Index out of range' });
-    }
+    if (isNaN(index) || index < 0) return res.status(400).json({ error: 'Invalid index' });
+    if (!Array.isArray(config.groqApiKeys) || index >= config.groqApiKeys.length) return res.status(400).json({ error: 'Index out of range' });
     config.groqApiKeys.splice(index, 1);
     saveConfig();
     broadcastUpdate();
@@ -2070,31 +1568,21 @@ app.post('/dns/groq/keys/remove', (req, res) => {
 
 app.post('/dns/groq/train-keys/add', (req, res) => {
     const key = req.query.key;
-    if (!key || !key.trim()) {
-        return res.status(400).json({ error: 'Missing key parameter' });
-    }
+    if (!key || !key.trim()) return res.status(400).json({ error: 'Missing key parameter' });
     const trimmedKey = key.trim();
     if (!Array.isArray(config.groqTrainKeys)) config.groqTrainKeys = [];
-    if (config.groqTrainKeys.includes(trimmedKey)) {
-        return res.status(400).json({ error: 'Key already exists' });
-    }
+    if (config.groqTrainKeys.includes(trimmedKey)) return res.status(400).json({ error: 'Key already exists' });
     config.groqTrainKeys.push(trimmedKey);
     saveConfig();
     broadcastUpdate();
-    if (config.aiEnabled) {
-        setTimeout(runStartupAITraining, 2000);
-    }
+    if (config.aiEnabled) setTimeout(runStartupAITraining, 2000);
     res.json({ count: config.groqTrainKeys.length });
 });
 
 app.post('/dns/groq/train-keys/remove', (req, res) => {
     const index = parseInt(req.query.index, 10);
-    if (isNaN(index) || index < 0) {
-        return res.status(400).json({ error: 'Invalid index' });
-    }
-    if (!Array.isArray(config.groqTrainKeys) || index >= config.groqTrainKeys.length) {
-        return res.status(400).json({ error: 'Index out of range' });
-    }
+    if (isNaN(index) || index < 0) return res.status(400).json({ error: 'Invalid index' });
+    if (!Array.isArray(config.groqTrainKeys) || index >= config.groqTrainKeys.length) return res.status(400).json({ error: 'Index out of range' });
     config.groqTrainKeys.splice(index, 1);
     saveConfig();
     broadcastUpdate();
@@ -2103,39 +1591,29 @@ app.post('/dns/groq/train-keys/remove', (req, res) => {
 
 function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
     if (modelIndex >= FALLBACK_MODELS.length) {
-        return res.status(500).json({ error: "Tất cả các mô hình Groq trong chuỗi đều bị quá tải (Rate Limit) hoặc gặp lỗi. Vui lòng thử lại sau." });
+        return res.status(500).json({ error: "Tất cả các mô hình Groq đều gặp lỗi. Vui lòng thử lại sau." });
     }
-    
     const model = FALLBACK_MODELS[modelIndex];
-    
-    // Select exactly 4 dynamic examples (2 blocked, 2 allowed) to keep prompt size small (~350 tokens) and prevent 429 TPM exhaustion
-    const blockedEx = learnedExamples.filter(ex => ex.blocked === true).slice(-2);
-    const allowedEx = learnedExamples.filter(ex => ex.blocked === false).slice(-2);
+    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-2);
+    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-2);
     const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        recentExamples.map(ex => `- ${ex.domain} -> {"blocked": ${ex.blocked}, "reason": "${ex.reason}"}`).join('\n');
+        recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Firewall security expert. Classify the domain name. Analyze if it is used for tracking, advertising, telemetry, phishing, malware, scam, or other harmful activities.\n\n" +
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert. Classify the domain name. Analyze if it belongs to security threats (ad/tracker/telemetry/scam/phishing), media/CDN streaming, general search/social portals, or API/app backend services.\n\n" +
                           "Strict Rules:\n" +
-                          "1. Block: trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
-                          "2. Allow: CDNs, media streams, API services, official app backends, static assets, and essential services (e.g. *.tiktokcdn.com, *.fbcdn.net, *.akamai.net are allowed CDNs; but log.tiktokv.com, graph.facebook.com/tr, ads.youtube.com are blocked trackers/ads).\n" +
-                          "3. Watch out for Typosquatting/Phishing: If the domain contains a famous brand (like techcombank, shopee, momo, mbcheck, apple-dns, bidv, vietcombank, sacombank, facebook) but looks suspicious or uses a cheap/non-standard TLD (like .cfd, .xyz, .cc, .top, .site, .icu, .vip, .win, .online, .tech, .click), block it.\n" +
-                          "4. Watch out for ad networks and trackers in Vietnam: e.g. admicro, eclick, adtima, ants, yomedia, ad.gonet.vn, and other telemetry/tracking subdomains.\n" +
-                          "5. Allow legitimate primary domains and their structural subdomains (e.g. static assets, images, logins) unless they are explicitly ad servers.\n" +
-                          "6. Respond in strict JSON: { \"blocked\": true/false, \"reason\": \"1-3 words in Vietnamese\" }." +
+                          "1. Category 'Security': trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
+                          "2. Category 'Media/CDN': CDNs, media streams, video streaming, images CDN, static assets.\n" +
+                          "3. Category 'General/Search': search engines, news portals, social networking main sites (not CDNs).\n" +
+                          "4. Category 'API/App': application backend services, transactional APIs, main backend services.\n" +
+                          "5. Respond in strict JSON: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"reason\": \"1-3 words in Vietnamese\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
         model: model,
         messages: [
-            {
-                role: "system",
-                content: systemContent
-            },
-            {
-                role: "user",
-                content: buildAIAnalysisContext(domain)
-            }
+            { role: "system", content: systemContent },
+            { role: "user", content: buildAIAnalysisContext(domain) }
         ],
         response_format: { type: "json_object" }
     });
@@ -2153,10 +1631,9 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
     };
     
     let fallbackCalled = false;
-    const triggerFallback = (reason) => {
+    const triggerFallback = () => {
         if (!fallbackCalled) {
             fallbackCalled = true;
-            console.warn(`[AI Test] Groq model ${model} failed for ${domain} (${reason}). Trying fallback...`);
             runTestWithFallback(domain, apiKey, res, modelIndex + 1);
         }
     };
@@ -2169,7 +1646,7 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
                 try {
                     const responseString = Buffer.concat(body).toString('utf8');
                     if (response.statusCode !== 200) {
-                        triggerFallback(`Status ${response.statusCode}: ${responseString}`);
+                        triggerFallback();
                         return;
                     }
                     const resData = JSON.parse(responseString);
@@ -2179,35 +1656,26 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
                         decision.modelUsed = model;
                         return res.json(decision);
                     } else {
-                        triggerFallback("Empty response content");
+                        triggerFallback();
                     }
                 } catch (e) {
-                    triggerFallback(`Parse error: ${e.message}`);
+                    triggerFallback();
                 }
             });
         });
-        
-        request.on('error', (e) => {
-            triggerFallback(`Request error: ${e.message}`);
-        });
-        
+        request.on('error', triggerFallback);
         request.write(postData);
         request.end();
     } catch (e) {
-        triggerFallback(`Exception: ${e.message}`);
+        triggerFallback();
     }
 }
 
 app.get('/dns/groq/test', (req, res) => {
     const domain = req.query.domain;
-    if (!domain) {
-        return res.status(400).json({ error: "Missing domain parameter" });
-    }
+    if (!domain) return res.status(400).json({ error: "Missing domain parameter" });
     const apiKey = getNextGroqKey();
-    if (!apiKey) {
-        return res.status(400).json({ error: "No API Keys configured. Add at least one Groq API Key." });
-    }
-    
+    if (!apiKey) return res.status(400).json({ error: "No API Keys configured." });
     runTestWithFallback(domain, apiKey, res, 0);
 });
 
@@ -2233,9 +1701,7 @@ app.post('/dns/ai/learning/clear', (req, res) => {
     totalTrainingProcessed = 0;
     broadcastUpdate();
     res.send("AI learning log reset to defaults.");
-    if (config.aiEnabled) {
-        setTimeout(runStartupAITraining, 1000);
-    }
+    if (config.aiEnabled) setTimeout(runStartupAITraining, 1000);
 });
 
 app.post('/dns/ai/cache/clear', (req, res) => {
@@ -2247,9 +1713,7 @@ app.post('/dns/ai/cache/clear', (req, res) => {
 
 app.post('/dns/ai/learning/sync', (req, res) => {
     try {
-        if (!req.rawBody || req.rawBody.length === 0) {
-            return res.status(400).send("Empty payload");
-        }
+        if (!req.rawBody || req.rawBody.length === 0) return res.status(400).send("Empty payload");
         const list = JSON.parse(req.rawBody.toString('utf8'));
         if (Array.isArray(list)) {
             list.forEach(item => {
@@ -2259,14 +1723,14 @@ app.post('/dns/ai/learning/sync', (req, res) => {
                     if (!exists) {
                         learnedExamples.push({
                             domain: item.domain.trim(),
-                            blocked: !!item.blocked,
-                            reason: item.reason || "Trí tuệ nhân tạo học ngầm"
+                            category: item.category || "General/Search",
+                            reason: item.reason || "Đồng bộ hóa"
                         });
                     }
                 }
             });
             if (learnedExamples.length > 1000) {
-                learnedExamples.splice(0, learnedExamples.length - 1000); // keep last 1000
+                learnedExamples.splice(0, learnedExamples.length - 1000);
             }
             saveAILearning();
             broadcastUpdate();
@@ -2279,7 +1743,7 @@ app.post('/dns/ai/learning/sync', (req, res) => {
 });
 
 app.post('/dns/stats/reset', (req, res) => {
-    config.stats = { total: 0, blocked: 0, allowed: 0, cacheHits: 0, cacheMisses: 0 };
+    config.stats = { total: 0, cacheHits: 0, cacheMisses: 0 };
     totalLatency = 0;
     latencyCount = 0;
     saveConfig();
@@ -2288,20 +1752,17 @@ app.post('/dns/stats/reset', (req, res) => {
 });
 
 app.post('/dns/toggle', (req, res) => {
-    // Persistent Cloud DNS server is always active
     res.json({ running: true });
 });
 
-// Graceful shutdown hooks to persist data immediately on exit
+// Graceful shutdown hooks
 function gracefulShutdown() {
     console.log("Shutting down. Saving config and caches...");
     if (lastLearningSaveTimeout) {
         clearTimeout(lastLearningSaveTimeout);
         try {
             fs.writeFileSync(AI_LEARNED_PATH, JSON.stringify(learnedExamples, null, 2), 'utf8');
-        } catch (e) {
-            console.error("Graceful shutdown failed to write AI learning examples:", e);
-        }
+        } catch (e) {}
     }
     if (lastCacheSaveTimeout) {
         clearTimeout(lastCacheSaveTimeout);
@@ -2311,15 +1772,11 @@ function gracefulShutdown() {
                 obj[k] = v;
             }
             fs.writeFileSync(AI_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
-        } catch (e) {
-            console.error("Graceful shutdown failed to write AI cache:", e);
-        }
+        } catch (e) {}
     }
     try {
         fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
-    } catch (e) {
-        console.error("Graceful shutdown failed to write config:", e);
-    }
+    } catch (e) {}
     process.exit(0);
 }
 
@@ -2328,5 +1785,5 @@ process.on('SIGINT', gracefulShutdown);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Render Cloud DNS Blocker running on port ${PORT}`);
+    console.log(`Render DNS Load Balancer & AI Router running on port ${PORT}`);
 });
