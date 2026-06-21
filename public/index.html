@@ -927,37 +927,51 @@
                 });
         }
 
+        function updateGroqKeysOnServer() {
+            return fetch('/dns/groq/keys/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(currentFullApiKeys)
+            }).then(res => {
+                if (res.ok) fetchConfig();
+            });
+        }
+
+        function updateGroqTrainKeysOnServer() {
+            return fetch('/dns/groq/train-keys/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(currentFullTrainKeys)
+            }).then(res => {
+                if (res.ok) fetchConfig();
+            });
+        }
+
         function addGroqKey() {
             const input = document.getElementById('newGroqKey');
             const key = input.value.trim();
             if (!key) return;
-            fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
-                .then(res => {
-                    if (res.ok) {
-                        showToast("Đã thêm API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
-                        
-                        if (!currentFullApiKeys.includes(key)) {
-                            currentFullApiKeys.push(key);
-                        }
-                        
-                        input.value = '';
-                        fetchConfig();
-                    } else showToast("API Key trùng lặp hoặc lỗi", "error");
-                });
+            
+            if (currentFullApiKeys.includes(key)) {
+                showToast("API Key đã tồn tại", "error");
+                return;
+            }
+            
+            currentFullApiKeys.push(key);
+            input.value = '';
+            
+            updateGroqKeysOnServer().then(() => {
+                showToast("Đã thêm API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
+            });
         }
 
         function removeGroqKey(idx) {
-            // Remove from buffer and localStorage immediately (Bấm xóa là mất)
             currentFullApiKeys.splice(idx, 1);
             localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
             
-            fetch(`/dns/groq/keys/remove?index=${idx}`, { method: 'POST' })
-                .then(res => {
-                    if (res.ok) {
-                        showToast("Đã xóa API Key");
-                        fetchConfig();
-                    }
-                });
+            updateGroqKeysOnServer().then(() => {
+                showToast("Đã xóa API Key");
+            });
         }
 
         function testGroqAI() {
@@ -1024,33 +1038,27 @@
             const input = document.getElementById('newGroqTrainKey');
             const key = input.value.trim();
             if (!key) return;
-            fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
-                .then(res => {
-                    if (res.ok) {
-                        showToast("Đã thêm Training API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
-                        
-                        if (!currentFullTrainKeys.includes(key)) {
-                            currentFullTrainKeys.push(key);
-                        }
-                        
-                        input.value = '';
-                        fetchConfig();
-                    } else showToast("Key trùng lặp hoặc lỗi", "error");
-                });
+            
+            if (currentFullTrainKeys.includes(key)) {
+                showToast("API Key đã tồn tại", "error");
+                return;
+            }
+            
+            currentFullTrainKeys.push(key);
+            input.value = '';
+            
+            updateGroqTrainKeysOnServer().then(() => {
+                showToast("Đã thêm Training API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
+            });
         }
 
         function removeGroqTrainKey(idx) {
-            // Remove from buffer and localStorage immediately (Bấm xóa là mất)
             currentFullTrainKeys.splice(idx, 1);
             localStorage.setItem('groq_train_keys', JSON.stringify(currentFullTrainKeys));
             
-            fetch(`/dns/groq/train-keys/remove?index=${idx}`, { method: 'POST' })
-                .then(res => {
-                    if (res.ok) {
-                        showToast("Đã xóa Training API Key");
-                        fetchConfig();
-                    }
-                });
+            updateGroqTrainKeysOnServer().then(() => {
+                showToast("Đã xóa Training API Key");
+            });
         }
 
         let isSyncingKeys = false;
@@ -1064,53 +1072,71 @@
                 isSyncingKeys = true;
                 showToast("Tự động khôi phục các API Keys từ trình duyệt của bạn...", "info");
                 
-                const tasks = [];
+                const promises = [];
                 if (needSyncApi) {
-                    currentFullApiKeys.forEach(key => {
-                        tasks.push(() => fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' }));
-                    });
+                    promises.push(
+                        fetch('/dns/groq/keys/update', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(currentFullApiKeys)
+                        })
+                    );
                 }
                 if (needSyncTrain) {
-                    currentFullTrainKeys.forEach(key => {
-                        tasks.push(() => fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' }));
-                    });
+                    promises.push(
+                        fetch('/dns/groq/train-keys/update', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(currentFullTrainKeys)
+                        })
+                    );
                 }
                 
-                const runTasks = (index) => {
-                    if (index >= tasks.length) {
+                Promise.all(promises)
+                    .then(() => {
                         isSyncingKeys = false;
                         showToast("Đã khôi phục thành công toàn bộ API Keys!");
                         fetchConfig();
-                        return;
-                    }
-                    tasks[index]()
-                        .then(() => runTasks(index + 1))
-                        .catch(() => {
-                            isSyncingKeys = false;
-                            showToast("Lỗi khi đồng bộ API Key #" + (index + 1), "error");
-                        });
-                };
-                runTasks(0);
+                    })
+                    .catch(() => {
+                        isSyncingKeys = false;
+                        showToast("Lỗi khi khôi phục API Keys", "error");
+                    });
             }
         }
 
-        // Websocket connection
-        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        const wsUrl = `${protocol}://${window.location.host}`;
-        const ws = new WebSocket(wsUrl);
-        
-        ws.onmessage = (event) => {
-            try {
-                const payload = JSON.parse(event.data);
-                if (payload.type === 'update') {
-                    dnsConfig = payload;
-                    updateUI();
-                    syncKeysWithServer();
+        // Websocket connection with auto-reconnect
+        let ws;
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${protocol}://${window.location.host}`;
+            ws = new WebSocket(wsUrl);
+            
+            ws.onmessage = (event) => {
+                try {
+                    const payload = JSON.parse(event.data);
+                    if (payload.type === 'update') {
+                        dnsConfig = payload;
+                        updateUI();
+                        syncKeysWithServer();
+                    }
+                } catch (e) {
+                    console.error("WS parse error:", e);
                 }
-            } catch (e) {
-                console.error("WS parse error:", e);
-            }
-        };
+            };
+            
+            ws.onclose = () => {
+                console.log("WebSocket connection closed. Reconnecting in 3 seconds...");
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            ws.onerror = (err) => {
+                console.error("WebSocket error:", err);
+                ws.close();
+            };
+        }
+
+        connectWebSocket();
 
         // Initial load
         fetchConfig();

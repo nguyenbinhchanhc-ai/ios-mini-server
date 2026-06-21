@@ -1967,51 +1967,42 @@ app.post('/dns/racing', (req, res) => {
     res.send("DNS Racing configuration updated");
 });
 
-app.post('/dns/groq/keys/add', (req, res) => {
-    const key = req.query.key;
-    if (!key || !key.trim()) return res.status(400).json({ error: 'Missing key parameter' });
-    const trimmedKey = key.trim();
-    if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
-    if (config.groqApiKeys.includes(trimmedKey)) return res.status(400).json({ error: 'Key already exists' });
-    config.groqApiKeys.push(trimmedKey);
-    saveConfig();
-    broadcastUpdate();
-    if (config.aiEnabled) runLiveGroqQueue();
-    res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
+app.post('/dns/groq/keys/update', (req, res) => {
+    try {
+        if (!req.rawBody || req.rawBody.length === 0) {
+            return res.status(400).send("Empty body");
+        }
+        const keys = JSON.parse(req.rawBody.toString('utf8'));
+        if (Array.isArray(keys)) {
+            config.groqApiKeys = keys.map(k => k.trim()).filter(k => k.length > 0);
+            saveConfig();
+            broadcastUpdate();
+            if (config.aiEnabled) runLiveGroqQueue();
+            return res.json({ count: config.groqApiKeys.length });
+        }
+    } catch(e) {
+        console.error("Failed to update groq keys:", e);
+    }
+    res.status(400).send("Invalid JSON payload");
 });
 
-app.post('/dns/groq/keys/remove', (req, res) => {
-    const index = parseInt(req.query.index, 10);
-    if (isNaN(index) || index < 0) return res.status(400).json({ error: 'Invalid index' });
-    if (!Array.isArray(config.groqApiKeys) || index >= config.groqApiKeys.length) return res.status(400).json({ error: 'Index out of range' });
-    config.groqApiKeys.splice(index, 1);
-    saveConfig();
-    broadcastUpdate();
-    if (config.aiEnabled) runLiveGroqQueue();
-    res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
-});
-
-app.post('/dns/groq/train-keys/add', (req, res) => {
-    const key = req.query.key;
-    if (!key || !key.trim()) return res.status(400).json({ error: 'Missing key parameter' });
-    const trimmedKey = key.trim();
-    if (!Array.isArray(config.groqTrainKeys)) config.groqTrainKeys = [];
-    if (config.groqTrainKeys.includes(trimmedKey)) return res.status(400).json({ error: 'Key already exists' });
-    config.groqTrainKeys.push(trimmedKey);
-    saveConfig();
-    broadcastUpdate();
-    if (config.aiEnabled) setTimeout(runStartupAITraining, 2000);
-    res.json({ count: config.groqTrainKeys.length });
-});
-
-app.post('/dns/groq/train-keys/remove', (req, res) => {
-    const index = parseInt(req.query.index, 10);
-    if (isNaN(index) || index < 0) return res.status(400).json({ error: 'Invalid index' });
-    if (!Array.isArray(config.groqTrainKeys) || index >= config.groqTrainKeys.length) return res.status(400).json({ error: 'Index out of range' });
-    config.groqTrainKeys.splice(index, 1);
-    saveConfig();
-    broadcastUpdate();
-    res.json({ count: config.groqTrainKeys.length });
+app.post('/dns/groq/train-keys/update', (req, res) => {
+    try {
+        if (!req.rawBody || req.rawBody.length === 0) {
+            return res.status(400).send("Empty body");
+        }
+        const keys = JSON.parse(req.rawBody.toString('utf8'));
+        if (Array.isArray(keys)) {
+            config.groqTrainKeys = keys.map(k => k.trim()).filter(k => k.length > 0);
+            saveConfig();
+            broadcastUpdate();
+            if (config.aiEnabled) setTimeout(runStartupAITraining, 2000);
+            return res.json({ count: config.groqTrainKeys.length });
+        }
+    } catch(e) {
+        console.error("Failed to update groq train keys:", e);
+    }
+    res.status(400).send("Invalid JSON payload");
 });
 
 function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
