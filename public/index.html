@@ -909,6 +909,7 @@
             // Save temporary keys in memory permanently to localStorage (Bấm lưu là lưu)
             localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
             localStorage.setItem('groq_train_keys', JSON.stringify(currentFullTrainKeys));
+            localStorage.setItem('ai_enabled', enabled ? 'true' : 'false');
             
             fetch(`/dns/groq?enabled=${enabled}`, { method: 'POST' })
                 .then(res => {
@@ -1067,13 +1068,16 @@
             
             const needSyncApi = dnsConfig && dnsConfig.groqApiKeysCount === 0 && currentFullApiKeys.length > 0;
             const needSyncTrain = dnsConfig && dnsConfig.groqTrainKeysCount === 0 && currentFullTrainKeys.length > 0;
+            const needSyncAI = dnsConfig && dnsConfig.aiEnabled === false && localStorage.getItem('ai_enabled') === 'true';
             
-            if (needSyncApi || needSyncTrain) {
+            if (needSyncApi || needSyncTrain || needSyncAI) {
                 isSyncingKeys = true;
-                showToast("Tự động khôi phục các API Keys từ trình duyệt của bạn...", "info");
                 
                 const promises = [];
+                let syncMsgs = [];
+                
                 if (needSyncApi) {
+                    syncMsgs.push("API Keys");
                     promises.push(
                         fetch('/dns/groq/keys/update', {
                             method: 'POST',
@@ -1083,6 +1087,7 @@
                     );
                 }
                 if (needSyncTrain) {
+                    syncMsgs.push("Training API Keys");
                     promises.push(
                         fetch('/dns/groq/train-keys/update', {
                             method: 'POST',
@@ -1091,16 +1096,24 @@
                         })
                     );
                 }
+                if (needSyncAI) {
+                    syncMsgs.push("Kích hoạt AI Router");
+                    promises.push(
+                        fetch('/dns/groq?enabled=true', { method: 'POST' })
+                    );
+                }
+                
+                showToast(`Tự động khôi phục ${syncMsgs.join(', ')} từ trình duyệt...`, "info");
                 
                 Promise.all(promises)
                     .then(() => {
                         isSyncingKeys = false;
-                        showToast("Đã khôi phục thành công toàn bộ API Keys!");
+                        showToast(`Đã khôi phục thành công: ${syncMsgs.join(', ')}!`);
                         fetchConfig();
                     })
                     .catch(() => {
                         isSyncingKeys = false;
-                        showToast("Lỗi khi khôi phục API Keys", "error");
+                        showToast("Lỗi khi khôi phục cấu hình AI/Keys", "error");
                     });
             }
         }
