@@ -579,6 +579,15 @@
     <script>
         const toastContainer = document.getElementById('toastContainer');
         let dnsConfig = {};
+        let currentFullApiKeys = [];
+        let currentFullTrainKeys = [];
+        try {
+            currentFullApiKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
+            currentFullTrainKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
+        } catch(e) {
+            currentFullApiKeys = [];
+            currentFullTrainKeys = [];
+        }
 
         function showToast(message, type = 'success') {
             const toast = document.createElement('div');
@@ -842,9 +851,14 @@
 
         function saveGroqConfig() {
             const enabled = document.getElementById('aiEnabled').checked;
+            
+            // Save temporary keys in memory permanently to localStorage (Bấm lưu là lưu)
+            localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
+            localStorage.setItem('groq_train_keys', JSON.stringify(currentFullTrainKeys));
+            
             fetch(`/dns/groq?enabled=${enabled}`, { method: 'POST' })
                 .then(res => {
-                    if (res.ok) showToast("Đã lưu cấu hình AI Router");
+                    if (res.ok) showToast("Đã lưu cấu hình AI Router và ghi nhớ API Keys!");
                     else showToast("Lưu thất bại", "error");
                 });
         }
@@ -866,15 +880,10 @@
             fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
                 .then(res => {
                     if (res.ok) {
-                        showToast("Đã thêm API Key thành công");
+                        showToast("Đã thêm API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
                         
-                        let localKeys = [];
-                        try {
-                            localKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
-                        } catch(e) {}
-                        if (!localKeys.includes(key)) {
-                            localKeys.push(key);
-                            localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
+                        if (!currentFullApiKeys.includes(key)) {
+                            currentFullApiKeys.push(key);
                         }
                         
                         input.value = '';
@@ -884,18 +893,14 @@
         }
 
         function removeGroqKey(idx) {
+            // Remove from buffer and localStorage immediately (Bấm xóa là mất)
+            currentFullApiKeys.splice(idx, 1);
+            localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
+            
             fetch(`/dns/groq/keys/remove?index=${idx}`, { method: 'POST' })
                 .then(res => {
                     if (res.ok) {
                         showToast("Đã xóa API Key");
-                        
-                        let localKeys = [];
-                        try {
-                            localKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
-                        } catch(e) {}
-                        localKeys.splice(idx, 1);
-                        localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
-                        
                         fetchConfig();
                     }
                 });
@@ -968,15 +973,10 @@
             fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
                 .then(res => {
                     if (res.ok) {
-                        showToast("Đã thêm Training API Key thành công");
+                        showToast("Đã thêm Training API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
                         
-                        let localKeys = [];
-                        try {
-                            localKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
-                        } catch(e) {}
-                        if (!localKeys.includes(key)) {
-                            localKeys.push(key);
-                            localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
+                        if (!currentFullTrainKeys.includes(key)) {
+                            currentFullTrainKeys.push(key);
                         }
                         
                         input.value = '';
@@ -986,18 +986,14 @@
         }
 
         function removeGroqTrainKey(idx) {
+            // Remove from buffer and localStorage immediately (Bấm xóa là mất)
+            currentFullTrainKeys.splice(idx, 1);
+            localStorage.setItem('groq_train_keys', JSON.stringify(currentFullTrainKeys));
+            
             fetch(`/dns/groq/train-keys/remove?index=${idx}`, { method: 'POST' })
                 .then(res => {
                     if (res.ok) {
                         showToast("Đã xóa Training API Key");
-                        
-                        let localKeys = [];
-                        try {
-                            localKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
-                        } catch(e) {}
-                        localKeys.splice(idx, 1);
-                        localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
-                        
                         fetchConfig();
                     }
                 });
@@ -1007,15 +1003,8 @@
         function syncKeysWithServer() {
             if (isSyncingKeys) return;
             
-            let localApiKeys = [];
-            let localTrainKeys = [];
-            try {
-                localApiKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
-                localTrainKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
-            } catch(e) {}
-            
-            const needSyncApi = dnsConfig && dnsConfig.groqApiKeysCount === 0 && localApiKeys.length > 0;
-            const needSyncTrain = dnsConfig && dnsConfig.groqTrainKeysCount === 0 && localTrainKeys.length > 0;
+            const needSyncApi = dnsConfig && dnsConfig.groqApiKeysCount === 0 && currentFullApiKeys.length > 0;
+            const needSyncTrain = dnsConfig && dnsConfig.groqTrainKeysCount === 0 && currentFullTrainKeys.length > 0;
             
             if (needSyncApi || needSyncTrain) {
                 isSyncingKeys = true;
@@ -1023,12 +1012,12 @@
                 
                 const tasks = [];
                 if (needSyncApi) {
-                    localApiKeys.forEach(key => {
+                    currentFullApiKeys.forEach(key => {
                         tasks.push(() => fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' }));
                     });
                 }
                 if (needSyncTrain) {
-                    localTrainKeys.forEach(key => {
+                    currentFullTrainKeys.forEach(key => {
                         tasks.push(() => fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' }));
                     });
                 }
