@@ -148,7 +148,8 @@ function saveAICache() {
 // Groq AI Guard Queue Variables
 const groqQueue = [];
 let activeGroqRequests = 0;
-const GROQ_CONCURRENCY_PER_KEY = 5;
+const GROQ_CONCURRENCY_PER_KEY = 1; // Max 1 concurrent request per key to prevent rate limiting
+const GROQ_MIN_GAP_PER_KEY_MS = 3000; // Minimum 3 seconds between requests on the same key
 let groqKeyIndex = 0;
 let isQueuePaused = false;
 let queueTimeoutId = null;
@@ -158,6 +159,7 @@ const FALLBACK_MODELS = [
 
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
 const activeRequestsPerKey = new Map(); // key -> number of active concurrent requests
+const lastRequestTimePerKey = new Map(); // key -> timestamp of last request sent
 
 function isKeyAvailable(key) {
     if (!key) return false;
@@ -165,6 +167,15 @@ function isKeyAvailable(key) {
     if (cooldownUntil && Date.now() < cooldownUntil) {
         return false;
     }
+    return true;
+}
+
+function isKeyReadyForRequest(key) {
+    if (!isKeyAvailable(key)) return false;
+    const activeCount = activeRequestsPerKey.get(key) || 0;
+    if (activeCount >= GROQ_CONCURRENCY_PER_KEY) return false;
+    const lastTime = lastRequestTimePerKey.get(key) || 0;
+    if (Date.now() - lastTime < GROQ_MIN_GAP_PER_KEY_MS) return false;
     return true;
 }
 
@@ -448,7 +459,7 @@ function runWorker(apiKey) {
         delete activeWorkers[apiKey];
         updateTrainingUIStatus();
         
-        const timeoutId = setTimeout(() => runWorker(apiKey), 15000);
+        const timeoutId = setTimeout(() => runWorker(apiKey), 20000);
         trainingWorkerTimeouts.push(timeoutId);
     });
 }
@@ -592,9 +603,12 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
-                        if (res.statusCode === 429 || res.statusCode === 401) {
-                            console.warn(`[AI Training] Key ${apiKey.substring(0, 8)}... error ${res.statusCode}. Cool down active for 60s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 60000);
+                        if (res.statusCode === 429) {
+                            console.warn(`[AI Training] Key ${apiKey.substring(0, 8)}... rate limited (429). Cool down for 90s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 90000);
+                        } else if (res.statusCode === 401) {
+                            console.warn(`[AI Training] Key ${apiKey.substring(0, 8)}... unauthorized (401). Cool down for 120s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 120000);
                         }
                         callback(false, null);
                         return;
@@ -1220,11 +1234,21 @@ function enqueueGroqCheck(domain) {
     aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
     
     groqQueue.push(d);
-    setTimeout(dispatchGroqQueue, 10);
+    scheduleNextDispatch();
 }
 
-// Live Queue Multi-Key Concurrency Workers
+// Live Queue Multi-Key Concurrency Workers with Rate Limiting Protection
 let dispatchIntervalId = null;
+let dispatchScheduled = false;
+
+function scheduleNextDispatch() {
+    if (dispatchScheduled) return;
+    dispatchScheduled = true;
+    setTimeout(() => {
+        dispatchScheduled = false;
+        dispatchGroqQueue();
+    }, 500);
+}
 
 function dispatchGroqQueue() {
     if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
@@ -1235,37 +1259,73 @@ function dispatchGroqQueue() {
     }
     
     const keys = config.groqApiKeys;
-    const maxConcurrency = GROQ_CONCURRENCY_PER_KEY;
-    let checkedCount = 0;
+    let dispatched = false;
+    let earliestRetryMs = Infinity;
     
-    while (checkedCount < keys.length && groqQueue.length > 0) {
-        const apiKey = keys[groqKeyIndex % keys.length];
-        groqKeyIndex = (groqKeyIndex + 1) % keys.length;
-        checkedCount++;
+    // Try each key exactly once in round-robin order
+    for (let i = 0; i < keys.length; i++) {
+        if (groqQueue.length === 0) break;
+        
+        const keyIdx = (groqKeyIndex + i) % keys.length;
+        const apiKey = keys[keyIdx];
         
         if (!isKeyAvailable(apiKey)) {
+            const cooldownUntil = keyCooldowns.get(apiKey) || 0;
+            const remaining = cooldownUntil - Date.now();
+            if (remaining > 0 && remaining < earliestRetryMs) {
+                earliestRetryMs = remaining;
+            }
             continue;
         }
         
         const activeCount = activeRequestsPerKey.get(apiKey) || 0;
-        if (activeCount < maxConcurrency) {
-            const domain = groqQueue.shift();
-            if (!domain) break;
-            
-            activeRequestsPerKey.set(apiKey, activeCount + 1);
-            activeGroqRequests++;
-            
-            checkDomainWithGroq(domain, apiKey, () => {
-                const currentActive = activeRequestsPerKey.get(apiKey) || 0;
-                activeRequestsPerKey.set(apiKey, Math.max(0, currentActive - 1));
-                activeGroqRequests = Math.max(0, activeGroqRequests - 1);
-                
-                setTimeout(dispatchGroqQueue, 10);
-            });
-            
-            // Dispatched, reset checkedCount to check all keys starting from the new index
-            checkedCount = 0;
+        if (activeCount >= GROQ_CONCURRENCY_PER_KEY) {
+            continue;
         }
+        
+        // Check minimum gap since last request on this key
+        const lastTime = lastRequestTimePerKey.get(apiKey) || 0;
+        const elapsed = Date.now() - lastTime;
+        if (elapsed < GROQ_MIN_GAP_PER_KEY_MS) {
+            const waitMs = GROQ_MIN_GAP_PER_KEY_MS - elapsed;
+            if (waitMs < earliestRetryMs) {
+                earliestRetryMs = waitMs;
+            }
+            continue;
+        }
+        
+        // This key is ready — dispatch one domain
+        const domain = groqQueue.shift();
+        if (!domain) break;
+        
+        groqKeyIndex = (keyIdx + 1) % keys.length;
+        activeRequestsPerKey.set(apiKey, activeCount + 1);
+        lastRequestTimePerKey.set(apiKey, Date.now());
+        activeGroqRequests++;
+        dispatched = true;
+        
+        const maskedKey = apiKey.substring(0, 8) + '...';
+        console.log(`[AI Dispatch] Sending ${domain} via ${maskedKey} (active: ${activeCount + 1}/${GROQ_CONCURRENCY_PER_KEY}, queue: ${groqQueue.length})`);
+        
+        checkDomainWithGroq(domain, apiKey, () => {
+            const currentActive = activeRequestsPerKey.get(apiKey) || 0;
+            activeRequestsPerKey.set(apiKey, Math.max(0, currentActive - 1));
+            activeGroqRequests = Math.max(0, activeGroqRequests - 1);
+            
+            // Schedule next dispatch after the minimum gap
+            scheduleNextDispatch();
+        });
+        
+        break; // Only dispatch one at a time, then re-schedule
+    }
+    
+    // If we dispatched one, schedule the next dispatch for the next available key
+    if (dispatched && groqQueue.length > 0) {
+        setTimeout(() => dispatchGroqQueue(), GROQ_MIN_GAP_PER_KEY_MS / Math.max(keys.length, 1));
+    } else if (!dispatched && groqQueue.length > 0 && earliestRetryMs < Infinity) {
+        // No key was ready, schedule retry when the earliest key becomes available
+        console.log(`[AI Dispatch] All keys busy/cooling. Retrying in ${Math.round(earliestRetryMs)}ms (queue: ${groqQueue.length})`);
+        setTimeout(() => dispatchGroqQueue(), Math.min(earliestRetryMs + 100, 10000));
     }
 }
 
@@ -1278,11 +1338,11 @@ function runLiveGroqQueue() {
         return;
     }
     
-    console.log(`[AI Live Queue] Initializing dispatch queue...`);
+    console.log(`[AI Live Queue] Initializing throttled dispatch queue (${config.groqApiKeys.length} keys, gap: ${GROQ_MIN_GAP_PER_KEY_MS}ms/key)...`);
     dispatchGroqQueue();
     
     if (!dispatchIntervalId) {
-        dispatchIntervalId = setInterval(dispatchGroqQueue, 5000);
+        dispatchIntervalId = setInterval(dispatchGroqQueue, 10000);
     }
 }
 
@@ -1511,9 +1571,22 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
-                        if (res.statusCode === 429 || res.statusCode === 401) {
-                            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... error ${res.statusCode}. Cool down active for 60s.`);
+                        if (res.statusCode === 429) {
+                            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... rate limited (429). Cool down for 60s.`);
                             keyCooldowns.set(apiKey, Date.now() + 60000);
+                            // Don't fallback to another model on rate limit, just re-queue the domain
+                            if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
+                            aiDecisionCache.delete(domain);
+                            if (callback) callback();
+                            return;
+                        }
+                        if (res.statusCode === 401) {
+                            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... unauthorized (401). Cool down for 120s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 120000);
+                            if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
+                            aiDecisionCache.delete(domain);
+                            if (callback) callback();
+                            return;
                         }
                         triggerFallback();
                         return;
