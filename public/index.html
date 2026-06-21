@@ -436,7 +436,10 @@
                     <select id="lbAlgoSelector" onchange="changeLbAlgorithm()" style="width: 100%; margin-top: 0.5rem; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem; font-weight: 500;">
                         <option value="least-latency">Least Latency (Nhanh nhất)</option>
                         <option value="round-robin">Round-Robin (Xoay vòng)</option>
+                        <option value="weighted-round-robin">Weighted Round-Robin (Trọng số trễ)</option>
                         <option value="ai-routing">AI Routing (Định tuyến AI)</option>
+                        <option value="failover">Failover (Dự phòng tuần tự)</option>
+                        <option value="all-racing">All-Racing (Đua tốc song song)</option>
                         <option value="random">Random (Ngẫu nhiên)</option>
                     </select>
                 </div>
@@ -578,6 +581,14 @@
                             </div>
                             <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; word-break: break-all;">
                                 <strong>Đang xử lý:</strong> <span id="aiTrainingActiveDomains" style="color: #a78bfa;">Không có</span>
+                            </div>
+                        </div>
+
+                        <!-- AI Training Stats Distribution -->
+                        <div id="aiTrainingStatsContainer" style="background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); padding: 1rem; border-radius: 14px; margin-bottom: 1rem; display: none;">
+                            <h5 style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; font-weight: 600;">Phân bố tên miền đã học</h5>
+                            <div style="display: flex; flex-direction: column; gap: 0.75rem;" id="aiTrainingStatsBars">
+                                <!-- Progress bars will be dynamically populated -->
                             </div>
                         </div>
 
@@ -743,6 +754,40 @@
                         </tr>
                     `;
                 }).join('');
+            }
+            
+            // AI Training Stats Update
+            const trStatsContainer = document.getElementById('aiTrainingStatsContainer');
+            const trStatsBars = document.getElementById('aiTrainingStatsBars');
+            if (dnsConfig.aiTrainingStats && dnsConfig.aiTrainingStats.totalTrained > 0) {
+                trStatsContainer.style.display = 'block';
+                const ts = dnsConfig.aiTrainingStats;
+                const total = ts.totalTrained;
+                
+                const categories = [
+                    { name: 'Security (Bảo mật/Chặn)', key: 'Security', color: '#f87171' },
+                    { name: 'Media/CDN (Truyền thông)', key: 'Media/CDN', color: '#c084fc' },
+                    { name: 'General/Search (Tìm kiếm)', key: 'General/Search', color: '#60a5fa' },
+                    { name: 'API/App (Ứng dụng/Mạng)', key: 'API/App', color: '#34d399' }
+                ];
+                
+                trStatsBars.innerHTML = categories.map(cat => {
+                    const count = ts.categories[cat.key] || 0;
+                    const pct = total > 0 ? ((count / total) * 100).toFixed(1) : 0;
+                    return `
+                        <div>
+                            <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 0.25rem;">
+                                <span>${cat.name}</span>
+                                <strong>${count} (${pct}%)</strong>
+                            </div>
+                            <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
+                                <div style="width: ${pct}%; height: 100%; background: ${cat.color}; border-radius: 10px; transition: width 0.5s ease;"></div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } else {
+                trStatsContainer.style.display = 'none';
             }
             
             // Upstream Pool List

@@ -259,6 +259,27 @@ function getServerStatus() {
     };
 }
 
+function getAITrainingStats() {
+    const stats = {
+        totalTrained: learnedExamples.length,
+        categories: {
+            "Security": 0,
+            "Media/CDN": 0,
+            "General/Search": 0,
+            "API/App": 0
+        }
+    };
+    learnedExamples.forEach(ex => {
+        const cat = ex.category || "General/Search";
+        if (stats.categories[cat] !== undefined) {
+            stats.categories[cat]++;
+        } else {
+            stats.categories[cat] = (stats.categories[cat] || 0) + 1;
+        }
+    });
+    return stats;
+}
+
 function getWSUpdatePayload() {
     const stats = {
         total: config.stats.total,
@@ -278,6 +299,7 @@ function getWSUpdatePayload() {
         groqTrainKeysCooldown: (config.groqTrainKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqTrainKeysCount: (config.groqTrainKeys || []).length,
         aiTrainingStatus: aiTrainingStatus,
+        aiTrainingStats: getAITrainingStats(),
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
@@ -534,9 +556,9 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
                           "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
                           "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
-                          "Strict Routing Logic Rules:\n" +
-                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to Quad9 (9.9.9.9) for security filtering. If Quad9 is OFFLINE or latency is extremely high (>300ms), fallback and route to OpenDNS (208.67.222.222) or Cloudflare (1.1.1.1).\n" +
-                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to Google (8.8.8.8) or Cloudflare (1.1.1.1) depending on which is faster (lower latency).\n" +
+                          "Dynamic Routing Rules:\n" +
+                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to a DNS server in the pool configured for security filtering (e.g. Quad9 (9.9.9.9) or any server containing 'Security', 'AdGuard', 'NextDNS', 'Quad9' in its name). If none is configured or is offline, route to the fastest stable server with fallback.\n" +
+                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to the fastest server among Cloudflare (1.1.1.1), Google (8.8.8.8), or any CDN-optimized or low-latency server in the pool.\n" +
                           "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
                           "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
                           examplesText;
@@ -899,10 +921,53 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     
     activeUpstreamQueries.set(key, [{ callback, originalIDBytes }]);
     
-    // Perform Racing
     const pool = config.upstreamPool || [];
-    const onlinePool = pool.filter(s => s.online !== false && s.ip !== upstreamDNS);
-    const sorted = [...onlinePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
+    const onlinePool = pool.filter(s => s.online !== false);
+    
+    // CUSTOM PATH: All-Racing algorithm queries all online servers concurrently
+    if (config.lbAlgorithm === "all-racing" && onlinePool.length > 1) {
+        let resolved = false;
+        let queriesActive = onlinePool.length;
+        
+        const onResponse = (response) => {
+            if (resolved) return;
+            
+            if (response) {
+                resolved = true;
+                const queue = activeUpstreamQueries.get(key) || [];
+                activeUpstreamQueries.delete(key);
+                
+                queue.forEach(item => {
+                    const clientResponse = Buffer.from(response);
+                    clientResponse[0] = item.originalIDBytes[0];
+                    clientResponse[1] = item.originalIDBytes[1];
+                    item.callback(clientResponse);
+                });
+            } else {
+                queriesActive--;
+                if (queriesActive === 0) {
+                    resolved = true;
+                    const queue = activeUpstreamQueries.get(key) || [];
+                    activeUpstreamQueries.delete(key);
+                    queue.forEach(item => item.callback(null));
+                }
+            }
+        };
+        
+        onlinePool.forEach(server => {
+            queryUpstream(queryData, server.ip, (res) => {
+                if (res && !resolved) {
+                    server.queryCount = (server.queryCount || 0) + 1;
+                }
+                onResponse(res);
+            }, true);
+        });
+        return;
+    }
+    
+    // Standard path with potential 2-server racing
+    const otherOnlinePool = onlinePool.filter(s => s.ip !== upstreamDNS);
+    const sorted = [...otherOnlinePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
     const secondUpstreamDNS = sorted.length > 0 ? sorted[0].ip : null;
     
     let resolved = false;
@@ -1005,6 +1070,37 @@ function selectUpstreamDNS(domain) {
         const server = activePool[selectUpstreamDNS.index % activePool.length];
         selectUpstreamDNS.index = (selectUpstreamDNS.index + 1) % activePool.length;
         return server.ip;
+    }
+    
+    if (algo === "weighted-round-robin") {
+        if (selectUpstreamDNS.wrrIndex === undefined) selectUpstreamDNS.wrrIndex = 0;
+        
+        let wrrList = [];
+        const pool = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
+        if (pool.length === 0) return activePool[0].ip;
+        
+        const minLat = Math.min(...pool.map(s => Math.max(s.latency || 5, 2)));
+        pool.forEach(s => {
+            const lat = Math.max(s.latency || 5, 2);
+            const weight = Math.max(1, Math.round((minLat / lat) * 10));
+            for (let i = 0; i < weight; i++) {
+                wrrList.push(s.ip);
+            }
+        });
+        
+        if (wrrList.length === 0) return activePool[0].ip;
+        const chosenIp = wrrList[selectUpstreamDNS.wrrIndex % wrrList.length];
+        selectUpstreamDNS.wrrIndex = (selectUpstreamDNS.wrrIndex + 1) % wrrList.length;
+        return chosenIp;
+    }
+    
+    if (algo === "failover") {
+        const s = activePool[0];
+        return s ? s.ip : "1.1.1.1";
+    }
+    
+    if (algo === "all-racing") {
+        return activePool[0].ip;
     }
     
     if (algo === "random") {
@@ -1342,9 +1438,9 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
                           "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
                           "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
-                          "Strict Routing Logic Rules:\n" +
-                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to Quad9 (9.9.9.9) for security filtering. If Quad9 is OFFLINE or latency is extremely high (>300ms), fallback and route to OpenDNS (208.67.222.222) or Cloudflare (1.1.1.1).\n" +
-                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to Google (8.8.8.8) or Cloudflare (1.1.1.1) depending on which is faster (lower latency).\n" +
+                          "Dynamic Routing Rules:\n" +
+                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to a DNS server in the pool configured for security filtering (e.g. Quad9 (9.9.9.9) or any server containing 'Security', 'AdGuard', 'NextDNS', 'Quad9' in its name). If none is configured or is offline, route to the fastest stable server with fallback.\n" +
+                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to the fastest server among Cloudflare (1.1.1.1), Google (8.8.8.8), or any CDN-optimized or low-latency server in the pool.\n" +
                           "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
                           "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
                           examplesText;
@@ -1838,6 +1934,7 @@ app.get('/dns/config', (req, res) => {
         groqTrainKeysCooldown: (config.groqTrainKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqTrainKeysCount: (config.groqTrainKeys || []).length,
         aiTrainingStatus: aiTrainingStatus,
+        aiTrainingStats: getAITrainingStats(),
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
         learnedExamples: learnedExamples,
@@ -1888,7 +1985,7 @@ app.post('/dns/upstream/pool/remove', (req, res) => {
 
 app.post('/dns/lb/algorithm', (req, res) => {
     const algo = req.query.algo;
-    const validAlgos = ["round-robin", "least-latency", "random", "ai-routing"];
+    const validAlgos = ["round-robin", "least-latency", "random", "ai-routing", "weighted-round-robin", "failover", "all-racing"];
     if (!algo || !validAlgos.includes(algo)) {
         return res.status(400).send("Invalid algorithm");
     }
@@ -2027,9 +2124,9 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
                           "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
                           "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
-                          "Strict Routing Logic Rules:\n" +
-                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to Quad9 (9.9.9.9) for security filtering. If Quad9 is OFFLINE or latency is extremely high (>300ms), fallback and route to OpenDNS (208.67.222.222) or Cloudflare (1.1.1.1).\n" +
-                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to Google (8.8.8.8) or Cloudflare (1.1.1.1) depending on which is faster (lower latency).\n" +
+                          "Dynamic Routing Rules:\n" +
+                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to a DNS server in the pool configured for security filtering (e.g. Quad9 (9.9.9.9) or any server containing 'Security', 'AdGuard', 'NextDNS', 'Quad9' in its name). If none is configured or is offline, route to the fastest stable server with fallback.\n" +
+                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to the fastest server among Cloudflare (1.1.1.1), Google (8.8.8.8), or any CDN-optimized or low-latency server in the pool.\n" +
                           "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
                           "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
                           examplesText;
