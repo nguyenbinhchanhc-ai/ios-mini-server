@@ -27,7 +27,7 @@
   ],
   "upstreamDNS": "1.1.1.1",
   "stats": {
-    "total": 0,
+    "total": 2,
     "blocked": 0,
     "allowed": 0,
     "cacheHits": 0,
@@ -36,5 +36,43 @@
   "aiEnabled": false,
   "groqModel": "llama-3.1-8b-instant",
   "groqApiKeys": [],
-  "groqTrainKeys": []
+  "groqTrainKeys": [],
+  "upstreamPool": [
+    {
+      "ip": "1.1.1.1",
+      "name": "Cloudflare",
+      "latency": 30,
+      "online": true,
+      "queryCount": 0
+    },
+    {
+      "ip": "8.8.8.8",
+      "name": "Google",
+      "latency": 62,
+      "online": true,
+      "queryCount": 0
+    },
+    {
+      "ip": "9.9.9.9",
+      "name": "Quad9",
+      "latency": 57,
+      "online": true,
+      "queryCount": 0
+    },
+    {
+      "ip": "208.67.222.222",
+      "name": "OpenDNS",
+      "latency": 24,
+      "online": true,
+      "queryCount": 0
+    }
+  ],
+  "lbAlgorithm": "least-latency",
+  "gslbRecords": {
+    "testgslb.local": [
+      "192.168.99.2"
+    ]
+  },
+  "dnsRacingEnabled": true,
+  "dnsRacingDelayMs": 15
 }

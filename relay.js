@@ -21,147 +21,25 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
-const AI_LEARNED_PATH = path.join(__dirname, 'ai_learned_examples.json');
-const AI_CACHE_PATH = path.join(__dirname, 'ai_decision_cache.json');
 
 // State variables
 let config = {};
 let logs = [];
 
-// AI Training State
-const aiTrainingStatus = {
-    isRunning: false,
-    totalCandidates: 0,
-    currentIndex: 0,
-    currentDomain: null,
-    currentKey: null,
-    trainedList: []
-};
-
-let trainingQueue = [];
-let totalTrainingEnqueued = 0;
-let totalTrainingProcessed = 0;
-
 // WebSocket client registry
 const wsClients = new Set();
-
-// AI Learned Examples (Few-Shot In-context training)
-let learnedExamples = [];
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
 const MAX_CACHE_SIZE = 15000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
-const aiDecisionCache = new Map(); // Key: domain, Value: category string or JSON string
 
-// Load/Save functions for AI persistence
-function loadAILearning() {
-    try {
-        if (fs.existsSync(AI_LEARNED_PATH)) {
-            const data = fs.readFileSync(AI_LEARNED_PATH, 'utf8');
-            const list = JSON.parse(data);
-            if (Array.isArray(list)) {
-                learnedExamples.length = 0;
-                list.forEach(ex => {
-                    if (ex && typeof ex.domain === 'string') {
-                        learnedExamples.push({
-                            domain: ex.domain,
-                            category: ex.category || "General/Search",
-                            reason: ex.reason || "Phân loại chung"
-                        });
-                    }
-                });
-                console.log(`Loaded ${learnedExamples.length} AI learned examples.`);
-                return;
-            }
-        }
-    } catch (e) {
-        console.error("Failed to load AI learned examples:", e);
-    }
-    seedDefaultAILearning();
-}
-
-function seedDefaultAILearning() {
-    const defaults = [
-        { domain: "doubleclick.net", category: "Security", reason: "Mạng quảng cáo" },
-        { domain: "log.tiktokv.com", category: "Security", reason: "Theo dõi hành vi" },
-        { domain: "google-analytics.com", category: "Security", reason: "Thống kê phân tích" },
-        { domain: "techcombank-verify.cfd", category: "Security", reason: "Giả mạo ngân hàng" },
-        { domain: "youtube.com", category: "Media/CDN", reason: "Xem video trực tuyến" },
-        { domain: "v3.tiktokcdn.com", category: "Media/CDN", reason: "CDN Video TikTok" },
-        { domain: "google.com", category: "General/Search", reason: "Tìm kiếm Google" },
-        { domain: "wikipedia.org", category: "General/Search", reason: "Bách khoa toàn thư" },
-        { domain: "api.facebook.com", category: "API/App", reason: "Cổng API Facebook" },
-        { domain: "momo.vn", category: "API/App", reason: "Cổng dịch vụ Momo" }
-    ];
-    learnedExamples.length = 0;
-    defaults.forEach(d => learnedExamples.push(d));
-    saveAILearning();
-}
-
-let lastLearningSaveTimeout = null;
-function saveAILearning() {
-    if (lastLearningSaveTimeout) return;
-    lastLearningSaveTimeout = setTimeout(() => {
-        lastLearningSaveTimeout = null;
-        try {
-            fs.writeFileSync(AI_LEARNED_PATH, JSON.stringify(learnedExamples, null, 2), 'utf8');
-        } catch (e) {
-            console.error("Failed to save AI learned examples:", e);
-        }
-    }, 2000);
-}
-
-function loadAICache() {
-    try {
-        if (fs.existsSync(AI_CACHE_PATH)) {
-            const data = fs.readFileSync(AI_CACHE_PATH, 'utf8');
-            const obj = JSON.parse(data);
-            aiDecisionCache.clear();
-            for (const [k, v] of Object.entries(obj)) {
-                aiDecisionCache.set(k, String(v));
-            }
-            console.log(`Loaded ${aiDecisionCache.size} domains in AI decision cache.`);
-        }
-    } catch (e) {
-        console.error("Failed to load AI decision cache:", e);
-    }
-}
-
-let lastCacheSaveTimeout = null;
-function saveAICache() {
-    if (lastCacheSaveTimeout) return;
-    lastCacheSaveTimeout = setTimeout(() => {
-        lastCacheSaveTimeout = null;
-        try {
-            const obj = {};
-            for (const [k, v] of aiDecisionCache.entries()) {
-                obj[k] = v;
-            }
-            fs.writeFileSync(AI_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
-        } catch (e) {
-            console.error("Failed to save AI decision cache:", e);
-        }
-    }, 5000);
-}
-
-// Groq AI Guard Queue Variables
-const groqQueue = [];
-let activeGroqRequests = 0;
-const GROQ_CONCURRENCY_PER_KEY = 1; // Max 1 concurrent request per key to prevent rate limiting
-const GROQ_MIN_GAP_PER_KEY_MS = 15000; // Minimum 15 seconds between requests on the SAME key
-const GROQ_GLOBAL_MIN_GAP_MS = 4000; // Minimum 4 seconds between ANY two Groq requests (~15 req/min max)
+// AI Load Balancer Brain State
+let aiLoadBalancerTimeout = null;
+let isAILBRunning = false;
+const AI_LB_INTERVAL_MS = 60000; // Run every 60 seconds
 let groqKeyIndex = 0;
-let isQueuePaused = false;
-let queueTimeoutId = null;
-const FALLBACK_MODELS = [
-    "llama-3.1-8b-instant"
-];
-
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
-const activeRequestsPerKey = new Map(); // key -> number of active concurrent requests
-const lastRequestTimePerKey = new Map(); // key -> timestamp of last request sent
-let lastGlobalGroqRequestTime = 0; // timestamp of last Groq request sent (any key)
 
 function isKeyAvailable(key) {
     if (!key) return false;
@@ -169,15 +47,6 @@ function isKeyAvailable(key) {
     if (cooldownUntil && Date.now() < cooldownUntil) {
         return false;
     }
-    return true;
-}
-
-function isKeyReadyForRequest(key) {
-    if (!isKeyAvailable(key)) return false;
-    const activeCount = activeRequestsPerKey.get(key) || 0;
-    if (activeCount >= GROQ_CONCURRENCY_PER_KEY) return false;
-    const lastTime = lastRequestTimePerKey.get(key) || 0;
-    if (Date.now() - lastTime < GROQ_MIN_GAP_PER_KEY_MS) return false;
     return true;
 }
 
@@ -273,27 +142,6 @@ function getServerStatus() {
     };
 }
 
-function getAITrainingStats() {
-    const stats = {
-        totalTrained: learnedExamples.length,
-        categories: {
-            "Security": 0,
-            "Media/CDN": 0,
-            "General/Search": 0,
-            "API/App": 0
-        }
-    };
-    learnedExamples.forEach(ex => {
-        const cat = ex.category || "General/Search";
-        if (stats.categories[cat] !== undefined) {
-            stats.categories[cat]++;
-        } else {
-            stats.categories[cat] = (stats.categories[cat] || 0) + 1;
-        }
-    });
-    return stats;
-}
-
 function getWSUpdatePayload() {
     const stats = {
         total: config.stats.total,
@@ -309,18 +157,13 @@ function getWSUpdatePayload() {
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCooldown: (config.groqApiKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqTrainKeys: (config.groqTrainKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
-        groqTrainKeysCooldown: (config.groqTrainKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
-        groqTrainKeysCount: (config.groqTrainKeys || []).length,
-        aiTrainingStatus: aiTrainingStatus,
-        aiTrainingStats: getAITrainingStats(),
         groqModel: config.groqModel || "llama-3.1-8b-instant",
-        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
-        learnedExamples: learnedExamples,
-        aiCacheCount: aiDecisionCache.size,
-        aiQueueLength: groqQueue.length,
-        activeGroqRequests: activeGroqRequests,
         serverStatus: getServerStatus(),
+        
+        // AI Load Balancer Brain fields
+        isAILBRunning: isAILBRunning,
+        aiLBReason: config.aiLBReason || "Chưa có phân tích tải nào.",
+        lastAiLBTime: config.lastAiLBTime || 0,
         
         // Load Balancer fields
         upstreamPool: config.upstreamPool || [],
@@ -331,324 +174,7 @@ function getWSUpdatePayload() {
     };
 }
 
-let trainingWorkerTimeouts = [];
-let activeWorkers = {};
 
-function runStartupAITraining() {
-    if (!config.aiEnabled || !config.groqTrainKeys || config.groqTrainKeys.length === 0) {
-        aiTrainingStatus.isRunning = false;
-        aiTrainingStatus.currentDomain = null;
-        aiTrainingStatus.currentKey = null;
-        broadcastUpdate();
-        return;
-    }
-    
-    console.log(`[AI Training] Starting background training loop using ${config.groqTrainKeys.length} parallel workers...`);
-    
-    const staticCandidates = [
-        "ads.tiktok.com", "analytics.google.com", "ads.youtube.com", "pixel.facebook.com",
-        "telemetry.microsoft.com", "stats.g.doubleclick.net", "adserver.admicro.vn", "ad.adtima.vn",
-        "scam-banking-verify.xyz", "vietcombank-login-online.cc", "momo-nhan-qua.top",
-        "shopee-gift-lucky.site", "eclick.vn", "ants.vn", "yomedia.vn", "ad.gonet.vn",
-        "api-auth.mbbank.cc", "shopee-tri-an.xyz", "mbcheck-banking.info", "adservice.google.com.vn"
-    ];
-    
-    // Seed queue with static candidates if it's completely fresh
-    if (trainingQueue.length === 0 && totalTrainingEnqueued === 0) {
-        staticCandidates.forEach(domain => {
-            const d = domain.trim().toLowerCase();
-            const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
-            if (!alreadyLearned) {
-                trainingQueue.push(d);
-                totalTrainingEnqueued++;
-            }
-        });
-    }
-    
-    aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
-    
-    // Clear any existing workers
-    trainingWorkerTimeouts.forEach(clearTimeout);
-    trainingWorkerTimeouts = [];
-    activeWorkers = {};
-    
-    // Start a worker loop for each key
-    config.groqTrainKeys.forEach((apiKey, idx) => {
-        const startDelay = idx * 1500; 
-        const timeoutId = setTimeout(() => {
-            runWorker(apiKey);
-        }, startDelay);
-        trainingWorkerTimeouts.push(timeoutId);
-    });
-}
-
-function runWorker(apiKey) {
-    if (!config.aiEnabled || !config.groqTrainKeys || !config.groqTrainKeys.includes(apiKey)) {
-        delete activeWorkers[apiKey];
-        updateTrainingUIStatus();
-        return;
-    }
-    
-    if (!isKeyAvailable(apiKey)) {
-        delete activeWorkers[apiKey];
-        updateTrainingUIStatus();
-        const timeoutId = setTimeout(() => runWorker(apiKey), 5000);
-        trainingWorkerTimeouts.push(timeoutId);
-        return;
-    }
-    
-    if (trainingQueue.length === 0) {
-        delete activeWorkers[apiKey];
-        updateTrainingUIStatus();
-        const timeoutId = setTimeout(() => runWorker(apiKey), 3000);
-        trainingWorkerTimeouts.push(timeoutId);
-        return;
-    }
-    
-    const domain = trainingQueue.shift();
-    totalTrainingProcessed++;
-    
-    aiTrainingStatus.currentIndex = totalTrainingProcessed;
-    aiTrainingStatus.totalCandidates = totalTrainingEnqueued;
-    
-    const learnedItem = learnedExamples.find(ex => ex.domain.toLowerCase() === domain.toLowerCase());
-    if (learnedItem) {
-        const now = new Date();
-        const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-        const timeStr = vnTime.toISOString().substring(11, 19);
-        
-        aiTrainingStatus.trainedList.unshift({
-            domain: domain,
-            keyUsed: "N/A (Đã lưu bộ nhớ)",
-            time: timeStr,
-            success: true,
-            category: learnedItem.category || "General/Search",
-            reason: `Đã phân loại (${learnedItem.reason || learnedItem.category})`
-        });
-        if (aiTrainingStatus.trainedList.length > 50) {
-            aiTrainingStatus.trainedList.pop();
-        }
-        
-        throttledBroadcastUpdate();
-        const timeoutId = setTimeout(() => runWorker(apiKey), 100);
-        trainingWorkerTimeouts.push(timeoutId);
-        return;
-    }
-    
-    activeWorkers[apiKey] = domain;
-    updateTrainingUIStatus();
-    
-    const maskedKey = apiKey.substring(0, 8) + '...' + apiKey.substring(apiKey.length - 4);
-    console.log(`[AI Training Worker] Training domain: ${domain} using key: ${maskedKey}...`);
-    
-    checkDomainWithGroqForTraining(domain, apiKey, (success, decision) => {
-        const now = new Date();
-        const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-        const timeStr = vnTime.toISOString().substring(11, 19);
-        
-        aiTrainingStatus.trainedList.unshift({
-            domain: domain,
-            keyUsed: maskedKey,
-            time: timeStr,
-            success: success,
-            category: decision ? decision.category : "General/Search",
-            reason: decision ? decision.reason : "Lỗi kết nối"
-        });
-        if (aiTrainingStatus.trainedList.length > 50) {
-            aiTrainingStatus.trainedList.pop();
-        }
-        
-        delete activeWorkers[apiKey];
-        updateTrainingUIStatus();
-        
-        const timeoutId = setTimeout(() => runWorker(apiKey), 20000);
-        trainingWorkerTimeouts.push(timeoutId);
-    });
-}
-
-function updateTrainingUIStatus() {
-    const activeKeys = Object.keys(activeWorkers);
-    if (activeKeys.length > 0) {
-        aiTrainingStatus.isRunning = true;
-        aiTrainingStatus.currentDomain = activeKeys.map(k => activeWorkers[k]).join(' | ');
-        aiTrainingStatus.currentKey = activeKeys.map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)).join(' | ');
-    } else {
-        aiTrainingStatus.currentDomain = null;
-        aiTrainingStatus.currentKey = null;
-        if (trainingQueue.length === 0) {
-            aiTrainingStatus.isRunning = false;
-        }
-    }
-    throttledBroadcastUpdate();
-}
-
-function onDomainClassified(domain) {
-    const d = domain.trim().toLowerCase();
-    const gIdx = groqQueue.indexOf(d);
-    if (gIdx !== -1) {
-        groqQueue.splice(gIdx, 1);
-        console.log(`[Deduplication] Removed ${d} from Live Queue.`);
-    }
-    const tIdx = trainingQueue.indexOf(d);
-    if (tIdx !== -1) {
-        trainingQueue.splice(tIdx, 1);
-        console.log(`[Deduplication] Removed ${d} from Training Queue.`);
-    }
-}
-
-function enqueueDomainForTraining(domain) {
-    const d = domain.trim().toLowerCase();
-    if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
-    if (d.endsWith('.local') || d.endsWith('.localhost')) return;
-    if (isSafeDomain(d)) return;
-    
-    const alreadyLearned = learnedExamples.some(ex => ex.domain.toLowerCase() === d);
-    if (alreadyLearned) return;
-    
-    if (trainingQueue.includes(d)) return;
-    if (groqQueue.includes(d)) return;
-    if (aiDecisionCache.has(d)) return;
-    
-    console.log(`[AI Training] Enqueuing domain for real-time training: ${d}`);
-    trainingQueue.unshift(d);
-    totalTrainingEnqueued++;
-    
-    if (!aiTrainingStatus.isRunning) {
-        runStartupAITraining();
-    }
-}
-
-function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContext = null) {
-    if (process.env.MOCK_GROQ === 'true' || apiKey.startsWith('gsk_train')) {
-        setTimeout(() => {
-            let category = "General/Search";
-            if (domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry') || domain.includes('bank') || domain.includes('pay') || domain.includes('verify')) {
-                category = "Security";
-            } else if (domain.includes('cdn') || domain.includes('media') || domain.includes('video') || domain.includes('stream') || domain.includes('youtube') || domain.includes('tiktok')) {
-                category = "Media/CDN";
-            }
-            
-            let targetIP = "1.1.1.1";
-            if (category === "Security") targetIP = "9.9.9.9";
-            else if (category === "Media/CDN") targetIP = "8.8.8.8";
-            else {
-                const sorted = [...(config.upstreamPool || [])].sort((a,b) => (a.latency || 0) - (b.latency || 0));
-                if (sorted.length > 0) targetIP = sorted[0].ip;
-            }
-            
-            const decision = {
-                category: category,
-                targetIP: targetIP,
-                reason: category === "Security" ? "Bảo mật định tuyến" : (category === "Media/CDN" ? "Tối ưu hóa CDN" : "Định tuyến Least-Latency")
-            };
-            const cacheVal = JSON.stringify({ category, targetIP });
-            aiDecisionCache.set(domain, cacheVal);
-            saveAICache();
-            learnedExamples.push({ domain, category, reason: decision.reason });
-            if (learnedExamples.length > 1000) learnedExamples.shift();
-            saveAILearning();
-            onDomainClassified(domain);
-            callback(true, decision);
-        }, 6000);
-        return;
-    }
-
-    if (internetContext === null) {
-        gatherInternetContext(domain).then((context) => {
-            checkDomainWithGroqForTraining(domain, apiKey, callback, context);
-        });
-        return;
-    }
-    
-    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-3);
-    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-3);
-    const recentExamples = [...blockedEx, ...allowedEx];
-    const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
-
-    const poolContext = getUpstreamPoolPromptContext();
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
-                          "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
-                          "Dynamic Routing Rules:\n" +
-                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to a DNS server in the pool configured for security filtering (e.g. Quad9 (9.9.9.9) or any server containing 'Security', 'AdGuard', 'NextDNS', 'Quad9' in its name). If none is configured or is offline, route to the fastest stable server with fallback.\n" +
-                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to the fastest server among Cloudflare (1.1.1.1), Google (8.8.8.8), or any CDN-optimized or low-latency server in the pool.\n" +
-                          "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
-                          "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
-                          examplesText;
-
-    const postData = JSON.stringify({
-        model: "llama-3.1-8b-instant",
-        messages: [
-            { role: "system", content: systemContent },
-            { role: "user", content: buildAIAnalysisContext(domain, internetContext) }
-        ],
-        response_format: { type: "json_object" }
-    });
-    
-    const options = {
-        hostname: 'api.groq.com',
-        port: 443,
-        path: '/openai/v1/chat/completions',
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Length': Buffer.byteLength(postData)
-        }
-    };
-    
-    try {
-        const req = https.request(options, (res) => {
-            let body = [];
-            res.on('data', chunk => body.push(chunk));
-            res.on('end', () => {
-                try {
-                    if (res.statusCode !== 200) {
-                        if (res.statusCode === 429) {
-                            console.warn(`[AI Training] Key ${apiKey.substring(0, 8)}... rate limited (429). Cool down for 90s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 90000);
-                        } else if (res.statusCode === 401) {
-                            console.warn(`[AI Training] Key ${apiKey.substring(0, 8)}... unauthorized (401). Cool down for 120s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 120000);
-                        }
-                        callback(false, null);
-                        return;
-                    }
-                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
-                    const replyStr = resData.choices?.[0]?.message?.content;
-                    if (replyStr) {
-                        const decision = JSON.parse(replyStr);
-                        const category = decision.category || "General/Search";
-                        const targetIP = decision.targetIP || "1.1.1.1";
-                        const cacheVal = JSON.stringify({ category, targetIP });
-                        aiDecisionCache.set(domain, cacheVal);
-                        saveAICache();
-                        
-                        learnedExamples.push({ domain, category, reason: decision.reason || "Huấn luyện AI" });
-                        if (learnedExamples.length > 1000) learnedExamples.shift();
-                        saveAILearning();
-                        onDomainClassified(domain);
-                        callback(true, decision);
-                    } else {
-                        callback(false, null);
-                    }
-                } catch (e) {
-                    callback(false, null);
-                }
-            });
-        });
-        
-        req.on('error', () => {
-            callback(false, null);
-        });
-        
-        req.write(postData);
-        req.end();
-    } catch (e) {
-        callback(false, null);
-    }
-}
 
 // Local DNS Cache with prefetching
 function checkCache(domain, qtype) {
@@ -1044,10 +570,192 @@ function getNextGroqKey() {
     return key;
 }
 
-function getMaxConcurrentGroq() {
-    const keys = config.groqApiKeys;
-    if (!keys || keys.length === 0) return 0;
-    return keys.length * GROQ_CONCURRENCY_PER_KEY;
+// AI Load Balancer Brain implementation
+function runAILoadBalancerBrain() {
+    if (aiLoadBalancerTimeout) {
+        clearTimeout(aiLoadBalancerTimeout);
+        aiLoadBalancerTimeout = null;
+    }
+    
+    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
+        isAILBRunning = false;
+        broadcastUpdate();
+        // Check again in 10s if it gets enabled
+        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 10000);
+        return;
+    }
+    
+    isAILBRunning = true;
+    const apiKey = getNextGroqKey();
+    if (!apiKey) {
+        console.warn("[AI LB Brain] No API keys available (all cooling down or none set). Retrying in 15s.");
+        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
+        return;
+    }
+    
+    console.log(`[AI LB Brain] Triggering analysis using API Key: ${apiKey.substring(0, 8)}...`);
+    
+    const pool = config.upstreamPool || [];
+    const onlinePool = pool.filter(s => s.online !== false);
+    
+    if (onlinePool.length === 0) {
+        console.log("[AI LB Brain] No online DNS servers in pool. Skipping analysis.");
+        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 30000);
+        return;
+    }
+    
+    // Construct the pool status context for the prompt
+    const poolStatusContext = pool.map(s => {
+        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
+    }).join('\n');
+    
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers.\n\n" +
+                          "Instructions:\n" +
+                          "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
+                          "2. Distribute weights (from 0 to 100, relative weights or percentages summing up to 100) such that faster servers (with lower RTT latencies) receive a higher proportion of the traffic, while slower or degraded servers receive a very low proportion. Be aggressive with assigning more weight to lower latency servers to optimize user speed.\n" +
+                          "3. If a server has high latency (e.g. > 300ms) or is unstable, assign a weight of 0 or close to 0.\n" +
+                          "4. Keep the output clean and return a strict JSON response containing:\n" +
+                          "   - \"weights\": An object mapping each server IP to its assigned weight (integer).\n" +
+                          "   - \"reason\": A brief Vietnamese explanation (10-15 words) of your distribution rationale.\n\n" +
+                          "JSON response format:\n" +
+                          "{\n" +
+                          "  \"weights\": {\n" +
+                          "    \"1.1.1.1\": 60,\n" +
+                          "    \"8.8.8.8\": 30,\n" +
+                          "    \"9.9.9.9\": 10,\n" +
+                          "    \"208.67.222.222\": 0\n" +
+                          "  },\n" +
+                          "  \"reason\": \"Giải thích lý do phân bổ trọng số dựa trên độ trễ\"\n" +
+                          "}";
+                          
+    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
+    
+    const postData = JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        messages: [
+            { role: "system", content: systemContent },
+            { role: "user", content: userContent }
+        ],
+        response_format: { type: "json_object" }
+    });
+    
+    const options = {
+        hostname: 'api.groq.com',
+        port: 443,
+        path: '/openai/v1/chat/completions',
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Length': Buffer.byteLength(postData)
+        }
+    };
+    
+    try {
+        const req = https.request(options, (res) => {
+            let body = [];
+            res.on('data', chunk => body.push(chunk));
+            res.on('end', () => {
+                try {
+                    if (res.statusCode !== 200) {
+                        if (res.statusCode === 429) {
+                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429). Cooling down for 90s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 90000);
+                        } else if (res.statusCode === 401) {
+                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized (401). Cooling down for 120s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 120000);
+                        } else {
+                            console.warn(`[AI LB Brain] Groq API returned status code ${res.statusCode}`);
+                        }
+                        // Retry shortly with next key
+                        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 10000);
+                        return;
+                    }
+                    
+                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
+                    const replyStr = resData.choices?.[0]?.message?.content;
+                    if (replyStr) {
+                        const decision = JSON.parse(replyStr);
+                        const weights = decision.weights || {};
+                        const reason = decision.reason || "Cân bằng tải AI";
+                        
+                        console.log(`[AI LB Brain] Weight recommendation received:`, weights);
+                        console.log(`[AI LB Brain] Rationale: ${reason}`);
+                        
+                        // Update config
+                        pool.forEach(server => {
+                            if (weights[server.ip] !== undefined) {
+                                server.aiWeight = Math.max(0, parseInt(weights[server.ip], 10) || 0);
+                            } else {
+                                // Default fallback weight for online or missing
+                                server.aiWeight = server.online !== false ? 10 : 0;
+                            }
+                        });
+                        
+                        config.aiLBReason = reason;
+                        config.lastAiLBTime = Date.now();
+                        saveConfig();
+                        
+                        // Log locally
+                        const now = new Date();
+                        const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+                        const timeStr = vnTime.toISOString().substring(11, 19);
+                        const statusMessage = `[${timeStr}] [AI BRAIN] Phân phối tải: ` + 
+                            pool.map(s => `${s.name}: ${s.aiWeight || 0}%`).join(', ') + ` - ${reason}`;
+                        
+                        logs.push(statusMessage);
+                        if (logs.length > 100) logs.shift();
+                        
+                        broadcastUpdate();
+                    }
+                    
+                    // Run next analysis after interval
+                    aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, AI_LB_INTERVAL_MS);
+                } catch (e) {
+                    console.error("[AI LB Brain] Error parsing response body:", e);
+                    aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
+                }
+            });
+        });
+        
+        req.on('error', (err) => {
+            console.error("[AI LB Brain] HTTP request error:", err);
+            aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
+        });
+        
+        req.write(postData);
+        req.end();
+    } catch (e) {
+        console.error("[AI LB Brain] Execution error:", e);
+        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
+    }
+}
+
+function selectAIWeightedDNS(activePool) {
+    const pool = activePool.filter(s => s.online !== false);
+    if (pool.length === 0) return "1.1.1.1";
+    if (pool.length === 1) return pool[0].ip;
+    
+    let totalWeight = 0;
+    const items = pool.map(s => {
+        const weight = typeof s.aiWeight === 'number' ? s.aiWeight : 10;
+        totalWeight += weight;
+        return { ip: s.ip, weight };
+    });
+    
+    if (totalWeight <= 0) {
+        return selectWeightedDNS(pool);
+    }
+    
+    let rand = Math.random() * totalWeight;
+    for (const item of items) {
+        rand -= item.weight;
+        if (rand <= 0) {
+            return item.ip;
+        }
+    }
+    return items[0].ip;
 }
 
 // Probability-weighted selector (Inverse Latency Squared)
@@ -1129,531 +837,16 @@ function selectUpstreamDNS(domain) {
         return activePool[idx].ip;
     }
     
-    if (algo === "ai-routing" && config.aiEnabled) {
-        const cacheVal = aiDecisionCache.get(domain);
-        if (cacheVal) {
-            try {
-                if (cacheVal.startsWith('{')) {
-                    const parsed = JSON.parse(cacheVal);
-                    if (parsed && parsed.targetIP) {
-                        const s = activePool.find(x => x.ip === parsed.targetIP);
-                        if (s && s.online !== false) return s.ip;
-                    }
-                }
-            } catch(e) {}
-        }
-    }
-    
-    // Default: least-latency (Weighted Random based on inverse latency squared)
-    return selectWeightedDNS(activePool);
-}
-
-// Famous safe networks
-const SAFE_DOMAINS_SUFFIXES = [
-    ".google.com", ".googleapis.com", ".gstatic.com", ".googleusercontent.com",
-    ".apple.com", ".icloud.com", ".mzstatic.com", ".apple-dns.net", ".itunes.com",
-    ".microsoft.com", ".windows.com", ".live.com", ".office.com", ".msn.com",
-    ".cloudflare.com", ".facebook.com", ".fbcdn.net", ".instagram.com",
-    ".youtube.com", ".ytimg.com", ".ggpht.com", ".github.com"
-];
-
-function isSafeDomain(domain) {
-    const d = domain.trim().toLowerCase();
-    const exactMatches = ["google.com", "apple.com", "microsoft.com", "cloudflare.com", "facebook.com", "youtube.com"];
-    if (exactMatches.includes(d)) return true;
-    for (const suffix of SAFE_DOMAINS_SUFFIXES) {
-        if (d.endsWith(suffix)) return true;
-    }
-    return false;
-}
-
-// Heuristics Fast-Path Rules
-function getFastPathCategory(domain) {
-    const d = domain.trim().toLowerCase();
-    
-    if (d.includes('cdn') || d.includes('static') || d.includes('image') || d.includes('media') || 
-        d.includes('video') || d.includes('stream') || d.includes('fbcdn') || d.includes('tiktokcdn') ||
-        d.includes('akamai') || d.includes('cloudfront') || d.includes('fastly') || d.includes('ytimg') ||
-        d.endsWith('.png') || d.endsWith('.jpg') || d.endsWith('.mp4') || d.endsWith('.mp3')) {
-        return "Media/CDN";
-    }
-    
-    if (d.includes('api') || d.includes('auth') || d.includes('login') || d.includes('service') ||
-        d.includes('oauth') || d.includes('backend') || d.includes('sign-in') || d.endsWith('signup')) {
-        return "API/App";
-    }
-    
-    if (d.includes('ad') || d.includes('track') || d.includes('telemetry') || d.includes('analytic') ||
-        d.includes('doubleclick') || d.includes('pixel') || d.includes('scam') || d.includes('phish') ||
-        d.includes('fake') || d.includes('verify')) {
-        return "Security";
-    }
-    
-    return null;
-}
-
-function enqueueGroqCheck(domain) {
-    const d = domain.trim().toLowerCase();
-    if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
-    if (d.endsWith('.local') || d.endsWith('.localhost')) return;
-    if (aiDecisionCache.has(d)) return;
-    
-    // 1. Fast-Path Heuristic Check
-    const fastPath = getFastPathCategory(d);
-    if (fastPath) {
-        let targetIP = "1.1.1.1";
-        if (fastPath === "Security") targetIP = "9.9.9.9";
-        else if (fastPath === "Media/CDN") targetIP = "8.8.8.8";
-        else {
-            const sorted = [...(config.upstreamPool || [])].sort((a,b) => (a.latency || 0) - (b.latency || 0));
-            if (sorted.length > 0) targetIP = sorted[0].ip;
-        }
-        aiDecisionCache.set(d, JSON.stringify({ category: fastPath, targetIP }));
-        saveAICache();
-        return;
-    }
-    
-    // 2. Safe domains check
-    if (isSafeDomain(d)) {
-        aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
-        saveAICache();
-        return;
-    }
-    
-    if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
-    
-    // Promotion & Deduplication:
-    // If domain is already in trainingQueue, promote it to Live Queue since a real query just hit it!
-    if (trainingQueue.includes(d)) {
-        const tIdx = trainingQueue.indexOf(d);
-        if (tIdx !== -1) {
-            trainingQueue.splice(tIdx, 1);
-            console.log(`[Promotion] Promoted ${d} from Training Queue to Live Queue due to active user query.`);
-        }
-    }
-    if (groqQueue.includes(d)) return;
-    
-    aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
-    
-    groqQueue.push(d);
-    scheduleNextDispatch();
-}
-
-// Live Queue with Global Rate Limiting Protection
-// Maximum ~15 requests/minute total across ALL keys to prevent Groq rate limits
-let dispatchIntervalId = null;
-let dispatchTimerId = null;
-
-function scheduleNextDispatch() {
-    if (dispatchTimerId) return; // Already scheduled
-    
-    // Calculate how long to wait before next dispatch
-    const globalElapsed = Date.now() - lastGlobalGroqRequestTime;
-    const waitMs = Math.max(0, GROQ_GLOBAL_MIN_GAP_MS - globalElapsed);
-    
-    dispatchTimerId = setTimeout(() => {
-        dispatchTimerId = null;
-        dispatchGroqQueue();
-    }, Math.max(waitMs, 500));
-}
-
-function dispatchGroqQueue() {
-    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
-        return;
-    }
-    if (groqQueue.length === 0 || isQueuePaused) {
-        return;
-    }
-    
-    // Enforce global minimum gap
-    const globalElapsed = Date.now() - lastGlobalGroqRequestTime;
-    if (globalElapsed < GROQ_GLOBAL_MIN_GAP_MS) {
-        const waitMs = GROQ_GLOBAL_MIN_GAP_MS - globalElapsed + 100;
-        if (!dispatchTimerId) {
-            dispatchTimerId = setTimeout(() => {
-                dispatchTimerId = null;
-                dispatchGroqQueue();
-            }, waitMs);
-        }
-        return;
-    }
-    
-    const keys = config.groqApiKeys;
-    let earliestRetryMs = Infinity;
-    
-    // Find ONE ready key in round-robin order
-    for (let i = 0; i < keys.length; i++) {
-        if (groqQueue.length === 0) break;
-        
-        const keyIdx = (groqKeyIndex + i) % keys.length;
-        const apiKey = keys[keyIdx];
-        
-        if (!isKeyAvailable(apiKey)) {
-            const cooldownUntil = keyCooldowns.get(apiKey) || 0;
-            const remaining = cooldownUntil - Date.now();
-            if (remaining > 0 && remaining < earliestRetryMs) {
-                earliestRetryMs = remaining;
-            }
-            continue;
-        }
-        
-        const activeCount = activeRequestsPerKey.get(apiKey) || 0;
-        if (activeCount >= GROQ_CONCURRENCY_PER_KEY) {
-            continue;
-        }
-        
-        // Check per-key minimum gap
-        const lastTime = lastRequestTimePerKey.get(apiKey) || 0;
-        const elapsed = Date.now() - lastTime;
-        if (elapsed < GROQ_MIN_GAP_PER_KEY_MS) {
-            const waitMs = GROQ_MIN_GAP_PER_KEY_MS - elapsed;
-            if (waitMs < earliestRetryMs) {
-                earliestRetryMs = waitMs;
-            }
-            continue;
-        }
-        
-        // This key is ready — dispatch ONE domain
-        const domain = groqQueue.shift();
-        if (!domain) break;
-        
-        groqKeyIndex = (keyIdx + 1) % keys.length;
-        activeRequestsPerKey.set(apiKey, activeCount + 1);
-        lastRequestTimePerKey.set(apiKey, Date.now());
-        lastGlobalGroqRequestTime = Date.now();
-        activeGroqRequests++;
-        
-        const maskedKey = apiKey.substring(0, 8) + '...';
-        console.log(`[AI Dispatch] Sending ${domain} via ${maskedKey} (queue: ${groqQueue.length})`);
-        
-        checkDomainWithGroq(domain, apiKey, () => {
-            const currentActive = activeRequestsPerKey.get(apiKey) || 0;
-            activeRequestsPerKey.set(apiKey, Math.max(0, currentActive - 1));
-            activeGroqRequests = Math.max(0, activeGroqRequests - 1);
-            
-            // Schedule next dispatch respecting global gap
-            if (groqQueue.length > 0) {
-                scheduleNextDispatch();
-            }
-        });
-        
-        // Dispatched one — schedule the NEXT one after global gap
-        if (groqQueue.length > 0) {
-            scheduleNextDispatch();
-        }
-        return; // Only dispatch one at a time
-    }
-    
-    // No key was ready — schedule retry
-    if (groqQueue.length > 0 && earliestRetryMs < Infinity) {
-        console.log(`[AI Dispatch] All keys busy/cooling. Retrying in ${Math.round(earliestRetryMs / 1000)}s (queue: ${groqQueue.length})`);
-        if (!dispatchTimerId) {
-            dispatchTimerId = setTimeout(() => {
-                dispatchTimerId = null;
-                dispatchGroqQueue();
-            }, Math.min(earliestRetryMs + 500, 30000));
-        }
-    }
-}
-
-function runLiveGroqQueue() {
-    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
-        if (dispatchIntervalId) {
-            clearInterval(dispatchIntervalId);
-            dispatchIntervalId = null;
-        }
-        return;
-    }
-    
-    console.log(`[AI Live Queue] Initializing throttled dispatch (${config.groqApiKeys.length} keys, global gap: ${GROQ_GLOBAL_MIN_GAP_MS}ms, per-key gap: ${GROQ_MIN_GAP_PER_KEY_MS}ms)...`);
-    scheduleNextDispatch();
-    
-    // Safety net: periodically check if dispatch stalled
-    if (!dispatchIntervalId) {
-        dispatchIntervalId = setInterval(() => {
-            if (groqQueue.length > 0 && !dispatchTimerId) {
-                scheduleNextDispatch();
-            }
-        }, 30000);
-    }
-}
-
-function gatherInternetContext(domain) {
-    return new Promise((resolve) => {
-        const result = {
-            resolvedIPs: [],
-            resolvedCNAMEs: [],
-            resolvedNSs: [],
-            httpStatus: null,
-            serverHeader: null,
-            contentType: null,
-            htmlTitle: null,
-            error: null
-        };
-        const dns = require('dns');
-        
-        let pending = 3;
-        const checkDone = () => {
-            pending--;
-            if (pending === 0) {
-                probeHTTP();
-            }
-        };
-        
-        dns.resolve4(domain, (err, addresses) => {
-            if (!err && addresses) {
-                result.resolvedIPs = addresses.slice(0, 3);
-            }
-            checkDone();
-        });
-        
-        dns.resolveCname(domain, (err, addresses) => {
-            if (!err && addresses) {
-                result.resolvedCNAMEs = addresses.slice(0, 3);
-            }
-            checkDone();
-        });
-        
-        dns.resolveNs(domain, (err, addresses) => {
-            if (!err && addresses) {
-                result.resolvedNSs = addresses.slice(0, 3);
-            }
-            checkDone();
-        });
-        
-        function probeHTTP() {
-            const http = require('http');
-            const url = `http://${domain}/`;
-            let reqFinished = false;
-            const req = http.get(url, { timeout: 1200 }, (res) => {
-                reqFinished = true;
-                result.httpStatus = res.statusCode;
-                result.serverHeader = res.headers['server'] || null;
-                result.contentType = res.headers['content-type'] || null;
-                let data = '';
-                res.on('data', chunk => {
-                    data += chunk.toString('utf8');
-                    if (data.length > 2000) res.destroy();
-                });
-                res.on('end', () => {
-                    const match = data.match(/<title>([^<]+)<\/title>/i);
-                    if (match && match[1]) result.htmlTitle = match[1].trim();
-                    resolve(result);
-                });
-            });
-            req.on('error', (err) => {
-                reqFinished = true;
-                result.error = err.code || err.message;
-                resolve(result);
-            });
-            req.on('timeout', () => {
-                if (!reqFinished) {
-                    req.destroy();
-                    result.error = "TIMEOUT";
-                    resolve(result);
-                }
-            });
-        }
-    });
-}
-
-function buildAIAnalysisContext(domain, internetContext = null) {
-    const d = domain.trim().toLowerCase();
-    const parts = d.split('.');
-    const tld = parts[parts.length - 1];
-    let prompt = `Domain to analyze: ${domain}\nTLD: .${tld}\n`;
-    if (internetContext) {
-        prompt += `Live Probe Data:\n- IPs: ${JSON.stringify(internetContext.resolvedIPs)}\n`;
-        if (internetContext.resolvedCNAMEs && internetContext.resolvedCNAMEs.length > 0) {
-            prompt += `- CNAMEs: ${JSON.stringify(internetContext.resolvedCNAMEs)}\n`;
-        }
-        if (internetContext.resolvedNSs && internetContext.resolvedNSs.length > 0) {
-            prompt += `- Name Servers (NS): ${JSON.stringify(internetContext.resolvedNSs)}\n`;
-        }
-        prompt += `- HTTP: ${internetContext.httpStatus}, Server: ${internetContext.serverHeader}, Title: "${internetContext.htmlTitle || 'N/A'}"\n- Error: ${internetContext.error || 'None'}\n`;
-    }
-    return prompt;
-}
-
-function getUpstreamPoolPromptContext() {
-    const pool = config.upstreamPool || [];
-    return pool.map(s => `- ${s.name} (${s.ip}): latency ${s.latency || 0}ms, status: ${s.online !== false ? 'ONLINE' : 'OFFLINE'}`).join('\n');
-}
-
-function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetContext = null) {
-    if (process.env.MOCK_GROQ === 'true' || apiKey.startsWith('gsk_mock')) {
-        setTimeout(() => {
-            let category = "General/Search";
-            if (domain.includes('ad') || domain.includes('track') || domain.includes('pixel') || domain.includes('telemetry') || domain.includes('bank') || domain.includes('pay') || domain.includes('verify')) {
-                category = "Security";
-            } else if (domain.includes('cdn') || domain.includes('media') || domain.includes('video') || domain.includes('stream') || domain.includes('youtube') || domain.includes('tiktok')) {
-                category = "Media/CDN";
-            }
-            
-            let targetIP = "1.1.1.1";
-            if (category === "Security") targetIP = "9.9.9.9";
-            else if (category === "Media/CDN") targetIP = "8.8.8.8";
-            else {
-                const sorted = [...(config.upstreamPool || [])].sort((a,b) => (a.latency || 0) - (b.latency || 0));
-                if (sorted.length > 0) targetIP = sorted[0].ip;
-            }
-            
-            const cacheVal = JSON.stringify({ category, targetIP });
-            aiDecisionCache.set(domain, cacheVal);
-            saveAICache();
-            learnedExamples.push({ domain, category, reason: "Phân loại giả lập" });
-            if (learnedExamples.length > 1000) learnedExamples.shift();
-            saveAILearning();
-            logQuery(domain, category, "System", "Local Cache", "cache");
-            onDomainClassified(domain);
-            if (callback) callback();
-        }, 1000);
-        return;
-    }
-
-    if (internetContext === null) {
-        gatherInternetContext(domain).then((context) => {
-            checkDomainWithGroq(domain, apiKey, callback, modelIndex, context);
-        });
-        return;
-    }
-    
-    if (!apiKey) {
-        aiDecisionCache.delete(domain);
-        if (callback) callback();
-        return;
-    }
-    
-    if (modelIndex >= FALLBACK_MODELS.length) {
-        keyCooldowns.set(apiKey, Date.now() + 60000);
-        
-        const keys = config.groqApiKeys || [];
-        const availableKeys = keys.filter(isKeyAvailable);
-        
-        if (availableKeys.length === 0) {
-            isQueuePaused = true;
-            console.warn(`[AI Live] All API keys are on cooldown. Pausing queue for 60 seconds.`);
-            if (queueTimeoutId) clearTimeout(queueTimeoutId);
-            queueTimeoutId = setTimeout(() => {
-                isQueuePaused = false;
-                queueTimeoutId = null;
-                dispatchGroqQueue();
-            }, 60000);
+    if (algo === "ai-routing") {
+        if (config.aiEnabled) {
+            return selectAIWeightedDNS(activePool);
         } else {
-            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... failed all models. Cooldown active. Remaining available keys: ${availableKeys.length}`);
+            return selectWeightedDNS(activePool);
         }
-        
-        if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
-        aiDecisionCache.delete(domain);
-        if (callback) callback();
-        return;
     }
     
-    const model = FALLBACK_MODELS[modelIndex];
-    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-3);
-    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-3);
-    const recentExamples = [...blockedEx, ...allowedEx];
-    const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
-
-    const poolContext = getUpstreamPoolPromptContext();
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
-                          "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
-                          "Dynamic Routing Rules:\n" +
-                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to a DNS server in the pool configured for security filtering (e.g. Quad9 (9.9.9.9) or any server containing 'Security', 'AdGuard', 'NextDNS', 'Quad9' in its name). If none is configured or is offline, route to the fastest stable server with fallback.\n" +
-                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to the fastest server among Cloudflare (1.1.1.1), Google (8.8.8.8), or any CDN-optimized or low-latency server in the pool.\n" +
-                          "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
-                          "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
-                          examplesText;
-
-    const postData = JSON.stringify({
-        model: model,
-        messages: [
-            { role: "system", content: systemContent },
-            { role: "user", content: buildAIAnalysisContext(domain, internetContext) }
-        ],
-        response_format: { type: "json_object" }
-    });
-    
-    const options = {
-        hostname: 'api.groq.com',
-        port: 443,
-        path: '/openai/v1/chat/completions',
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Length': Buffer.byteLength(postData)
-        }
-    };
-    
-    let fallbackCalled = false;
-    const triggerFallback = () => {
-        if (!fallbackCalled) {
-            fallbackCalled = true;
-            checkDomainWithGroq(domain, apiKey, callback, modelIndex + 1, internetContext);
-        }
-    };
-    
-    try {
-        const req = https.request(options, (res) => {
-            let body = [];
-            res.on('data', chunk => body.push(chunk));
-            res.on('end', () => {
-                try {
-                    if (res.statusCode !== 200) {
-                        if (res.statusCode === 429) {
-                            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... rate limited (429). Cool down for 60s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 60000);
-                            // Don't fallback to another model on rate limit, just re-queue the domain
-                            if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
-                            aiDecisionCache.delete(domain);
-                            if (callback) callback();
-                            return;
-                        }
-                        if (res.statusCode === 401) {
-                            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... unauthorized (401). Cool down for 120s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 120000);
-                            if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
-                            aiDecisionCache.delete(domain);
-                            if (callback) callback();
-                            return;
-                        }
-                        triggerFallback();
-                        return;
-                    }
-                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
-                    const replyStr = resData.choices?.[0]?.message?.content;
-                    if (replyStr) {
-                        const decision = JSON.parse(replyStr);
-                        const category = decision.category || "General/Search";
-                        const targetIP = decision.targetIP || "1.1.1.1";
-                        const cacheVal = JSON.stringify({ category, targetIP });
-                        aiDecisionCache.set(domain, cacheVal);
-                        saveAICache();
-                        
-                        learnedExamples.push({ domain, category, reason: decision.reason || "AI Cân bằng tải" });
-                        if (learnedExamples.length > 1000) learnedExamples.shift();
-                        saveAILearning();
-                        
-                        onDomainClassified(domain);
-                        broadcastUpdate();
-                        if (callback) callback();
-                    } else {
-                        triggerFallback();
-                    }
-                } catch (e) {
-                    triggerFallback();
-                }
-            });
-        });
-        req.on('error', triggerFallback);
-        req.write(postData);
-        req.end();
-    } catch (e) {
-        triggerFallback();
-    }
+    // Default fallback (least-latency)
+    return selectWeightedDNS(activePool);
 }
 
 // Logs and Stats
@@ -1700,7 +893,6 @@ function loadConfig() {
                 stats: { total: 0, cacheHits: 0, cacheMisses: 0 },
                 aiEnabled: false,
                 groqApiKeys: [],
-                groqTrainKeys: [],
                 groqModel: "llama-3.1-8b-instant",
                 dnsRacingEnabled: true,
                 dnsRacingDelayMs: 15
@@ -1716,7 +908,6 @@ function loadConfig() {
             stats: { total: 0, cacheHits: 0, cacheMisses: 0 },
             aiEnabled: false,
             groqApiKeys: [],
-            groqTrainKeys: [],
             groqModel: "llama-3.1-8b-instant",
             dnsRacingEnabled: true,
             dnsRacingDelayMs: 15
@@ -1739,7 +930,6 @@ function loadConfig() {
     config.dnsRacingDelayMs = config.dnsRacingDelayMs !== undefined ? config.dnsRacingDelayMs : 15;
     
     if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
-    if (!Array.isArray(config.groqTrainKeys)) config.groqTrainKeys = [];
     
     if (process.env.GROQ_API_KEYS) {
         const envKeys = process.env.GROQ_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
@@ -1748,14 +938,6 @@ function loadConfig() {
         });
     }
     config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
-
-    if (process.env.GROQ_TRAIN_KEYS) {
-        const envKeys = process.env.GROQ_TRAIN_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
-        envKeys.forEach(k => {
-            if (!config.groqTrainKeys.includes(k)) config.groqTrainKeys.push(k);
-        });
-    }
-    config.groqTrainKeys = config.groqTrainKeys.filter(k => k && k.trim().length > 0);
 }
 
 function saveConfig() {
@@ -1814,16 +996,13 @@ function measureUpstreamPool() {
 
 // Startup Initialization
 loadConfig();
-loadAILearning();
-loadAICache();
 
 // Periodic Latency Checking
 setInterval(measureUpstreamPool, 30000);
 setTimeout(measureUpstreamPool, 3000); // Check shortly after start
 setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
 
-setTimeout(runStartupAITraining, 15000);
-setTimeout(runLiveGroqQueue, 16000);
+setTimeout(runAILoadBalancerBrain, 5000);
 
 function runCacheGC() {
     const now = Date.now();
@@ -1892,18 +1071,7 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         const source = isGslb ? "gslb" : (fromCache ? "cache" : "upstream");
         const targetIP = isGslb ? gslbIPs : (fromCache ? "Local Cache" : targetDNS);
         
-        // Retrieve category from decision cache
-        let category = "General/Search";
-        const cacheVal = aiDecisionCache.get(domain);
-        if (cacheVal) {
-            try {
-                if (cacheVal.startsWith('{')) {
-                    category = JSON.parse(cacheVal).category || "General/Search";
-                } else {
-                    category = cacheVal;
-                }
-            } catch(e) {}
-        }
+        let category = config.lbAlgorithm || "Balanced";
         
         logQuery(logDomain, category, clientIP, targetIP, source);
         config.stats.total += 1;
@@ -1917,13 +1085,6 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         }
         
         callback(responseBuffer);
-        
-        if (config.aiEnabled && config.groqApiKeys && config.groqApiKeys.length > 0) {
-            enqueueGroqCheck(domain);
-        }
-        if (config.aiEnabled && config.groqTrainKeys && config.groqTrainKeys.length > 0) {
-            enqueueDomainForTraining(domain);
-        }
     };
     
     // Check GSLB records (only Type A IPv4 queries)
@@ -2065,22 +1226,18 @@ app.get('/dns/config', (req, res) => {
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
         groqApiKeysCooldown: (config.groqApiKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqTrainKeys: (config.groqTrainKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
-        groqTrainKeysCooldown: (config.groqTrainKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
-        groqTrainKeysCount: (config.groqTrainKeys || []).length,
-        aiTrainingStatus: aiTrainingStatus,
-        aiTrainingStats: getAITrainingStats(),
         groqModel: config.groqModel || "llama-3.1-8b-instant",
-        groqMaxConcurrent: (config.groqApiKeys || []).length * GROQ_CONCURRENCY_PER_KEY,
-        learnedExamples: learnedExamples,
         serverStatus: getServerStatus(),
+        
+        // AI Load Balancer Brain fields
+        isAILBRunning: isAILBRunning,
+        aiLBReason: config.aiLBReason || "Chưa có phân tích tải nào.",
+        lastAiLBTime: config.lastAiLBTime || 0,
         
         // Load Balancer fields
         upstreamPool: config.upstreamPool || [],
         lbAlgorithm: config.lbAlgorithm || "least-latency",
         gslbRecords: config.gslbRecords || {},
-        aiCacheCount: aiDecisionCache.size,
-        aiQueueLength: groqQueue.length,
         dnsRacingEnabled: !!config.dnsRacingEnabled,
         dnsRacingDelayMs: config.dnsRacingDelayMs || 15
     });
@@ -2185,16 +1342,11 @@ app.post('/dns/groq', (req, res) => {
     saveConfig();
     broadcastUpdate();
     if (enabled) {
-        setTimeout(runStartupAITraining, 2000);
-        setTimeout(runLiveGroqQueue, 2000);
+        setTimeout(runAILoadBalancerBrain, 2000);
     } else {
-        if (dispatchIntervalId) {
-            clearInterval(dispatchIntervalId);
-            dispatchIntervalId = null;
-        }
-        if (dispatchTimerId) {
-            clearTimeout(dispatchTimerId);
-            dispatchTimerId = null;
+        if (aiLoadBalancerTimeout) {
+            clearTimeout(aiLoadBalancerTimeout);
+            aiLoadBalancerTimeout = null;
         }
     }
     res.send("Groq configuration updated");
@@ -2222,7 +1374,7 @@ app.post('/dns/groq/keys/update', (req, res) => {
             config.groqApiKeys = keys.map(k => k.trim()).filter(k => k.length > 0);
             saveConfig();
             broadcastUpdate();
-            if (config.aiEnabled) runLiveGroqQueue();
+            if (config.aiEnabled) setTimeout(runAILoadBalancerBrain, 2000);
             return res.json({ count: config.groqApiKeys.length });
         }
     } catch(e) {
@@ -2231,52 +1383,45 @@ app.post('/dns/groq/keys/update', (req, res) => {
     res.status(400).send("Invalid JSON payload");
 });
 
-app.post('/dns/groq/train-keys/update', (req, res) => {
-    try {
-        if (!req.rawBody || req.rawBody.length === 0) {
-            return res.status(400).send("Empty body");
-        }
-        const keys = JSON.parse(req.rawBody.toString('utf8'));
-        if (Array.isArray(keys)) {
-            config.groqTrainKeys = keys.map(k => k.trim()).filter(k => k.length > 0);
-            saveConfig();
-            broadcastUpdate();
-            if (config.aiEnabled) setTimeout(runStartupAITraining, 2000);
-            return res.json({ count: config.groqTrainKeys.length });
-        }
-    } catch(e) {
-        console.error("Failed to update groq train keys:", e);
-    }
-    res.status(400).send("Invalid JSON payload");
-});
-
-function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
-    if (modelIndex >= FALLBACK_MODELS.length) {
-        return res.status(500).json({ error: "Tất cả các mô hình Groq đều gặp lỗi. Vui lòng thử lại sau." });
-    }
-    const model = FALLBACK_MODELS[modelIndex];
-    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-3);
-    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-3);
-    const recentExamples = [...blockedEx, ...allowedEx];
-    const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
-        recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
-
-    const poolContext = getUpstreamPoolPromptContext();
+app.get('/dns/groq/test', (req, res) => {
+    const apiKey = getNextGroqKey();
+    if (!apiKey) return res.status(400).json({ error: "Không có API Keys nào được cấu hình hoặc tất cả đang bị khóa tạm thời." });
+    
+    const pool = config.upstreamPool || [];
+    const onlinePool = pool.filter(s => s.online !== false);
+    if (onlinePool.length === 0) return res.status(400).json({ error: "Không có máy chủ DNS online." });
+    
+    const poolStatusContext = pool.map(s => {
+        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
+    }).join('\n');
+    
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
-                          "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
-                          "Dynamic Routing Rules:\n" +
-                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to a DNS server in the pool configured for security filtering (e.g. Quad9 (9.9.9.9) or any server containing 'Security', 'AdGuard', 'NextDNS', 'Quad9' in its name). If none is configured or is offline, route to the fastest stable server with fallback.\n" +
-                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to the fastest server among Cloudflare (1.1.1.1), Google (8.8.8.8), or any CDN-optimized or low-latency server in the pool.\n" +
-                          "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
-                          "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
-                          examplesText;
-
+                          "Your task is to analyze the performance (RTT latency, online status, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers.\n\n" +
+                          "Instructions:\n" +
+                          "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
+                          "2. Distribute weights (from 0 to 100, relative weights or percentages summing up to 100) such that faster servers (with lower RTT latencies) receive a higher proportion of the traffic, while slower or degraded servers receive a very low proportion. Be aggressive with assigning more weight to lower latency servers to optimize user speed.\n" +
+                          "3. If a server has high latency (e.g. > 300ms) or is unstable, assign a weight of 0 or close to 0.\n" +
+                          "4. Keep the output clean and return a strict JSON response containing:\n" +
+                          "   - \"weights\": An object mapping each server IP to its assigned weight (integer).\n" +
+                          "   - \"reason\": A brief Vietnamese explanation (10-15 words) of your distribution rationale.\n\n" +
+                          "JSON response format:\n" +
+                          "{\n" +
+                          "  \"weights\": {\n" +
+                          "    \"1.1.1.1\": 60,\n" +
+                          "    \"8.8.8.8\": 30,\n" +
+                          "    \"9.9.9.9\": 10,\n" +
+                          "    \"208.67.222.222\": 0\n" +
+                          "  },\n" +
+                          "  \"reason\": \"Giải thích lý do phân bổ trọng số dựa trên độ trễ\"\n" +
+                          "}";
+                          
+    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
+    
     const postData = JSON.stringify({
-        model: model,
+        model: "llama-3.1-8b-instant",
         messages: [
             { role: "system", content: systemContent },
-            { role: "user", content: buildAIAnalysisContext(domain) }
+            { role: "user", content: userContent }
         ],
         response_format: { type: "json_object" }
     });
@@ -2293,121 +1438,51 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
         }
     };
     
-    let fallbackCalled = false;
-    const triggerFallback = () => {
-        if (!fallbackCalled) {
-            fallbackCalled = true;
-            runTestWithFallback(domain, apiKey, res, modelIndex + 1);
-        }
-    };
-    
     try {
-        const request = https.request(options, (response) => {
+        const groqReq = https.request(options, (groqRes) => {
             let body = [];
-            response.on('data', chunk => body.push(chunk));
-            response.on('end', () => {
+            groqRes.on('data', chunk => body.push(chunk));
+            groqRes.on('end', () => {
                 try {
-                    const responseString = Buffer.concat(body).toString('utf8');
-                    if (response.statusCode !== 200) {
-                        if (response.statusCode === 429 || response.statusCode === 401) {
-                            console.warn(`[AI Test] Key ${apiKey.substring(0, 8)}... error ${response.statusCode}. Cool down active for 60s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 60000);
-                        }
-                        triggerFallback();
-                        return;
+                    if (groqRes.statusCode !== 200) {
+                        return res.status(500).json({ error: `Groq API error status: ${groqRes.statusCode}` });
                     }
-                    const resData = JSON.parse(responseString);
+                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
                     const replyStr = resData.choices?.[0]?.message?.content;
                     if (replyStr) {
                         const decision = JSON.parse(replyStr);
-                        decision.modelUsed = model;
+                        const weights = decision.weights || {};
+                        const reason = decision.reason || "Cân bằng tải AI";
+                        
+                        pool.forEach(server => {
+                            if (weights[server.ip] !== undefined) {
+                                server.aiWeight = Math.max(0, parseInt(weights[server.ip], 10) || 0);
+                            }
+                        });
+                        config.aiLBReason = reason;
+                        config.lastAiLBTime = Date.now();
+                        saveConfig();
+                        broadcastUpdate();
+                        
+                        decision.modelUsed = "llama-3.1-8b-instant";
                         return res.json(decision);
                     } else {
-                        triggerFallback();
+                        return res.status(500).json({ error: "Không nhận được phản hồi từ Groq." });
                     }
-                } catch (e) {
-                    triggerFallback();
+                } catch(e) {
+                    return res.status(500).json({ error: e.message });
                 }
             });
         });
-        request.on('error', triggerFallback);
-        request.write(postData);
-        request.end();
-    } catch (e) {
-        triggerFallback();
-    }
-}
-
-app.get('/dns/groq/test', (req, res) => {
-    const domain = req.query.domain;
-    if (!domain) return res.status(400).json({ error: "Missing domain parameter" });
-    const apiKey = getNextGroqKey();
-    if (!apiKey) return res.status(400).json({ error: "No API Keys configured." });
-    runTestWithFallback(domain, apiKey, res, 0);
-});
-
-app.post('/dns/ai/learning/remove', (req, res) => {
-    const domain = req.query.domain;
-    if (domain) {
-        const d = domain.trim().toLowerCase();
-        learnedExamples = learnedExamples.filter(ex => ex.domain.toLowerCase() !== d);
-        saveAILearning();
-        broadcastUpdate();
-        res.send(`Removed ${d} from AI learning log.`);
-    } else {
-        res.status(400).send("Missing domain parameter");
-    }
-});
-
-app.post('/dns/ai/learning/clear', (req, res) => {
-    learnedExamples.length = 0;
-    seedDefaultAILearning();
-    aiTrainingStatus.trainedList = [];
-    trainingQueue = [];
-    totalTrainingEnqueued = 0;
-    totalTrainingProcessed = 0;
-    broadcastUpdate();
-    res.send("AI learning log reset to defaults.");
-    if (config.aiEnabled) setTimeout(runStartupAITraining, 1000);
-});
-
-app.post('/dns/ai/cache/clear', (req, res) => {
-    aiDecisionCache.clear();
-    saveAICache();
-    broadcastUpdate();
-    res.send("AI classification cache cleared.");
-});
-
-app.post('/dns/ai/learning/sync', (req, res) => {
-    try {
-        if (!req.rawBody || req.rawBody.length === 0) return res.status(400).send("Empty payload");
-        const list = JSON.parse(req.rawBody.toString('utf8'));
-        if (Array.isArray(list)) {
-            list.forEach(item => {
-                if (item && typeof item.domain === 'string') {
-                    const domainLower = item.domain.toLowerCase().trim();
-                    const exists = learnedExamples.some(ex => ex.domain.toLowerCase().trim() === domainLower);
-                    if (!exists) {
-                        learnedExamples.push({
-                            domain: item.domain.trim(),
-                            category: item.category || "General/Search",
-                            reason: item.reason || "Đồng bộ hóa"
-                        });
-                    }
-                }
-            });
-            if (learnedExamples.length > 1000) {
-                learnedExamples.splice(0, learnedExamples.length - 1000);
-            }
-            saveAILearning();
-            broadcastUpdate();
-            return res.json({ success: true, count: learnedExamples.length });
-        }
+        groqReq.on('error', (err) => res.status(500).json({ error: err.message }));
+        groqReq.write(postData);
+        groqReq.end();
     } catch(e) {
-        console.error("Failed to parse learning sync payload:", e);
+        return res.status(500).json({ error: e.message });
     }
-    res.status(400).send("Invalid JSON payload");
 });
+
+
 
 app.post('/dns/stats/reset', (req, res) => {
     config.stats = { total: 0, cacheHits: 0, cacheMisses: 0 };
@@ -2424,23 +1499,7 @@ app.post('/dns/toggle', (req, res) => {
 
 // Graceful shutdown hooks
 function gracefulShutdown() {
-    console.log("Shutting down. Saving config and caches...");
-    if (lastLearningSaveTimeout) {
-        clearTimeout(lastLearningSaveTimeout);
-        try {
-            fs.writeFileSync(AI_LEARNED_PATH, JSON.stringify(learnedExamples, null, 2), 'utf8');
-        } catch (e) {}
-    }
-    if (lastCacheSaveTimeout) {
-        clearTimeout(lastCacheSaveTimeout);
-        try {
-            const obj = {};
-            for (const [k, v] of aiDecisionCache.entries()) {
-                obj[k] = v;
-            }
-            fs.writeFileSync(AI_CACHE_PATH, JSON.stringify(obj, null, 2), 'utf8');
-        } catch (e) {}
-    }
+    console.log("Shutting down. Saving config...");
     try {
         fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
     } catch (e) {}

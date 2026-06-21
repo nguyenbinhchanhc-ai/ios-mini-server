@@ -410,12 +410,12 @@
                 <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
             </div>
             <div class="stat-card">
-                <div class="stat-card-title">Phân loại AI</div>
-                <div class="stat-card-val purple-val" id="dnsStatAICache">0 tên miền</div>
+                <div class="stat-card-title">Bộ não AI LB</div>
+                <div class="stat-card-val purple-val" id="dnsStatAIBrainStatus">Tắt</div>
             </div>
             <div class="stat-card">
-                <div class="stat-card-title">Hàng đợi AI</div>
-                <div class="stat-card-val" id="dnsStatAIQueue">0 yêu cầu</div>
+                <div class="stat-card-title">Cập nhật AI Brain</div>
+                <div class="stat-card-val" id="dnsStatAIBrainLastRun" style="font-size: 1.1rem; padding-top: 0.2rem;">Chưa có</div>
             </div>
         </div>
 
@@ -528,15 +528,15 @@
 
                 <!-- AI Config subtab -->
                 <div id="panel-ai" class="subtab-content">
-                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Định tuyến thông minh Groq AI Router</h4>
+                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Bộ não Cân bằng tải Động (AI Load Balancer Brain)</h4>
                     <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.4;">
-                        AI Router tự động phân tích và phân loại các tên miền để định hướng chính xác đến máy chủ DNS tối ưu (Ví dụ: Security -> Quad9, Media -> Google/Cloudflare).
+                        Bộ não AI sẽ tự động phân tích độ trễ thực tế RTT và hiệu năng của các máy chủ DNS thượng nguồn để tính toán và điều phối phân chia lưu lượng truy vấn một cách hợp lý và nhanh nhất.
                     </p>
                     
                     <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
                         <div style="display: flex; align-items: center; gap: 0.5rem;">
                             <input type="checkbox" id="aiEnabled" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
-                            <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer;">Kích hoạt AI Security & Media Router</label>
+                            <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer; font-weight: 500;">Kích hoạt Bộ não AI Load Balancer</label>
                         </div>
                     </div>
                     <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
@@ -544,78 +544,48 @@
                     <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
                             <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq API Keys <span id="groqKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
-                            <span id="groqConcurrencyInfo" style="font-size: 0.75rem; color: var(--text-muted);">0 luồng xử lý song song</span>
                         </div>
                         <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
                             <input type="password" id="newGroqKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
                             <button onclick="addGroqKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
                         </div>
-                        <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;"></div>
-                    </div>
-
-                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq Training API Keys <span id="groqTrainKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
-                            <span style="font-size: 0.75rem; color: var(--text-muted);">Huấn luyện AI song song độc lập</span>
-                        </div>
-                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-                            <input type="password" id="newGroqTrainKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                            <button onclick="addGroqTrainKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
-                        </div>
-                        <div id="groqTrainKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;"></div>
+                        <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1rem;"></div>
                     </div>
 
                     <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
-                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Nhật ký Huấn luyện AI</h4>
-                            <div id="aiTrainingStatusBadge" style="display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 6px; background: rgba(255, 255, 255, 0.05); color: var(--text-muted);">
-                                <span class="latency-dot yellow" id="aiTrainingStatusDot"></span>
-                                <span id="aiTrainingStatusText">Chờ / Tạm dừng</span>
+                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Trạng thái Tối ưu hóa AI Brain</h4>
+                            <div id="aiLBBrainStatusBadge" style="display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 6px; background: rgba(255, 255, 255, 0.05); color: var(--text-muted);">
+                                <span class="latency-dot yellow" id="aiLBBrainStatusDot"></span>
+                                <span id="aiLBBrainStatusText">Chờ / Tắt</span>
                             </div>
                         </div>
                         
-                        <div id="aiTrainingProgressContainer" style="background: rgba(0,0,0,0.15); padding: 0.75rem 1rem; border-radius: 10px; border: 1px solid var(--card-border); font-size: 0.8rem; margin-bottom: 0.75rem; display: none;">
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-                                <span>Tiến độ huấn luyện:</span>
-                                <strong id="aiTrainingProgressText">0 / 0</strong>
+                        <div id="aiLBBrainDetails" style="background: rgba(0,0,0,0.15); padding: 1rem; border-radius: 14px; border: 1px solid var(--card-border); font-size: 0.82rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                            <div>
+                                <strong style="color: var(--text-muted);">Lý do tối ưu mới nhất:</strong>
+                                <div id="aiLBRationale" style="color: #a78bfa; margin-top: 0.25rem; font-style: italic;">Chưa có phân tích nào.</div>
                             </div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; word-break: break-all;">
-                                <strong>Đang xử lý:</strong> <span id="aiTrainingActiveDomains" style="color: #a78bfa;">Không có</span>
-                            </div>
-                        </div>
-
-                        <!-- AI Training Stats Distribution -->
-                        <div id="aiTrainingStatsContainer" style="background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); padding: 1rem; border-radius: 14px; margin-bottom: 1rem; display: none;">
-                            <h5 style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; font-weight: 600;">Phân bố tên miền đã học</h5>
-                            <div style="display: flex; flex-direction: column; gap: 0.75rem;" id="aiTrainingStatsBars">
-                                <!-- Progress bars will be dynamically populated -->
+                            <div style="margin-top: 0.25rem;">
+                                <strong style="color: var(--text-muted);">Thời gian phân tích:</strong>
+                                <span id="aiLBTime" style="color: var(--text-main); margin-left: 0.25rem;">Chưa cập nhật</span>
                             </div>
                         </div>
 
-                        <div style="height: 180px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; border: 1px solid var(--card-border);">
-                            <table class="dns-log-table" style="font-size: 0.78rem;">
-                                <thead>
-                                    <tr>
-                                        <th style="width: 70px; padding-left: 0.5rem;">Giờ</th>
-                                        <th>Tên miền đã học</th>
-                                        <th style="width: 90px; text-align: center;">Phân loại</th>
-                                        <th style="width: 90px; text-align: center;">Key dùng</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="aiTrainingLogsList">
-                                    <tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Không có nhật ký huấn luyện</td></tr>
-                                </tbody>
-                            </table>
+                        <div id="aiWeightsContainer" style="background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); padding: 1rem; border-radius: 14px; margin-bottom: 1rem;">
+                            <h5 style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; font-weight: 600;">Phân bổ Trọng số do AI đề xuất</h5>
+                            <div style="display: flex; flex-direction: column; gap: 0.75rem;" id="aiWeightsBars">
+                                <div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 1rem;">Chưa có phân tích tải</div>
+                            </div>
                         </div>
                     </div>
 
                     <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                        <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử phân loại AI</h4>
-                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-                            <input type="text" id="aiTestDomain" placeholder="Ví dụ: scam-bank.com" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                            <button onclick="testGroqAI()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #1f2937; color: #fff; border: 1px solid var(--card-border); font-weight: bold; cursor: pointer; font-size: 0.85rem;">Phân loại thử</button>
-                        </div>
-                        <div id="aiTestResult" style="padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); font-size: 0.8rem; color: var(--text-muted); display: none; line-height: 1.4;"></div>
+                        <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử & Khởi chạy AI Brain</h4>
+                        <button onclick="testGroqAI()" style="width: 100%; padding: 0.75rem 1rem; border-radius: 8px; background: #1f2937; color: #fff; border: 1px solid var(--card-border); font-weight: bold; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+                            ⚡ Chạy phân tích & Tối ưu tải ngay lập tức
+                        </button>
+                        <div id="aiTestResult" style="padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); font-size: 0.8rem; color: var(--text-muted); display: none; line-height: 1.4; margin-top: 0.75rem;"></div>
                     </div>
                 </div>
             </div>
@@ -628,13 +598,10 @@
         const toastContainer = document.getElementById('toastContainer');
         let dnsConfig = {};
         let currentFullApiKeys = [];
-        let currentFullTrainKeys = [];
         try {
             currentFullApiKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
-            currentFullTrainKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
         } catch(e) {
             currentFullApiKeys = [];
-            currentFullTrainKeys = [];
         }
 
         function showToast(message, type = 'success') {
@@ -687,112 +654,80 @@
             statusEl.innerText = server.status || 'Ổn định';
             statusEl.style.color = server.statusClass === 'stable' ? '#10b981' : (server.statusClass === 'warning' ? '#f59e0b' : '#ef4444');
             
-            // AI Stats
-            document.getElementById('dnsStatAICache').innerText = (dnsConfig.aiCacheCount || 0) + ' tên miền';
-            document.getElementById('dnsStatAIQueue').innerText = (dnsConfig.aiQueueLength || 0) + ' yêu cầu';
-            
+            // AI Settings
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
             document.getElementById('dnsRacingEnabled').checked = !!dnsConfig.dnsRacingEnabled;
             document.getElementById('dnsRacingDelayMs').value = dnsConfig.dnsRacingDelayMs || 15;
-            
-            // AI Training UI Update
-            const trainStatus = dnsConfig.aiTrainingStatus || { isRunning: false, totalCandidates: 0, currentIndex: 0, currentDomain: null, currentKey: null, trainedList: [] };
-            const trBadge = document.getElementById('aiTrainingStatusBadge');
-            const trDot = document.getElementById('aiTrainingStatusDot');
-            const trText = document.getElementById('aiTrainingStatusText');
-            const trProgressContainer = document.getElementById('aiTrainingProgressContainer');
-            
-            if (trainStatus.isRunning) {
-                trBadge.style.background = 'rgba(16, 185, 129, 0.1)';
-                trBadge.style.color = 'var(--success)';
-                trDot.className = 'latency-dot green';
-                trText.innerText = 'Đang huấn luyện';
-                trProgressContainer.style.display = 'block';
-                
-                document.getElementById('aiTrainingProgressText').innerText = `${trainStatus.currentIndex} / ${trainStatus.totalCandidates}`;
-                document.getElementById('aiTrainingActiveDomains').innerText = trainStatus.currentDomain || 'Đang chuẩn bị...';
-            } else {
-                trBadge.style.background = 'rgba(255, 255, 255, 0.05)';
-                trBadge.style.color = 'var(--text-muted)';
-                trDot.className = 'latency-dot yellow';
-                trText.innerText = 'Chờ / Tạm dừng';
-                trProgressContainer.style.display = 'none';
-            }
-            
-            const trLogsList = document.getElementById('aiTrainingLogsList');
-            const trained = trainStatus.trainedList || [];
-            if (trained.length === 0) {
-                trLogsList.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Không có nhật ký huấn luyện</td></tr>';
-            } else {
-                trLogsList.innerHTML = trained.map(item => {
-                    let label = item.category || 'General/Search';
-                    const isSuccess = item.success !== false;
-                    const successIcon = isSuccess ? '✔️' : '❌';
-                    const successColor = isSuccess ? 'var(--success)' : 'var(--danger)';
-                    
-                    let catStyle = '';
-                    if (label === 'Security') catStyle = 'background: rgba(239, 68, 68, 0.15); color: #f87171;';
-                    else if (label === 'Media/CDN') catStyle = 'background: rgba(167, 139, 250, 0.15); color: #c084fc;';
-                    else if (label === 'General/Search') catStyle = 'background: rgba(59, 130, 246, 0.15); color: #60a5fa;';
-                    else catStyle = 'background: rgba(16, 185, 129, 0.15); color: #34d399;';
 
-                    return `
-                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.02);">
-                            <td style="padding-left: 0.5rem; color: var(--text-muted);">${item.time}</td>
-                            <td>
-                                <div style="display: flex; flex-direction: column; gap: 0.1rem;">
-                                    <span style="font-family: monospace; font-weight: 500;">${item.domain}</span>
-                                    <span style="font-size: 0.7rem; color: var(--text-muted);">${item.reason || ''}</span>
-                                </div>
-                            </td>
-                            <td style="text-align: center;">
-                                <span class="dns-status-badge" style="font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; ${catStyle}">${label}</span>
-                            </td>
-                            <td style="text-align: center; color: var(--text-muted); font-family: monospace; font-size: 0.72rem;">
-                                <span>${item.keyUsed || 'N/A'}</span>
-                            </td>
-                        </tr>
-                    `;
-                }).join('');
+            // AI Brain Stats cards
+            const aiBrainStatus = dnsConfig.aiEnabled ? (dnsConfig.isAILBRunning ? "Đang chạy..." : "Hoạt động") : "Tắt";
+            document.getElementById('dnsStatAIBrainStatus').innerText = aiBrainStatus;
+
+            let lastRunText = "Chưa có";
+            if (dnsConfig.lastAiLBTime) {
+                const date = new Date(dnsConfig.lastAiLBTime);
+                lastRunText = date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
             }
+            document.getElementById('dnsStatAIBrainLastRun').innerText = lastRunText;
             
-            // AI Training Stats Update
-            const trStatsContainer = document.getElementById('aiTrainingStatsContainer');
-            const trStatsBars = document.getElementById('aiTrainingStatsBars');
-            if (dnsConfig.aiTrainingStats && dnsConfig.aiTrainingStats.totalTrained > 0) {
-                trStatsContainer.style.display = 'block';
-                const ts = dnsConfig.aiTrainingStats;
-                const total = ts.totalTrained;
-                
-                const categories = [
-                    { name: 'Security (Bảo mật/Chặn)', key: 'Security', color: '#f87171' },
-                    { name: 'Media/CDN (Truyền thông)', key: 'Media/CDN', color: '#c084fc' },
-                    { name: 'General/Search (Tìm kiếm)', key: 'General/Search', color: '#60a5fa' },
-                    { name: 'API/App (Ứng dụng/Mạng)', key: 'API/App', color: '#34d399' }
-                ];
-                
-                trStatsBars.innerHTML = categories.map(cat => {
-                    const count = ts.categories[cat.key] || 0;
-                    const pct = total > 0 ? ((count / total) * 100).toFixed(1) : 0;
+            // AI Brain Details in panel
+            const statusDot = document.getElementById('aiLBBrainStatusDot');
+            const statusText = document.getElementById('aiLBBrainStatusText');
+            const statusBadge = document.getElementById('aiLBBrainStatusBadge');
+            if (dnsConfig.aiEnabled) {
+                if (dnsConfig.isAILBRunning) {
+                    statusBadge.style.background = 'rgba(16, 185, 129, 0.1)';
+                    statusBadge.style.color = 'var(--success)';
+                    statusDot.className = 'latency-dot green';
+                    statusText.innerText = 'Đang phân tích tải...';
+                } else {
+                    statusBadge.style.background = 'rgba(59, 130, 246, 0.1)';
+                    statusBadge.style.color = 'var(--primary)';
+                    statusDot.className = 'latency-dot blue';
+                    statusText.innerText = 'Hoạt động';
+                }
+            } else {
+                statusBadge.style.background = 'rgba(255, 255, 255, 0.05)';
+                statusBadge.style.color = 'var(--text-muted)';
+                statusDot.className = 'latency-dot yellow';
+                statusText.innerText = 'Chờ / Tắt';
+            }
+
+            document.getElementById('aiLBRationale').innerText = dnsConfig.aiLBReason || "Chưa có phân tích nào.";
+
+            let aiTimeText = "Chưa cập nhật";
+            if (dnsConfig.lastAiLBTime) {
+                const date = new Date(dnsConfig.lastAiLBTime);
+                aiTimeText = date.toLocaleString('vi-VN');
+            }
+            document.getElementById('aiLBTime').innerText = aiTimeText;
+
+            // AI Weights Progress Bars
+            const aiWeightsBars = document.getElementById('aiWeightsBars');
+            const pool = dnsConfig.upstreamPool || [];
+            if (pool.length === 0) {
+                aiWeightsBars.innerHTML = '<div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 1rem;">Chưa có cấu hình máy chủ DNS nào.</div>';
+            } else {
+                aiWeightsBars.innerHTML = pool.map(s => {
+                    const weight = typeof s.aiWeight === 'number' ? s.aiWeight : (s.online !== false ? 10 : 0);
+                    const barColor = s.online !== false ? 'linear-gradient(90deg, #a78bfa, #8b5cf6)' : 'var(--text-muted)';
+                    const statusText = s.online !== false ? `Trọng số: ${weight}%` : 'OFFLINE (0%)';
                     return `
                         <div>
                             <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 0.25rem;">
-                                <span>${cat.name}</span>
-                                <strong>${count} (${pct}%)</strong>
+                                <span>${s.name} (${s.ip})</span>
+                                <strong>${statusText}</strong>
                             </div>
                             <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
-                                <div style="width: ${pct}%; height: 100%; background: ${cat.color}; border-radius: 10px; transition: width 0.5s ease;"></div>
+                                <div style="width: ${weight}%; height: 100%; background: ${barColor}; border-radius: 10px; transition: width 0.5s ease;"></div>
                             </div>
                         </div>
                     `;
                 }).join('');
-            } else {
-                trStatsContainer.style.display = 'none';
             }
             
-            // Upstream Pool List
+            // Upstream Pool List Table
             const poolList = document.getElementById('dnsPoolList');
-            const pool = dnsConfig.upstreamPool || [];
             if (pool.length === 0) {
                 poolList.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; text-align: center;">Trống</div>';
             } else {
@@ -806,11 +741,12 @@
 
                 poolList.innerHTML = `
                     <div style="overflow-x: auto; width: 100%; border-radius: 12px; border: 1px solid var(--card-border); background: rgba(0, 0, 0, 0.2);">
-                        <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 500px;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 550px;">
                             <thead>
                                 <tr style="background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid var(--card-border); text-align: left;">
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600;">Máy chủ DNS</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Độ trễ RTT</th>
+                                    <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Trọng số AI</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Lượt truy vấn đã gánh</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Trạng thái</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Hành động</th>
@@ -849,6 +785,9 @@
                                             </td>
                                             <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: ${online ? 'var(--text-main)' : 'var(--text-muted)'};">
                                                 ${online ? latency + ' ms' : '-'}
+                                            </td>
+                                            <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: #a78bfa;">
+                                                ${online ? (typeof s.aiWeight === 'number' ? s.aiWeight + '%' : '10%') : '-'}
                                             </td>
                                             <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: #60a5fa;">
                                                 ${queryCount.toLocaleString('vi-VN')}
@@ -897,12 +836,7 @@
 
             // Keys
             document.getElementById('groqKeyCount').innerText = dnsConfig.groqApiKeysCount || 0;
-            document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
             renderKeysList(dnsConfig.groqApiKeys || [], dnsConfig.groqApiKeysCooldown || []);
-            
-            // Training Keys
-            document.getElementById('groqTrainKeyCount').innerText = dnsConfig.groqTrainKeysCount || 0;
-            renderTrainKeysList(dnsConfig.groqTrainKeys || [], dnsConfig.groqTrainKeysCooldown || []);
             
             // Logs
             const logsList = document.getElementById('dnsLogsList');
@@ -911,7 +845,6 @@
                 logsList.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Không có lịch sử định hướng</td></tr>';
             } else {
                 logsList.innerHTML = logs.map(line => {
-                    // [HH:mm:ss] [ClientIP] Status - Domain
                     const parts = line.match(/^\[(.*?)\]\s+\[(.*?)\]\s+(.*?)\s+-\s+(.*?)$/);
                     if (parts) {
                         const time = parts[1];
@@ -1048,14 +981,12 @@
         function saveGroqConfig() {
             const enabled = document.getElementById('aiEnabled').checked;
             
-            // Save temporary keys in memory permanently to localStorage (Bấm lưu là lưu)
             localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
-            localStorage.setItem('groq_train_keys', JSON.stringify(currentFullTrainKeys));
             localStorage.setItem('ai_enabled', enabled ? 'true' : 'false');
             
             fetch(`/dns/groq?enabled=${enabled}`, { method: 'POST' })
                 .then(res => {
-                    if (res.ok) showToast("Đã lưu cấu hình AI Router và ghi nhớ API Keys!");
+                    if (res.ok) showToast("Đã lưu cấu hình AI Load Balancer và ghi nhớ API Keys!");
                     else showToast("Lưu thất bại", "error");
                 });
         }
@@ -1075,16 +1006,6 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(currentFullApiKeys)
-            }).then(res => {
-                if (res.ok) fetchConfig();
-            });
-        }
-
-        function updateGroqTrainKeysOnServer() {
-            return fetch('/dns/groq/train-keys/update', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(currentFullTrainKeys)
             }).then(res => {
                 if (res.ok) fetchConfig();
             });
@@ -1118,29 +1039,30 @@
         }
 
         function testGroqAI() {
-            const input = document.getElementById('aiTestDomain');
-            const domain = input.value.trim();
             const resultBox = document.getElementById('aiTestResult');
-            if (!domain) return;
-            
             resultBox.style.display = 'block';
-            resultBox.innerHTML = '⚡ Đang gửi truy vấn AI phân tích...';
+            resultBox.innerHTML = '⚡ Đang gửi yêu cầu phân tích tải lên Groq AI...';
             
-            fetch(`/dns/groq/test?domain=${encodeURIComponent(domain)}`)
+            fetch('/dns/groq/test')
                 .then(res => res.json())
                 .then(data => {
                     if (data.error) {
                         resultBox.innerHTML = `<span style="color:var(--danger);">${data.error}</span>`;
                     } else {
+                        let weightsStr = Object.entries(data.weights || {})
+                            .map(([ip, w]) => `• ${ip}: <strong>${w}%</strong>`)
+                            .join('<br>');
                         resultBox.innerHTML = `
-                            <strong>Phân loại:</strong> <span style="color:#a78bfa;">${data.category}</span><br>
-                            <strong>Lý do:</strong> ${data.reason}<br>
-                            <strong>Model:</strong> ${data.modelUsed}
+                            <strong style="color: var(--success);">Phân tích thành công!</strong><br>
+                            <strong>Lý do điều phối:</strong> <span style="color:#a78bfa;">${data.reason}</span><br>
+                            <strong>Trọng số đề xuất:</strong><br>${weightsStr}<br>
+                            <span style="font-size:0.75rem; color:var(--text-muted);">Model: ${data.modelUsed}</span>
                         `;
+                        fetchConfig();
                     }
                 })
                 .catch(() => {
-                    resultBox.innerHTML = '<span style="color:var(--danger);">Lỗi mạng hoặc server không phản hồi.</span>';
+                    resultBox.innerHTML = '<span style="color:var(--danger);">Lỗi kết nối hoặc server không phản hồi.</span>';
                 });
         }
 
@@ -1154,65 +1076,14 @@
                 });
         }
 
-        function renderTrainKeysList(keys, cooldowns = []) {
-            const list = document.getElementById('groqTrainKeysList');
-            if (keys.length === 0) {
-                list.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-muted); text-align: center;">Chưa cấu hình Training API Keys</div>';
-            } else {
-                list.innerHTML = keys.map((k, i) => {
-                    const isCooldown = cooldowns[i] === true;
-                    const cooldownBadge = isCooldown 
-                        ? `<span style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem; animation: pulse 1.5s infinite;">Tạm khóa (429/401)</span>` 
-                        : `<span style="background: rgba(16, 185, 129, 0.15); color: #10b981; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem;">Sẵn sàng</span>`;
-                    return `
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--card-border);">
-                            <div style="display: flex; align-items: center; gap: 0.25rem;">
-                                <span style="font-family: monospace; font-size: 0.8rem;">Key #${i+1}: ${k}</span>
-                                ${cooldownBadge}
-                            </div>
-                            <button onclick="removeGroqTrainKey(${i})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-weight: bold; font-size: 0.8rem;">Xóa</button>
-                        </div>
-                    `;
-                }).join('');
-            }
-        }
-
-        function addGroqTrainKey() {
-            const input = document.getElementById('newGroqTrainKey');
-            const key = input.value.trim();
-            if (!key) return;
-            
-            if (currentFullTrainKeys.includes(key)) {
-                showToast("API Key đã tồn tại", "error");
-                return;
-            }
-            
-            currentFullTrainKeys.push(key);
-            input.value = '';
-            
-            updateGroqTrainKeysOnServer().then(() => {
-                showToast("Đã thêm Training API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
-            });
-        }
-
-        function removeGroqTrainKey(idx) {
-            currentFullTrainKeys.splice(idx, 1);
-            localStorage.setItem('groq_train_keys', JSON.stringify(currentFullTrainKeys));
-            
-            updateGroqTrainKeysOnServer().then(() => {
-                showToast("Đã xóa Training API Key");
-            });
-        }
-
         let isSyncingKeys = false;
         function syncKeysWithServer() {
             if (isSyncingKeys) return;
             
             const needSyncApi = dnsConfig && dnsConfig.groqApiKeysCount === 0 && currentFullApiKeys.length > 0;
-            const needSyncTrain = dnsConfig && dnsConfig.groqTrainKeysCount === 0 && currentFullTrainKeys.length > 0;
             const needSyncAI = dnsConfig && dnsConfig.aiEnabled === false && localStorage.getItem('ai_enabled') === 'true';
             
-            if (needSyncApi || needSyncTrain || needSyncAI) {
+            if (needSyncApi || needSyncAI) {
                 isSyncingKeys = true;
                 
                 const promises = [];
@@ -1225,16 +1096,6 @@
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(currentFullApiKeys)
-                        })
-                    );
-                }
-                if (needSyncTrain) {
-                    syncMsgs.push("Training API Keys");
-                    promises.push(
-                        fetch('/dns/groq/train-keys/update', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(currentFullTrainKeys)
                         })
                     );
                 }
