@@ -578,6 +578,10 @@
                                     <strong style="color: var(--text-muted);">Độ trễ Racing tối ưu:</strong>
                                     <span id="aiLBRacingDelay" style="color: #34d399; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
                                 </div>
+                                <div>
+                                    <strong style="color: var(--text-muted);">Cache TTL tối thiểu:</strong>
+                                    <span id="aiLBCacheTtl" style="color: #fbbf24; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
                             </div>
                         </div>
 
@@ -713,6 +717,7 @@
             
             document.getElementById('aiLBRacingStatus').innerText = dnsConfig.dnsRacingEnabled ? "Kích hoạt" : "Tắt";
             document.getElementById('aiLBRacingDelay').innerText = (dnsConfig.dnsRacingDelayMs || 15) + " ms";
+            document.getElementById('aiLBCacheTtl').innerText = (dnsConfig.minCacheTtlSeconds || 300) + " giây";
 
             // AI Weights Progress Bars
             const aiWeightsBars = document.getElementById('aiWeightsBars');
@@ -1074,6 +1079,8 @@
                             <strong style="color: var(--success);">Phân tích thành công!</strong><br>
                             <strong>Lý do điều phối:</strong> <span style="color:#a78bfa;">${data.reason}</span><br>
                             <strong>Trọng số đề xuất:</strong><br>${weightsStr}<br>
+                            <strong>DNS Racing:</strong> <span style="color:#60a5fa;">${data.dnsRacingEnabled ? 'Bật (' + data.dnsRacingDelayMs + 'ms)' : 'Tắt'}</span><br>
+                            <strong>Cache TTL tối thiểu:</strong> <span style="color:#fbbf24;">${data.minCacheTtlSeconds || 300} giây</span><br>
                             <span style="font-size:0.75rem; color:var(--text-muted);">Model: ${data.modelUsed}</span>
                         `;
                         fetchConfig();

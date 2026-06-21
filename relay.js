@@ -181,6 +181,7 @@ function getWSUpdatePayload() {
         groqApiKeysCount: (config.groqApiKeys || []).length,
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         serverStatus: getServerStatus(),
+        minCacheTtlSeconds: config.minCacheTtlSeconds || 300,
         
         // AI Load Balancer Brain fields
         isAILBRunning: isAILBRunning,
@@ -208,7 +209,6 @@ function checkCache(domain, qtype) {
     if (cached) {
         const now = Date.now();
         if (now < cached.expiresAt) {
-            config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
             
             // Smart Cache Prefetching:
             // Trigger prefetch if remaining TTL < 20% of total TTL
@@ -241,12 +241,11 @@ function checkCache(domain, qtype) {
             dnsCache.delete(key);
         }
     }
-    config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
     return null;
 }
 
 function setCache(domain, qtype, responseBuffer, ttl) {
-    const minTtl = 300; // Enforce 300 seconds (5 minutes) minimum cache TTL
+    const minTtl = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
     const parsedTtl = Number(ttl);
     const finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
     const key = `${domain.toLowerCase()}_${qtype}`;
@@ -522,11 +521,11 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     const originalIDBytes = Buffer.from([queryData[0], queryData[1]]);
     
     if (activeUpstreamQueries.has(key)) {
-        activeUpstreamQueries.get(key).push({ callback, originalIDBytes });
+        activeUpstreamQueries.get(key).push({ callback, originalIDBytes, isSecondary: true });
         return;
     }
     
-    activeUpstreamQueries.set(key, [{ callback, originalIDBytes }]);
+    activeUpstreamQueries.set(key, [{ callback, originalIDBytes, isSecondary: false }]);
     
     const pool = config.upstreamPool || [];
     const onlinePool = pool.filter(s => s.online !== false);
@@ -548,7 +547,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
                     const clientResponse = Buffer.from(response);
                     clientResponse[0] = item.originalIDBytes[0];
                     clientResponse[1] = item.originalIDBytes[1];
-                    item.callback(clientResponse);
+                    item.callback(clientResponse, item.isSecondary);
                 });
             } else {
                 queriesActive--;
@@ -556,7 +555,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
                     resolved = true;
                     const queue = activeUpstreamQueries.get(key) || [];
                     activeUpstreamQueries.delete(key);
-                    queue.forEach(item => item.callback(null));
+                    queue.forEach(item => item.callback(null, item.isSecondary));
                 }
             }
         };
@@ -596,7 +595,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
                 const clientResponse = Buffer.from(response);
                 clientResponse[0] = item.originalIDBytes[0];
                 clientResponse[1] = item.originalIDBytes[1];
-                item.callback(clientResponse);
+                item.callback(clientResponse, item.isSecondary);
             });
         } else {
             queriesActive--;
@@ -604,7 +603,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
                 resolved = true;
                 const queue = activeUpstreamQueries.get(key) || [];
                 activeUpstreamQueries.delete(key);
-                queue.forEach(item => item.callback(null));
+                queue.forEach(item => item.callback(null, item.isSecondary));
             }
         }
     };
@@ -712,24 +711,26 @@ function runAILoadBalancerBrain() {
     }).join('\n');
     
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, and dynamically optimize the DNS Racing configuration.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
                           "Instructions:\n" +
                           "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
-                          "2. Distribute weights (from 0 to 100, summing up to 100) such that faster servers (lower RTT latencies) and more reliable servers (higher success rates) receive a higher proportion of the traffic, while slower or degraded servers receive very low or 0 weight. Be aggressive with assigning more weight to lower latency servers.\n" +
+                          "2. BE EXTREMELY AGGRESSIVE WITH LATENCY: Assign weights such that the fastest server with the lowest RTT receives almost ALL the traffic (80% to 100%). Do NOT spread weights to slower servers (> 40ms or 2x slower than the fastest server) just to have 'balance'. Slow servers must receive 0% weight. Spreading weights to slow servers directly ruins the average latency of the system. Only spread weights (e.g. 70/30) if the fastest server has packet loss / success rate < 98%.\n" +
                           "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
                           "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
-                          "5. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 3600). Increase it (e.g., 900-3600s) to keep queries cached on the server and bypass network latency entirely if the primary DNS servers are fast and 100% stable, or decrease it (e.g., 300-600s) if the latency of the servers is fluctuating or success rates drop.\n" +
+                          "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
-                          "    \"1.1.1.1\": 60,\n" +
-                          "    \"8.8.8.8\": 30,\n" +
-                          "    \"9.9.9.9\": 10,\n" +
+                          "    \"1.1.1.1\": 90,\n" +
+                          "    \"8.8.8.8\": 10,\n" +
+                          "    \"9.9.9.9\": 0,\n" +
                           "    \"208.67.222.222\": 0\n" +
                           "  },\n" +
                           "  \"dnsRacingEnabled\": true,\n" +
                           "  \"dnsRacingDelayMs\": 15,\n" +
-                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS Racing bằng tiếng Việt\"\n" +
+                          "  \"minCacheTtlSeconds\": 1200,\n" +
+                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
@@ -803,6 +804,9 @@ function runAILoadBalancerBrain() {
                         }
                         if (typeof decision.dnsRacingDelayMs === 'number') {
                             config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
+                        }
+                        if (typeof decision.minCacheTtlSeconds === 'number') {
+                            config.minCacheTtlSeconds = Math.max(300, Math.min(3600, decision.minCacheTtlSeconds));
                         }
                         
                         config.aiLBReason = reason;
@@ -1021,7 +1025,8 @@ function loadConfig() {
                 groqApiKeys: [],
                 groqModel: "llama-3.1-8b-instant",
                 dnsRacingEnabled: true,
-                dnsRacingDelayMs: 15
+                dnsRacingDelayMs: 15,
+                minCacheTtlSeconds: 300
             };
             saveConfig();
         }
@@ -1036,7 +1041,8 @@ function loadConfig() {
             groqApiKeys: [],
             groqModel: "llama-3.1-8b-instant",
             dnsRacingEnabled: true,
-            dnsRacingDelayMs: 15
+            dnsRacingDelayMs: 15,
+            minCacheTtlSeconds: 300
         };
     }
     
@@ -1056,6 +1062,7 @@ function loadConfig() {
     config.gslbRecords = config.gslbRecords || {};
     config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
     config.dnsRacingDelayMs = config.dnsRacingDelayMs !== undefined ? config.dnsRacingDelayMs : 15;
+    config.minCacheTtlSeconds = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
     
     if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
     
@@ -1226,18 +1233,28 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
     // 1. Check local cache
     const cachedResponse = checkCache(originalDomain, qtype);
     if (cachedResponse) {
+        config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
         const clientResponse = Buffer.from(cachedResponse);
         clientResponse[0] = queryData[0];
         clientResponse[1] = queryData[1];
         completeQuery(clientResponse, true, false);
     } else {
         // 2. Fetch from chosen upstream DNS
-        fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, targetDNS, (response) => {
+        fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, targetDNS, (response, isSecondary) => {
             if (response) {
-                const ttl = extractTTL(response, parsed.questionEndOffset);
-                setCache(originalDomain, qtype, response, ttl);
-                completeQuery(response, false, false);
+                if (isSecondary) {
+                    config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
+                    completeQuery(response, true, false);
+                } else {
+                    config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
+                    const ttl = extractTTL(response, parsed.questionEndOffset);
+                    setCache(originalDomain, qtype, response, ttl);
+                    completeQuery(response, false, false);
+                }
             } else {
+                if (!isSecondary) {
+                    config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
+                }
                 completeQuery(Buffer.alloc(0), false, false);
             }
         });
@@ -1349,6 +1366,7 @@ app.get('/dns/config', (req, res) => {
         groqApiKeysCount: (config.groqApiKeys || []).length,
         groqModel: config.groqModel || "llama-3.1-8b-instant",
         serverStatus: getServerStatus(),
+        minCacheTtlSeconds: config.minCacheTtlSeconds || 300,
         
         // AI Load Balancer Brain fields
         isAILBRunning: isAILBRunning,
@@ -1535,24 +1553,26 @@ app.get('/dns/groq/test', (req, res) => {
     }).join('\n');
     
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, and dynamically optimize the DNS Racing configuration.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
                           "Instructions:\n" +
                           "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
-                          "2. Distribute weights (from 0 to 100, summing up to 100) such that faster servers (lower RTT latencies) and more reliable servers (higher success rates) receive a higher proportion of the traffic, while slower or degraded servers receive very low or 0 weight. Be aggressive with assigning more weight to lower latency servers.\n" +
+                          "2. BE EXTREMELY AGGRESSIVE WITH LATENCY: Assign weights such that the fastest server with the lowest RTT receives almost ALL the traffic (80% to 100%). Do NOT spread weights to slower servers (> 40ms or 2x slower than the fastest server) just to have 'balance'. Slow servers must receive 0% weight. Spreading weights to slow servers directly ruins the average latency of the system. Only spread weights (e.g. 70/30) if the fastest server has packet loss / success rate < 98%.\n" +
                           "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
                           "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
-                          "5. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 3600). Increase it (e.g., 900-3600s) to keep queries cached on the server and bypass network latency entirely if the primary DNS servers are fast and 100% stable, or decrease it (e.g., 300-600s) if the latency of the servers is fluctuating or success rates drop.\n" +
+                          "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
-                          "    \"1.1.1.1\": 60,\n" +
-                          "    \"8.8.8.8\": 30,\n" +
-                          "    \"9.9.9.9\": 10,\n" +
+                          "    \"1.1.1.1\": 90,\n" +
+                          "    \"8.8.8.8\": 10,\n" +
+                          "    \"9.9.9.9\": 0,\n" +
                           "    \"208.67.222.222\": 0\n" +
                           "  },\n" +
                           "  \"dnsRacingEnabled\": true,\n" +
                           "  \"dnsRacingDelayMs\": 15,\n" +
-                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS Racing bằng tiếng Việt\"\n" +
+                          "  \"minCacheTtlSeconds\": 1200,\n" +
+                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
@@ -1609,6 +1629,9 @@ app.get('/dns/groq/test', (req, res) => {
                         }
                         if (typeof decision.dnsRacingDelayMs === 'number') {
                             config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
+                        }
+                        if (typeof decision.minCacheTtlSeconds === 'number') {
+                            config.minCacheTtlSeconds = Math.max(300, Math.min(3600, decision.minCacheTtlSeconds));
                         }
                         
                         config.aiLBReason = reason;
