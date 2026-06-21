@@ -6,6 +6,7 @@ const path = require('path');
 const https = require('https');
 const WebSocket = require('ws');
 const os = require('os');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -445,6 +446,20 @@ function updateTrainingUIStatus() {
     throttledBroadcastUpdate();
 }
 
+function onDomainClassified(domain) {
+    const d = domain.trim().toLowerCase();
+    const gIdx = groqQueue.indexOf(d);
+    if (gIdx !== -1) {
+        groqQueue.splice(gIdx, 1);
+        console.log(`[Deduplication] Removed ${d} from Live Queue.`);
+    }
+    const tIdx = trainingQueue.indexOf(d);
+    if (tIdx !== -1) {
+        trainingQueue.splice(tIdx, 1);
+        console.log(`[Deduplication] Removed ${d} from Training Queue.`);
+    }
+}
+
 function enqueueDomainForTraining(domain) {
     const d = domain.trim().toLowerCase();
     if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
@@ -455,6 +470,8 @@ function enqueueDomainForTraining(domain) {
     if (alreadyLearned) return;
     
     if (trainingQueue.includes(d)) return;
+    if (groqQueue.includes(d)) return;
+    if (aiDecisionCache.has(d)) return;
     
     console.log(`[AI Training] Enqueuing domain for real-time training: ${d}`);
     trainingQueue.unshift(d);
@@ -494,6 +511,7 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
             learnedExamples.push({ domain, category, reason: decision.reason });
             if (learnedExamples.length > 1000) learnedExamples.shift();
             saveAILearning();
+            onDomainClassified(domain);
             callback(true, decision);
         }, 6000);
         return;
@@ -506,8 +524,8 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
         return;
     }
     
-    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-2);
-    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-2);
+    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-3);
+    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-3);
     const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
@@ -571,6 +589,7 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
                         learnedExamples.push({ domain, category, reason: decision.reason || "Huấn luyện AI" });
                         if (learnedExamples.length > 1000) learnedExamples.shift();
                         saveAILearning();
+                        onDomainClassified(domain);
                         callback(true, decision);
                     } else {
                         callback(false, null);
@@ -786,6 +805,9 @@ function initUpstreamSocketPool() {
                 if (server) {
                     server.latency = Math.round((server.latency || 0) * 0.7 + elapsed * 0.3);
                     server.online = true;
+                    if (req.isClientQuery) {
+                        server.queryCount = (server.queryCount || 0) + 1;
+                    }
                     throttledBroadcastUpdate();
                 }
                 
@@ -805,7 +827,7 @@ function initUpstreamSocketPool() {
     }
 }
 
-function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
+function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = false) {
     initUpstreamSocketPool();
     
     // Distribute via socket pool in round-robin fashion
@@ -849,7 +871,8 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
         originalIDBytes,
         timer,
         timestamp: Date.now(),
-        targetIP: upstreamIP
+        targetIP: upstreamIP,
+        isClientQuery
     });
     
     socket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, 53, upstreamIP, (err) => {
@@ -910,14 +933,14 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         }
     };
     
-    queryUpstream(queryData, upstreamDNS, onResponse);
+    queryUpstream(queryData, upstreamDNS, onResponse, true);
     
     if (config.dnsRacingEnabled && secondUpstreamDNS) {
         queriesActive++;
         const racingDelay = config.dnsRacingDelayMs || 15;
         setTimeout(() => {
             if (!resolved) {
-                queryUpstream(queryData, secondUpstreamDNS, onResponse);
+                queryUpstream(queryData, secondUpstreamDNS, onResponse, true);
             } else {
                 queriesActive--;
             }
@@ -1081,6 +1104,11 @@ function enqueueGroqCheck(domain) {
     }
     
     if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
+    
+    // Deduplicate against training queue & live queue
+    if (trainingQueue.includes(d)) return;
+    if (groqQueue.includes(d)) return;
+    
     aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
     
     groqQueue.push(d);
@@ -1263,6 +1291,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
             if (learnedExamples.length > 1000) learnedExamples.shift();
             saveAILearning();
             logQuery(domain, category, "System", "Local Cache", "cache");
+            onDomainClassified(domain);
             if (callback) callback();
         }, 1000);
         return;
@@ -1296,8 +1325,8 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
     }
     
     const model = FALLBACK_MODELS[modelIndex];
-    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-2);
-    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-2);
+    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-3);
+    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-3);
     const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
@@ -1370,6 +1399,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
                         if (learnedExamples.length > 1000) learnedExamples.shift();
                         saveAILearning();
                         
+                        onDomainClassified(domain);
                         broadcastUpdate();
                         if (callback) callback();
                     } else {
@@ -1462,6 +1492,9 @@ function loadConfig() {
     config.aiEnabled = config.aiEnabled || false;
     config.groqModel = "llama-3.1-8b-instant";
     config.upstreamPool = config.upstreamPool || defaultPool;
+    config.upstreamPool.forEach(server => {
+        server.queryCount = server.queryCount || 0;
+    });
     config.lbAlgorithm = config.lbAlgorithm || "least-latency";
     config.gslbRecords = config.gslbRecords || {};
     config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
@@ -1725,6 +1758,60 @@ app.get('/dns-query', (req, res) => {
     });
 });
 
+app.get('/dns/mobileconfig', (req, res) => {
+    const host = req.headers.host || 'localhost:3000';
+    const secureUrl = `https://${host}/dns-query`;
+    const uuid1 = crypto.randomUUID ? crypto.randomUUID() : 'e01ea4df-25fd-4268-ba30-8cd9f68013b8';
+    const uuid2 = crypto.randomUUID ? crypto.randomUUID() : 'f92f9b8c-529a-4c28-98e3-cf859b8c2810';
+    
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>DNSSettings</key>
+            <dict>
+                <key>DNSProtocol</key>
+                <string>HTTPS</string>
+                <key>ServerURL</key>
+                <string>${secureUrl}</string>
+            </dict>
+            <key>PayloadDescription</key>
+            <string>Cấu hình DNS Load Balancer &amp; AI Router qua HTTPS cho iOS</string>
+            <key>PayloadDisplayName</key>
+            <string>Gemini DNS DoH Load Balancer</string>
+            <key>PayloadIdentifier</key>
+            <string>com.gemini.dns.doh</string>
+            <key>PayloadType</key>
+            <string>com.apple.dnsSettings.managed</string>
+            <key>PayloadUUID</key>
+            <string>${uuid1}</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+        </dict>
+    </array>
+    <key>PayloadDisplayName</key>
+    <string>Gemini DNS Load Balancer</string>
+    <key>PayloadIdentifier</key>
+    <string>com.gemini.dns</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>${uuid2}</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>`;
+
+    res.setHeader('Content-Type', 'application/x-apple-aspen-config');
+    res.setHeader('Content-Disposition', 'attachment; filename="gemini-dns.mobileconfig"');
+    res.send(plist);
+});
+
 // MARK: - Dashboard API Endpoints
 app.get('/dns/config', (req, res) => {
     const stats = {
@@ -1932,8 +2019,8 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
         return res.status(500).json({ error: "Tất cả các mô hình Groq đều gặp lỗi. Vui lòng thử lại sau." });
     }
     const model = FALLBACK_MODELS[modelIndex];
-    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-2);
-    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-2);
+    const blockedEx = learnedExamples.filter(ex => ex.category === "Security").slice(-3);
+    const allowedEx = learnedExamples.filter(ex => ex.category !== "Security").slice(-3);
     const recentExamples = [...blockedEx, ...allowedEx];
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
