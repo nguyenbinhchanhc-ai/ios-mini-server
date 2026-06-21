@@ -153,8 +153,7 @@ let groqKeyIndex = 0;
 let isQueuePaused = false;
 let queueTimeoutId = null;
 const FALLBACK_MODELS = [
-    "llama-3.1-8b-instant",
-    "llama3-8b-8192"
+    "llama-3.1-8b-instant"
 ];
 
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
