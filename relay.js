@@ -25,6 +25,17 @@ const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
 // State variables
 let config = {};
 let logs = [];
+let precomputedAiPool = [];
+let precomputedAiTotalWeight = 0;
+
+function rebuildAiRoutingCache() {
+    const pool = config.upstreamPool || [];
+    precomputedAiPool = pool.filter(s => s.online !== false).map(s => ({
+        ip: s.ip,
+        weight: typeof s.aiWeight === 'number' ? s.aiWeight : 10
+    }));
+    precomputedAiTotalWeight = precomputedAiPool.reduce((sum, item) => sum + item.weight, 0);
+}
 
 // WebSocket client registry
 const wsClients = new Set();
@@ -48,6 +59,17 @@ function isKeyAvailable(key) {
         return false;
     }
     return true;
+}
+
+function recordServerHealth(server, isSuccess) {
+    if (!server) return;
+    if (!server.history) server.history = [];
+    server.history.push(isSuccess);
+    if (server.history.length > 20) {
+        server.history.shift();
+    }
+    const successes = server.history.filter(h => h === true).length;
+    server.successRate = Math.round((successes / server.history.length) * 100);
 }
 
 // Upstream UDP Client Sockets Pool
@@ -166,7 +188,10 @@ function getWSUpdatePayload() {
         lastAiLBTime: config.lastAiLBTime || 0,
         
         // Load Balancer fields
-        upstreamPool: config.upstreamPool || [],
+        upstreamPool: (config.upstreamPool || []).map(s => {
+            const { history, ...rest } = s;
+            return rest;
+        }),
         lbAlgorithm: config.lbAlgorithm || "least-latency",
         gslbRecords: config.gslbRecords || {},
         dnsRacingEnabled: !!config.dnsRacingEnabled,
@@ -368,11 +393,28 @@ function initUpstreamSocketPool() {
                 const elapsed = Date.now() - req.timestamp;
                 const server = config.upstreamPool.find(s => s.ip === req.targetIP);
                 if (server) {
+                    const oldOnline = server.online;
+                    const oldLatency = server.latency || 0;
+                    
                     server.latency = Math.round((server.latency || 0) * 0.7 + elapsed * 0.3);
                     server.online = true;
+                    recordServerHealth(server, true);
                     if (req.isClientQuery) {
                         server.queryCount = (server.queryCount || 0) + 1;
                     }
+                    
+                    const onlineChanged = (oldOnline === false);
+                    const latencyDelta = Math.abs(server.latency - oldLatency);
+                    const latencyPct = oldLatency > 0 ? (latencyDelta / oldLatency) : 0;
+                    const significantLatencyChange = latencyDelta > 30 && latencyPct > 0.4;
+                    
+                    if (onlineChanged) {
+                        rebuildAiRoutingCache();
+                        triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went ONLINE`);
+                    } else if (significantLatencyChange) {
+                        triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) latency changed significantly (${oldLatency}ms -> ${server.latency}ms)`);
+                    }
+                    
                     throttledBroadcastUpdate();
                 }
                 
@@ -423,8 +465,16 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
             // Real-time timeout penalty: set server as offline / high latency
             const server = config.upstreamPool.find(s => s.ip === upstreamIP);
             if (server) {
+                const oldOnline = server.online;
                 server.latency = 9999;
                 server.online = false;
+                recordServerHealth(server, false);
+                
+                if (oldOnline !== false) {
+                    rebuildAiRoutingCache();
+                    triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went OFFLINE (Timeout)`);
+                }
+                
                 throttledBroadcastUpdate();
             }
             callback(null);
@@ -447,6 +497,20 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
             if (req) {
                 pendingRequests.delete(txId);
                 clearTimeout(timer);
+                const server = config.upstreamPool.find(s => s.ip === upstreamIP);
+                if (server) {
+                    const oldOnline = server.online;
+                    server.latency = 9999;
+                    server.online = false;
+                    recordServerHealth(server, false);
+                    
+                    if (oldOnline !== false) {
+                        rebuildAiRoutingCache();
+                        triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went OFFLINE (Send error)`);
+                    }
+                    
+                    throttledBroadcastUpdate();
+                }
                 callback(null);
             }
         }
@@ -570,6 +634,36 @@ function getNextGroqKey() {
     return key;
 }
 
+let lastAIBrainRunTime = 0;
+let aiBrainTriggerTimeout = null;
+
+function triggerAIBrainOnEvent(reason) {
+    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) return;
+    
+    const now = Date.now();
+    const minInterval = 15000; // Throttle to at most once per 15 seconds
+    const timeSinceLastRun = now - lastAIBrainRunTime;
+    
+    if (timeSinceLastRun >= minInterval) {
+        if (aiBrainTriggerTimeout) {
+            clearTimeout(aiBrainTriggerTimeout);
+            aiBrainTriggerTimeout = null;
+        }
+        console.log(`[AI LB Brain] Triggering immediate analysis. Reason: ${reason}`);
+        runAILoadBalancerBrain();
+    } else {
+        // Schedule it to run as soon as the throttle expires
+        const delay = minInterval - timeSinceLastRun;
+        if (!aiBrainTriggerTimeout) {
+            console.log(`[AI LB Brain] Event trigger throttled. Scheduled in ${Math.round(delay/1000)}s. Reason: ${reason}`);
+            aiBrainTriggerTimeout = setTimeout(() => {
+                aiBrainTriggerTimeout = null;
+                runAILoadBalancerBrain();
+            }, delay);
+        }
+    }
+}
+
 // AI Load Balancer Brain implementation
 function runAILoadBalancerBrain() {
     if (aiLoadBalancerTimeout) {
@@ -586,9 +680,14 @@ function runAILoadBalancerBrain() {
     }
     
     isAILBRunning = true;
+    lastAIBrainRunTime = Date.now();
+    broadcastUpdate();
+    
     const apiKey = getNextGroqKey();
     if (!apiKey) {
         console.warn("[AI LB Brain] No API keys available (all cooling down or none set). Retrying in 15s.");
+        isAILBRunning = false;
+        broadcastUpdate();
         aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
         return;
     }
@@ -600,24 +699,26 @@ function runAILoadBalancerBrain() {
     
     if (onlinePool.length === 0) {
         console.log("[AI LB Brain] No online DNS servers in pool. Skipping analysis.");
+        isAILBRunning = false;
+        broadcastUpdate();
         aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 30000);
         return;
     }
     
     // Construct the pool status context for the prompt
     const poolStatusContext = pool.map(s => {
-        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
+        const rate = typeof s.successRate === 'number' ? s.successRate + '%' : '100%';
+        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
     }).join('\n');
     
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, and dynamically optimize the DNS Racing configuration.\n\n" +
                           "Instructions:\n" +
                           "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
-                          "2. Distribute weights (from 0 to 100, relative weights or percentages summing up to 100) such that faster servers (with lower RTT latencies) receive a higher proportion of the traffic, while slower or degraded servers receive a very low proportion. Be aggressive with assigning more weight to lower latency servers to optimize user speed.\n" +
-                          "3. If a server has high latency (e.g. > 300ms) or is unstable, assign a weight of 0 or close to 0.\n" +
-                          "4. Keep the output clean and return a strict JSON response containing:\n" +
-                          "   - \"weights\": An object mapping each server IP to its assigned weight (integer).\n" +
-                          "   - \"reason\": A brief Vietnamese explanation (10-15 words) of your distribution rationale.\n\n" +
+                          "2. Distribute weights (from 0 to 100, summing up to 100) such that faster servers (lower RTT latencies) and more reliable servers (higher success rates) receive a higher proportion of the traffic, while slower or degraded servers receive very low or 0 weight. Be aggressive with assigning more weight to lower latency servers.\n" +
+                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
+                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
+                          "5. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
@@ -626,7 +727,9 @@ function runAILoadBalancerBrain() {
                           "    \"9.9.9.9\": 10,\n" +
                           "    \"208.67.222.222\": 0\n" +
                           "  },\n" +
-                          "  \"reason\": \"Giải thích lý do phân bổ trọng số dựa trên độ trễ\"\n" +
+                          "  \"dnsRacingEnabled\": true,\n" +
+                          "  \"dnsRacingDelayMs\": 15,\n" +
+                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS Racing bằng tiếng Việt\"\n" +
                           "}";
                           
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
@@ -668,6 +771,8 @@ function runAILoadBalancerBrain() {
                         } else {
                             console.warn(`[AI LB Brain] Groq API returned status code ${res.statusCode}`);
                         }
+                        isAILBRunning = false;
+                        broadcastUpdate();
                         // Retry shortly with next key
                         aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 10000);
                         return;
@@ -693,6 +798,13 @@ function runAILoadBalancerBrain() {
                             }
                         });
                         
+                        if (decision.dnsRacingEnabled !== undefined) {
+                            config.dnsRacingEnabled = !!decision.dnsRacingEnabled;
+                        }
+                        if (typeof decision.dnsRacingDelayMs === 'number') {
+                            config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
+                        }
+                        
                         config.aiLBReason = reason;
                         config.lastAiLBTime = Date.now();
                         saveConfig();
@@ -702,11 +814,17 @@ function runAILoadBalancerBrain() {
                         const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
                         const timeStr = vnTime.toISOString().substring(11, 19);
                         const statusMessage = `[${timeStr}] [AI BRAIN] Phân phối tải: ` + 
-                            pool.map(s => `${s.name}: ${s.aiWeight || 0}%`).join(', ') + ` - ${reason}`;
+                            pool.map(s => `${s.name}: ${s.aiWeight || 0}%`).join(', ') + 
+                            ` | Racing: ${config.dnsRacingEnabled ? 'Bật (' + config.dnsRacingDelayMs + 'ms)' : 'Tắt'} - ${reason}`;
                         
                         logs.push(statusMessage);
                         if (logs.length > 100) logs.shift();
                         
+                        isAILBRunning = false;
+                        rebuildAiRoutingCache();
+                        broadcastUpdate();
+                    } else {
+                        isAILBRunning = false;
                         broadcastUpdate();
                     }
                     
@@ -714,6 +832,8 @@ function runAILoadBalancerBrain() {
                     aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, AI_LB_INTERVAL_MS);
                 } catch (e) {
                     console.error("[AI LB Brain] Error parsing response body:", e);
+                    isAILBRunning = false;
+                    broadcastUpdate();
                     aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
                 }
             });
@@ -721,6 +841,8 @@ function runAILoadBalancerBrain() {
         
         req.on('error', (err) => {
             console.error("[AI LB Brain] HTTP request error:", err);
+            isAILBRunning = false;
+            broadcastUpdate();
             aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
         });
         
@@ -728,34 +850,32 @@ function runAILoadBalancerBrain() {
         req.end();
     } catch (e) {
         console.error("[AI LB Brain] Execution error:", e);
+        isAILBRunning = false;
+        broadcastUpdate();
         aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
     }
 }
 
 function selectAIWeightedDNS(activePool) {
-    const pool = activePool.filter(s => s.online !== false);
-    if (pool.length === 0) return "1.1.1.1";
-    if (pool.length === 1) return pool[0].ip;
-    
-    let totalWeight = 0;
-    const items = pool.map(s => {
-        const weight = typeof s.aiWeight === 'number' ? s.aiWeight : 10;
-        totalWeight += weight;
-        return { ip: s.ip, weight };
-    });
-    
-    if (totalWeight <= 0) {
-        return selectWeightedDNS(pool);
+    if (precomputedAiPool.length === 0) {
+        return selectWeightedDNS(activePool);
+    }
+    if (precomputedAiPool.length === 1) {
+        return precomputedAiPool[0].ip;
+    }
+    if (precomputedAiTotalWeight <= 0) {
+        return selectWeightedDNS(activePool);
     }
     
-    let rand = Math.random() * totalWeight;
-    for (const item of items) {
+    let rand = Math.random() * precomputedAiTotalWeight;
+    for (let i = 0; i < precomputedAiPool.length; i++) {
+        const item = precomputedAiPool[i];
         rand -= item.weight;
         if (rand <= 0) {
             return item.ip;
         }
     }
-    return items[0].ip;
+    return precomputedAiPool[0].ip;
 }
 
 // Probability-weighted selector (Inverse Latency Squared)
@@ -763,25 +883,31 @@ function selectWeightedDNS(activePool) {
     if (activePool.length === 0) return "1.1.1.1";
     if (activePool.length === 1) return activePool[0].ip;
     
-    const pool = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
-    if (pool.length === 0) return activePool[0].ip;
-    
     let totalWeight = 0;
-    const items = pool.map(s => {
-        const lat = Math.max(s.latency || 5, 2);
-        const weight = Math.round(100000 / (lat * lat));
-        totalWeight += weight;
-        return { ip: s.ip, weight };
-    });
-    
-    let rand = Math.random() * totalWeight;
-    for (const item of items) {
-        rand -= item.weight;
-        if (rand <= 0) {
-            return item.ip;
+    for (let i = 0; i < activePool.length; i++) {
+        const s = activePool[i];
+        if (s.online !== false && (s.latency || 0) < 9999) {
+            const lat = Math.max(s.latency || 5, 2);
+            const weight = Math.round(100000 / (lat * lat));
+            totalWeight += weight;
         }
     }
-    return items[0].ip;
+    
+    if (totalWeight <= 0) return activePool[0].ip;
+    
+    let rand = Math.random() * totalWeight;
+    for (let i = 0; i < activePool.length; i++) {
+        const s = activePool[i];
+        if (s.online !== false && (s.latency || 0) < 9999) {
+            const lat = Math.max(s.latency || 5, 2);
+            const weight = Math.round(100000 / (lat * lat));
+            rand -= weight;
+            if (rand <= 0) {
+                return s.ip;
+            }
+        }
+    }
+    return activePool[0].ip;
 }
 
 // Load Balancer DNS Selector
@@ -923,6 +1049,8 @@ function loadConfig() {
     config.upstreamPool = config.upstreamPool || defaultPool;
     config.upstreamPool.forEach(server => {
         server.queryCount = server.queryCount || 0;
+        server.history = [];
+        server.successRate = 100;
     });
     config.lbAlgorithm = config.lbAlgorithm || "least-latency";
     config.gslbRecords = config.gslbRecords || {};
@@ -938,6 +1066,7 @@ function loadConfig() {
         });
     }
     config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
+    rebuildAiRoutingCache();
 }
 
 function saveConfig() {
@@ -969,21 +1098,13 @@ function buildQueryBufferForMeasure(domain) {
 }
 
 function measureUpstreamLatency(ip) {
-    const queryBuffer = buildQueryBufferForMeasure("google.com");
-    const start = Date.now();
-    queryUpstream(queryBuffer, ip, (response) => {
-        const elapsed = Date.now() - start;
-        const server = config.upstreamPool.find(s => s.ip === ip);
-        if (server) {
-            if (response) {
-                server.latency = elapsed;
-                server.online = true;
-            } else {
-                server.latency = 9999;
-                server.online = false;
-            }
-            broadcastUpdate();
-        }
+    const domains = ["google.com", "cloudflare.com", "facebook.com"];
+    domains.forEach(domain => {
+        const queryBuffer = buildQueryBufferForMeasure(domain);
+        queryUpstream(queryBuffer, ip, (response) => {
+            // Note: queryUpstream response/timeout/error handlers will automatically
+            // calculate latency, online status, and success rates.
+        }, false);
     });
 }
 
@@ -1235,7 +1356,10 @@ app.get('/dns/config', (req, res) => {
         lastAiLBTime: config.lastAiLBTime || 0,
         
         // Load Balancer fields
-        upstreamPool: config.upstreamPool || [],
+        upstreamPool: (config.upstreamPool || []).map(s => {
+            const { history, ...rest } = s;
+            return rest;
+        }),
         lbAlgorithm: config.lbAlgorithm || "least-latency",
         gslbRecords: config.gslbRecords || {},
         dnsRacingEnabled: !!config.dnsRacingEnabled,
@@ -1260,6 +1384,7 @@ app.post('/dns/upstream/pool/add', (req, res) => {
     
     config.upstreamPool.push({ ip, name, latency: 0, online: true });
     saveConfig();
+    rebuildAiRoutingCache();
     measureUpstreamLatency(ip);
     broadcastUpdate();
     res.send(`Added ${ip} to pool`);
@@ -1271,6 +1396,7 @@ app.post('/dns/upstream/pool/remove', (req, res) => {
     
     config.upstreamPool = (config.upstreamPool || []).filter(s => s.ip !== ip);
     saveConfig();
+    rebuildAiRoutingCache();
     broadcastUpdate();
     res.send(`Removed ${ip} from pool`);
 });
@@ -1339,6 +1465,15 @@ app.post('/dns/groq', (req, res) => {
     const model = req.query.model || "llama-3.1-8b-instant";
     config.aiEnabled = enabled;
     config.groqModel = model;
+    
+    if (enabled) {
+        config.lbAlgorithm = "ai-routing";
+    } else {
+        if (config.lbAlgorithm === "ai-routing") {
+            config.lbAlgorithm = "least-latency";
+        }
+    }
+    
     saveConfig();
     broadcastUpdate();
     if (enabled) {
@@ -1391,19 +1526,22 @@ app.get('/dns/groq/test', (req, res) => {
     const onlinePool = pool.filter(s => s.online !== false);
     if (onlinePool.length === 0) return res.status(400).json({ error: "Không có máy chủ DNS online." });
     
+    isAILBRunning = true;
+    broadcastUpdate();
+    
     const poolStatusContext = pool.map(s => {
-        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
+        const rate = typeof s.successRate === 'number' ? s.successRate + '%' : '100%';
+        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
     }).join('\n');
     
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, and dynamically optimize the DNS Racing configuration.\n\n" +
                           "Instructions:\n" +
                           "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
-                          "2. Distribute weights (from 0 to 100, relative weights or percentages summing up to 100) such that faster servers (with lower RTT latencies) receive a higher proportion of the traffic, while slower or degraded servers receive a very low proportion. Be aggressive with assigning more weight to lower latency servers to optimize user speed.\n" +
-                          "3. If a server has high latency (e.g. > 300ms) or is unstable, assign a weight of 0 or close to 0.\n" +
-                          "4. Keep the output clean and return a strict JSON response containing:\n" +
-                          "   - \"weights\": An object mapping each server IP to its assigned weight (integer).\n" +
-                          "   - \"reason\": A brief Vietnamese explanation (10-15 words) of your distribution rationale.\n\n" +
+                          "2. Distribute weights (from 0 to 100, summing up to 100) such that faster servers (lower RTT latencies) and more reliable servers (higher success rates) receive a higher proportion of the traffic, while slower or degraded servers receive very low or 0 weight. Be aggressive with assigning more weight to lower latency servers.\n" +
+                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
+                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
+                          "5. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
@@ -1412,7 +1550,9 @@ app.get('/dns/groq/test', (req, res) => {
                           "    \"9.9.9.9\": 10,\n" +
                           "    \"208.67.222.222\": 0\n" +
                           "  },\n" +
-                          "  \"reason\": \"Giải thích lý do phân bổ trọng số dựa trên độ trễ\"\n" +
+                          "  \"dnsRacingEnabled\": true,\n" +
+                          "  \"dnsRacingDelayMs\": 15,\n" +
+                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS Racing bằng tiếng Việt\"\n" +
                           "}";
                           
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
@@ -1445,6 +1585,8 @@ app.get('/dns/groq/test', (req, res) => {
             groqRes.on('end', () => {
                 try {
                     if (groqRes.statusCode !== 200) {
+                        isAILBRunning = false;
+                        broadcastUpdate();
                         return res.status(500).json({ error: `Groq API error status: ${groqRes.statusCode}` });
                     }
                     const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
@@ -1457,27 +1599,50 @@ app.get('/dns/groq/test', (req, res) => {
                         pool.forEach(server => {
                             if (weights[server.ip] !== undefined) {
                                 server.aiWeight = Math.max(0, parseInt(weights[server.ip], 10) || 0);
+                            } else {
+                                server.aiWeight = server.online !== false ? 10 : 0;
                             }
                         });
+                        
+                        if (decision.dnsRacingEnabled !== undefined) {
+                            config.dnsRacingEnabled = !!decision.dnsRacingEnabled;
+                        }
+                        if (typeof decision.dnsRacingDelayMs === 'number') {
+                            config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
+                        }
+                        
                         config.aiLBReason = reason;
                         config.lastAiLBTime = Date.now();
                         saveConfig();
+                        
+                        isAILBRunning = false;
+                        rebuildAiRoutingCache();
                         broadcastUpdate();
                         
                         decision.modelUsed = "llama-3.1-8b-instant";
                         return res.json(decision);
                     } else {
+                        isAILBRunning = false;
+                        broadcastUpdate();
                         return res.status(500).json({ error: "Không nhận được phản hồi từ Groq." });
                     }
                 } catch(e) {
+                    isAILBRunning = false;
+                    broadcastUpdate();
                     return res.status(500).json({ error: e.message });
                 }
             });
         });
-        groqReq.on('error', (err) => res.status(500).json({ error: err.message }));
+        groqReq.on('error', (err) => {
+            isAILBRunning = false;
+            broadcastUpdate();
+            res.status(500).json({ error: err.message });
+        });
         groqReq.write(postData);
         groqReq.end();
     } catch(e) {
+        isAILBRunning = false;
+        broadcastUpdate();
         return res.status(500).json({ error: e.message });
     }
 });

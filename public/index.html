@@ -533,13 +533,12 @@
                         Bộ não AI sẽ tự động phân tích độ trễ thực tế RTT và hiệu năng của các máy chủ DNS thượng nguồn để tính toán và điều phối phân chia lưu lượng truy vấn một cách hợp lý và nhanh nhất.
                     </p>
                     
-                    <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem;">
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 0.25rem;">
                         <div style="display: flex; align-items: center; gap: 0.5rem;">
-                            <input type="checkbox" id="aiEnabled" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
+                            <input type="checkbox" id="aiEnabled" onchange="saveGroqConfig()" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
                             <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer; font-weight: 500;">Kích hoạt Bộ não AI Load Balancer</label>
                         </div>
                     </div>
-                    <button onclick="saveGroqConfig()" style="width: 100%; padding: 0.6rem 1rem; border-radius: 8px; background: var(--primary); color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem;">Lưu cấu hình AI</button>
                     
                     <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
@@ -569,6 +568,16 @@
                             <div style="margin-top: 0.25rem;">
                                 <strong style="color: var(--text-muted);">Thời gian phân tích:</strong>
                                 <span id="aiLBTime" style="color: var(--text-main); margin-left: 0.25rem;">Chưa cập nhật</span>
+                            </div>
+                            <div style="margin-top: 0.25rem; display: flex; gap: 1rem; flex-wrap: wrap; border-top: 1px dashed rgba(255,255,255,0.05); padding-top: 0.5rem;">
+                                <div>
+                                    <strong style="color: var(--text-muted);">Tự động DNS Racing:</strong>
+                                    <span id="aiLBRacingStatus" style="color: #60a5fa; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
+                                <div>
+                                    <strong style="color: var(--text-muted);">Độ trễ Racing tối ưu:</strong>
+                                    <span id="aiLBRacingDelay" style="color: #34d399; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
                             </div>
                         </div>
 
@@ -701,6 +710,9 @@
                 aiTimeText = date.toLocaleString('vi-VN');
             }
             document.getElementById('aiLBTime').innerText = aiTimeText;
+            
+            document.getElementById('aiLBRacingStatus').innerText = dnsConfig.dnsRacingEnabled ? "Kích hoạt" : "Tắt";
+            document.getElementById('aiLBRacingDelay').innerText = (dnsConfig.dnsRacingDelayMs || 15) + " ms";
 
             // AI Weights Progress Bars
             const aiWeightsBars = document.getElementById('aiWeightsBars');
@@ -746,6 +758,7 @@
                                 <tr style="background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid var(--card-border); text-align: left;">
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600;">Máy chủ DNS</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Độ trễ RTT</th>
+                                    <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Tỷ lệ thành công</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Trọng số AI</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Lượt truy vấn đã gánh</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Trạng thái</th>
@@ -756,6 +769,7 @@
                                 ${pool.map(s => {
                                     const online = s.online !== false;
                                     const latency = s.latency || 0;
+                                    const successRate = typeof s.successRate === 'number' ? s.successRate : 100;
                                     const queryCount = s.queryCount || 0;
                                     const isFastest = online && s.ip === fastestIP;
                                     
@@ -785,6 +799,9 @@
                                             </td>
                                             <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: ${online ? 'var(--text-main)' : 'var(--text-muted)'};">
                                                 ${online ? latency + ' ms' : '-'}
+                                            </td>
+                                            <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: ${online ? (successRate >= 90 ? 'var(--success)' : (successRate >= 75 ? '#f59e0b' : '#ef4444')) : 'var(--text-muted)'};">
+                                                ${online ? successRate + '%' : '-'}
                                             </td>
                                             <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: #a78bfa;">
                                                 ${online ? (typeof s.aiWeight === 'number' ? s.aiWeight + '%' : '10%') : '-'}
@@ -986,8 +1003,8 @@
             
             fetch(`/dns/groq?enabled=${enabled}`, { method: 'POST' })
                 .then(res => {
-                    if (res.ok) showToast("Đã lưu cấu hình AI Load Balancer và ghi nhớ API Keys!");
-                    else showToast("Lưu thất bại", "error");
+                    if (res.ok) showToast(enabled ? "Đã kích hoạt AI Load Balancer!" : "Đã tắt AI Load Balancer!");
+                    else showToast("Cập nhật thất bại", "error");
                 });
         }
         
@@ -1022,10 +1039,11 @@
             }
             
             currentFullApiKeys.push(key);
+            localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
             input.value = '';
             
             updateGroqKeysOnServer().then(() => {
-                showToast("Đã thêm API Key (Bấm Lưu cấu hình AI để ghi nhớ)");
+                showToast("Đã thêm API Key!");
             });
         }
 
