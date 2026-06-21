@@ -1105,8 +1105,15 @@ function enqueueGroqCheck(domain) {
     
     if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
     
-    // Deduplicate against training queue & live queue
-    if (trainingQueue.includes(d)) return;
+    // Promotion & Deduplication:
+    // If domain is already in trainingQueue, promote it to Live Queue since a real query just hit it!
+    if (trainingQueue.includes(d)) {
+        const tIdx = trainingQueue.indexOf(d);
+        if (tIdx !== -1) {
+            trainingQueue.splice(tIdx, 1);
+            console.log(`[Promotion] Promoted ${d} from Training Queue to Live Queue due to active user query.`);
+        }
+    }
     if (groqQueue.includes(d)) return;
     
     aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
