@@ -439,6 +439,24 @@
                         <option value="random">Random (Ngẫu nhiên)</option>
                     </select>
                 </div>
+                
+                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
+                    <h3>Cấu hình DNS Racing (Song song)</h3>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem; line-height: 1.4;">
+                        Gửi truy vấn đồng thời tới máy chủ DNS nhanh thứ hai nếu máy chủ thứ nhất không phản hồi kịp thời, triệt tiêu độ trễ mạng UDP.
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <input type="checkbox" id="dnsRacingEnabled" onchange="saveRacingConfig()" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
+                            <label for="dnsRacingEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer; font-weight: 500;">Kích hoạt DNS Racing</label>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 0.82rem; color: var(--text-muted);">Độ trễ kích hoạt máy chủ thứ 2:</span>
+                            <input type="number" id="dnsRacingDelayMs" onchange="saveRacingConfig()" min="0" max="1000" style="width: 70px; padding: 0.4rem; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; text-align: center; font-size: 0.85rem; outline: none;">
+                            <span style="font-size: 0.82rem; color: var(--text-muted);">ms</span>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="card">
@@ -605,6 +623,8 @@
             document.getElementById('dnsStatAIQueue').innerText = (dnsConfig.aiQueueLength || 0) + ' yêu cầu';
             
             document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
+            document.getElementById('dnsRacingEnabled').checked = !!dnsConfig.dnsRacingEnabled;
+            document.getElementById('dnsRacingDelayMs').value = dnsConfig.dnsRacingDelayMs || 15;
             
             // Upstream Pool List
             const poolList = document.getElementById('dnsPoolList');
@@ -661,7 +681,7 @@
             // Keys
             document.getElementById('groqKeyCount').innerText = dnsConfig.groqApiKeysCount || 0;
             document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
-            renderKeysList(dnsConfig.groqApiKeys || []);
+            renderKeysList(dnsConfig.groqApiKeys || [], dnsConfig.groqApiKeysCooldown || []);
             
             // Logs
             const logsList = document.getElementById('dnsLogsList');
@@ -705,17 +725,26 @@
             }
         }
 
-        function renderKeysList(keys) {
+        function renderKeysList(keys, cooldowns = []) {
             const list = document.getElementById('groqKeysList');
             if (keys.length === 0) {
                 list.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-muted); text-align: center;">Chưa cấu hình API Keys</div>';
             } else {
-                list.innerHTML = keys.map((k, i) => `
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--card-border);">
-                        <span style="font-family: monospace; font-size: 0.8rem;">Key #${i+1}: ${k}</span>
-                        <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-weight: bold; font-size: 0.8rem;">Xóa</button>
-                    </div>
-                `).join('');
+                list.innerHTML = keys.map((k, i) => {
+                    const isCooldown = cooldowns[i] === true;
+                    const cooldownBadge = isCooldown 
+                        ? `<span style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem; animation: pulse 1.5s infinite;">Tạm khóa (429/401)</span>` 
+                        : `<span style="background: rgba(16, 185, 129, 0.15); color: #10b981; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem;">Sẵn sàng</span>`;
+                    return `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--card-border);">
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <span style="font-family: monospace; font-size: 0.8rem;">Key #${i+1}: ${k}</span>
+                                ${cooldownBadge}
+                            </div>
+                            <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-weight: bold; font-size: 0.8rem;">Xóa</button>
+                        </div>
+                    `;
+                }).join('');
             }
         }
 
@@ -801,6 +830,16 @@
                 .then(res => {
                     if (res.ok) showToast("Đã lưu cấu hình AI Router");
                     else showToast("Lưu thất bại", "error");
+                });
+        }
+        
+        function saveRacingConfig() {
+            const enabled = document.getElementById('dnsRacingEnabled').checked;
+            const delay = parseInt(document.getElementById('dnsRacingDelayMs').value, 10) || 15;
+            fetch(`/dns/racing?enabled=${enabled}&delay=${delay}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) showToast("Đã cập nhật cấu hình DNS Racing");
+                    else showToast("Lưu cấu hình thất bại", "error");
                 });
         }
 

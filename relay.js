@@ -48,10 +48,10 @@ const wsClients = new Set();
 let learnedExamples = [];
 
 // Performance Metrics & Local DNS Cache
-const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, expiresAt }
+const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
 const MAX_CACHE_SIZE = 15000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
-const aiDecisionCache = new Map(); // Key: domain, Value: category string (Security, Media/CDN, General/Search, API/App)
+const aiDecisionCache = new Map(); // Key: domain, Value: category string or JSON string
 
 // Load/Save functions for AI persistence
 function loadAILearning() {
@@ -151,14 +151,25 @@ const GROQ_CONCURRENCY_PER_KEY = 5;
 let groqKeyIndex = 0;
 let isQueuePaused = false;
 let queueTimeoutId = null;
-const QUEUE_DELAY_MS = 4000;
 const FALLBACK_MODELS = [
     "llama-3.1-8b-instant",
     "gemma2-9b-it"
 ];
 
-// Shared Upstream UDP Client Sockets
-let upstreamSocket = null;
+const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
+function isKeyAvailable(key) {
+    if (!key) return false;
+    const cooldownUntil = keyCooldowns.get(key);
+    if (cooldownUntil && Date.now() < cooldownUntil) {
+        return false;
+    }
+    return true;
+}
+
+// Upstream UDP Client Sockets Pool
+const SOCKET_POOL_SIZE = 5;
+const upstreamSocketPool = [];
+let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
 let nextTxId = 0;
 
@@ -260,8 +271,10 @@ function getWSUpdatePayload() {
         stats: stats,
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqApiKeysCooldown: (config.groqApiKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
         groqTrainKeys: (config.groqTrainKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqTrainKeysCooldown: (config.groqTrainKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqTrainKeysCount: (config.groqTrainKeys || []).length,
         aiTrainingStatus: aiTrainingStatus,
         groqModel: config.groqModel || "llama-3.1-8b-instant",
@@ -275,7 +288,9 @@ function getWSUpdatePayload() {
         // Load Balancer fields
         upstreamPool: config.upstreamPool || [],
         lbAlgorithm: config.lbAlgorithm || "least-latency",
-        gslbRecords: config.gslbRecords || {}
+        gslbRecords: config.gslbRecords || {},
+        dnsRacingEnabled: !!config.dnsRacingEnabled,
+        dnsRacingDelayMs: config.dnsRacingDelayMs || 15
     };
 }
 
@@ -334,6 +349,14 @@ function runWorker(apiKey) {
     if (!config.aiEnabled || !config.groqTrainKeys || !config.groqTrainKeys.includes(apiKey)) {
         delete activeWorkers[apiKey];
         updateTrainingUIStatus();
+        return;
+    }
+    
+    if (!isKeyAvailable(apiKey)) {
+        delete activeWorkers[apiKey];
+        updateTrainingUIStatus();
+        const timeoutId = setTimeout(() => runWorker(apiKey), 5000);
+        trainingWorkerTimeouts.push(timeoutId);
         return;
     }
     
@@ -451,11 +474,22 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
             } else if (domain.includes('cdn') || domain.includes('media') || domain.includes('video') || domain.includes('stream') || domain.includes('youtube') || domain.includes('tiktok')) {
                 category = "Media/CDN";
             }
+            
+            let targetIP = "1.1.1.1";
+            if (category === "Security") targetIP = "9.9.9.9";
+            else if (category === "Media/CDN") targetIP = "8.8.8.8";
+            else {
+                const sorted = [...(config.upstreamPool || [])].sort((a,b) => (a.latency || 0) - (b.latency || 0));
+                if (sorted.length > 0) targetIP = sorted[0].ip;
+            }
+            
             const decision = {
                 category: category,
-                reason: category === "Security" ? "Bảo mật & Theo dõi" : (category === "Media/CDN" ? "Tải đa phương tiện" : "Mục đích chung")
+                targetIP: targetIP,
+                reason: category === "Security" ? "Bảo mật định tuyến" : (category === "Media/CDN" ? "Tối ưu hóa CDN" : "Định tuyến Least-Latency")
             };
-            aiDecisionCache.set(domain, category);
+            const cacheVal = JSON.stringify({ category, targetIP });
+            aiDecisionCache.set(domain, cacheVal);
             saveAICache();
             learnedExamples.push({ domain, category, reason: decision.reason });
             if (learnedExamples.length > 1000) learnedExamples.shift();
@@ -478,13 +512,15 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert. Classify the domain name. Analyze if it belongs to security threats (ad/tracker/telemetry/scam/phishing), media/CDN streaming, general search/social portals, or API/app backend services.\n\n" +
-                          "Strict Rules:\n" +
-                          "1. Category 'Security': trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
-                          "2. Category 'Media/CDN': CDNs, media streams, video streaming, images CDN, static assets.\n" +
-                          "3. Category 'General/Search': search engines, news portals, social networking main sites (not CDNs).\n" +
-                          "4. Category 'API/App': application backend services, transactional APIs, main backend services.\n" +
-                          "5. Respond in strict JSON: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"reason\": \"1-3 words in Vietnamese\" }." +
+    const poolContext = getUpstreamPoolPromptContext();
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
+                          "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
+                          "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
+                          "Strict Routing Logic Rules:\n" +
+                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to Quad9 (9.9.9.9) for security filtering. If Quad9 is OFFLINE or latency is extremely high (>300ms), fallback and route to OpenDNS (208.67.222.222) or Cloudflare (1.1.1.1).\n" +
+                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to Google (8.8.8.8) or Cloudflare (1.1.1.1) depending on which is faster (lower latency).\n" +
+                          "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
+                          "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
@@ -515,6 +551,10 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
+                        if (res.statusCode === 429 || res.statusCode === 401) {
+                            console.warn(`[AI Training] Key ${apiKey.substring(0, 8)}... error ${res.statusCode}. Cool down active for 60s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 60000);
+                        }
                         callback(false, null);
                         return;
                     }
@@ -523,7 +563,9 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
                     if (replyStr) {
                         const decision = JSON.parse(replyStr);
                         const category = decision.category || "General/Search";
-                        aiDecisionCache.set(domain, category);
+                        const targetIP = decision.targetIP || "1.1.1.1";
+                        const cacheVal = JSON.stringify({ category, targetIP });
+                        aiDecisionCache.set(domain, cacheVal);
                         saveAICache();
                         
                         learnedExamples.push({ domain, category, reason: decision.reason || "Huấn luyện AI" });
@@ -550,13 +592,39 @@ function checkDomainWithGroqForTraining(domain, apiKey, callback, internetContex
     }
 }
 
-// Local DNS Cache
+// Local DNS Cache with prefetching
 function checkCache(domain, qtype) {
     const key = `${domain.toLowerCase()}_${qtype}`;
     const cached = dnsCache.get(key);
     if (cached) {
-        if (Date.now() < cached.expiresAt) {
+        const now = Date.now();
+        if (now < cached.expiresAt) {
             config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
+            
+            // Smart Cache Prefetching:
+            // Trigger prefetch if remaining TTL < 20% of total TTL
+            const totalTTL = (cached.expiresAt - cached.createdAt) / 1000;
+            const remainingTTL = (cached.expiresAt - now) / 1000;
+            if (totalTTL > 10 && remainingTTL < (totalTTL * 0.2)) {
+                const prefetchKey = `prefetch_${key}`;
+                if (!activeUpstreamQueries.has(prefetchKey)) {
+                    activeUpstreamQueries.set(prefetchKey, true);
+                    console.log(`[Cache Prefetch] Triggering background prefetch for: ${domain} (remaining TTL: ${Math.round(remainingTTL)}s / ${Math.round(totalTTL)}s)`);
+                    
+                    const targetDNS = selectUpstreamDNS(domain);
+                    const prefetchQueryBuffer = buildQueryBufferForMeasure(domain);
+                    
+                    fetchFromUpstreamDeduplicated(prefetchQueryBuffer, domain, qtype, targetDNS, (response) => {
+                        activeUpstreamQueries.delete(prefetchKey);
+                        if (response) {
+                            const newTtl = extractTTL(response, 12);
+                            setCache(domain, qtype, response, newTtl);
+                            console.log(`[Cache Prefetch] Asynchronously updated cache for: ${domain} (New TTL: ${newTtl}s)`);
+                        }
+                    });
+                }
+            }
+
             dnsCache.delete(key);
             dnsCache.set(key, cached);
             return cached.responseBuffer;
@@ -583,6 +651,7 @@ function setCache(domain, qtype, responseBuffer, ttl) {
     }
     dnsCache.set(key, {
         responseBuffer: responseBuffer,
+        createdAt: Date.now(),
         expiresAt: Date.now() + (finalTtl * 1000)
     });
 }
@@ -695,37 +764,46 @@ function extractTTL(responseBuffer, questionEndOffset) {
     }
 }
 
-// Upstream DNS Resolver (UDP) and Deduplication
-function initUpstreamSocket() {
-    if (upstreamSocket) return;
-    upstreamSocket = dgram.createSocket('udp4');
-    
-    upstreamSocket.on('message', (msg) => {
-        if (msg.length < 2) return;
-        const txId = msg.readUInt16BE(0);
-        const req = pendingRequests.get(txId);
-        if (req) {
-            pendingRequests.delete(txId);
-            if (req.timer) clearTimeout(req.timer);
-            
-            const clientResponse = Buffer.from(msg);
-            clientResponse[0] = req.originalIDBytes[0];
-            clientResponse[1] = req.originalIDBytes[1];
-            req.callback(clientResponse);
-        }
-    });
-    
-    upstreamSocket.on('error', (err) => {
-        console.error("Shared upstream UDP socket error:", err);
-        try { upstreamSocket.close(); } catch (e) {}
-        upstreamSocket = null;
-        setTimeout(initUpstreamSocket, 1000);
-    });
+// Upstream UDP Client Sockets Pool Initialization
+function initUpstreamSocketPool() {
+    for (let i = 0; i < SOCKET_POOL_SIZE; i++) {
+        if (upstreamSocketPool[i]) continue;
+        
+        const socket = dgram.createSocket('udp4');
+        upstreamSocketPool[i] = socket;
+        
+        socket.on('message', (msg) => {
+            if (msg.length < 2) return;
+            const txId = msg.readUInt16BE(0);
+            const req = pendingRequests.get(txId);
+            if (req) {
+                pendingRequests.delete(txId);
+                if (req.timer) clearTimeout(req.timer);
+                
+                const clientResponse = Buffer.from(msg);
+                clientResponse[0] = req.originalIDBytes[0];
+                clientResponse[1] = req.originalIDBytes[1];
+                req.callback(clientResponse);
+            }
+        });
+        
+        socket.on('error', (err) => {
+            console.error(`Upstream UDP socket pool index ${i} error:`, err);
+            try { socket.close(); } catch (e) {}
+            upstreamSocketPool[i] = null;
+            setTimeout(initUpstreamSocketPool, 1000);
+        });
+    }
 }
 
 function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
-    initUpstreamSocket();
-    if (!upstreamSocket) {
+    initUpstreamSocketPool();
+    
+    // Distribute via socket pool in round-robin fashion
+    const socket = upstreamSocketPool[nextSocketIndex % SOCKET_POOL_SIZE];
+    nextSocketIndex = (nextSocketIndex + 1) % SOCKET_POOL_SIZE;
+    
+    if (!socket) {
         callback(null);
         return;
     }
@@ -757,7 +835,7 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
         timestamp: Date.now()
     });
     
-    upstreamSocket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, 53, upstreamIP, (err) => {
+    socket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, 53, upstreamIP, (err) => {
         if (err) {
             console.error(`Failed to send DNS request to upstream ${upstreamIP}:`, err);
             const req = pendingRequests.get(txId);
@@ -781,29 +859,62 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     
     activeUpstreamQueries.set(key, [{ callback, originalIDBytes }]);
     
-    queryUpstream(queryData, upstreamDNS, (response) => {
-        const queue = activeUpstreamQueries.get(key) || [];
-        activeUpstreamQueries.delete(key);
+    // Perform Racing
+    const pool = config.upstreamPool || [];
+    const onlinePool = pool.filter(s => s.online !== false && s.ip !== upstreamDNS);
+    const sorted = [...onlinePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
+    const secondUpstreamDNS = sorted.length > 0 ? sorted[0].ip : null;
+    
+    let resolved = false;
+    let queriesActive = 1;
+    
+    const onResponse = (response) => {
+        if (resolved) return;
         
-        queue.forEach(item => {
-            if (response && response.length >= 2) {
+        if (response) {
+            resolved = true;
+            const queue = activeUpstreamQueries.get(key) || [];
+            activeUpstreamQueries.delete(key);
+            
+            queue.forEach(item => {
                 const clientResponse = Buffer.from(response);
                 clientResponse[0] = item.originalIDBytes[0];
                 clientResponse[1] = item.originalIDBytes[1];
                 item.callback(clientResponse);
-            } else {
-                item.callback(null);
+            });
+        } else {
+            queriesActive--;
+            if (queriesActive === 0) {
+                resolved = true;
+                const queue = activeUpstreamQueries.get(key) || [];
+                activeUpstreamQueries.delete(key);
+                queue.forEach(item => item.callback(null));
             }
-        });
-    });
+        }
+    };
+    
+    queryUpstream(queryData, upstreamDNS, onResponse);
+    
+    if (config.dnsRacingEnabled && secondUpstreamDNS) {
+        queriesActive++;
+        const racingDelay = config.dnsRacingDelayMs || 15;
+        setTimeout(() => {
+            if (!resolved) {
+                queryUpstream(queryData, secondUpstreamDNS, onResponse);
+            } else {
+                queriesActive--;
+            }
+        }, racingDelay);
+    }
 }
 
-// Groq AI Routing helpers
+// Groq API helpers
 function getNextGroqKey() {
-    const keys = config.groqApiKeys;
-    if (!keys || keys.length === 0) return null;
-    const key = keys[groqKeyIndex % keys.length];
-    groqKeyIndex = (groqKeyIndex + 1) % keys.length;
+    const keys = config.groqApiKeys || [];
+    const availableKeys = keys.filter(isKeyAvailable);
+    if (availableKeys.length === 0) return null;
+    const key = availableKeys[groqKeyIndex % availableKeys.length];
+    groqKeyIndex = (groqKeyIndex + 1) % availableKeys.length;
     return key;
 }
 
@@ -836,17 +947,21 @@ function selectUpstreamDNS(domain) {
     }
     
     if (algo === "ai-routing" && config.aiEnabled) {
-        const category = aiDecisionCache.get(domain);
-        if (category === "Security") {
-            const quad9 = activePool.find(s => s.ip === "9.9.9.9");
-            if (quad9) return quad9.ip;
-        } else if (category === "Media/CDN") {
-            const google = activePool.find(s => s.ip === "8.8.8.8");
-            if (google) return google.ip;
+        const cacheVal = aiDecisionCache.get(domain);
+        if (cacheVal) {
+            try {
+                if (cacheVal.startsWith('{')) {
+                    const parsed = JSON.parse(cacheVal);
+                    if (parsed && parsed.targetIP) {
+                        const s = activePool.find(x => x.ip === parsed.targetIP);
+                        if (s && s.online !== false) return s.ip;
+                    }
+                }
+            } catch(e) {}
         }
     }
     
-    // Default / Least Latency
+    // Default: least-latency
     const sorted = [...activePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
     return sorted[0].ip;
 }
@@ -870,54 +985,121 @@ function isSafeDomain(domain) {
     return false;
 }
 
+// Heuristics Fast-Path Rules
+function getFastPathCategory(domain) {
+    const d = domain.trim().toLowerCase();
+    
+    if (d.includes('cdn') || d.includes('static') || d.includes('image') || d.includes('media') || 
+        d.includes('video') || d.includes('stream') || d.includes('fbcdn') || d.includes('tiktokcdn') ||
+        d.includes('akamai') || d.includes('cloudfront') || d.includes('fastly') || d.includes('ytimg') ||
+        d.endsWith('.png') || d.endsWith('.jpg') || d.endsWith('.mp4') || d.endsWith('.mp3')) {
+        return "Media/CDN";
+    }
+    
+    if (d.includes('api') || d.includes('auth') || d.includes('login') || d.includes('service') ||
+        d.includes('oauth') || d.includes('backend') || d.includes('sign-in') || d.endsWith('signup')) {
+        return "API/App";
+    }
+    
+    if (d.includes('ad') || d.includes('track') || d.includes('telemetry') || d.includes('analytic') ||
+        d.includes('doubleclick') || d.includes('pixel') || d.includes('scam') || d.includes('phish') ||
+        d.includes('fake') || d.includes('verify')) {
+        return "Security";
+    }
+    
+    return null;
+}
+
 function enqueueGroqCheck(domain) {
     const d = domain.trim().toLowerCase();
     if (!d || d.includes('localhost') || d.includes('127.0.0.1') || IGNORED_DOMAINS.has(d)) return;
     if (d.endsWith('.local') || d.endsWith('.localhost')) return;
     if (aiDecisionCache.has(d)) return;
     
-    if (isSafeDomain(d)) {
-        let category = "General/Search";
-        if (d.includes('cdn') || d.includes('fbcdn') || d.includes('tiktokcdn') || d.includes('akamai')) {
-            category = "Media/CDN";
+    // 1. Fast-Path Heuristic Check
+    const fastPath = getFastPathCategory(d);
+    if (fastPath) {
+        let targetIP = "1.1.1.1";
+        if (fastPath === "Security") targetIP = "9.9.9.9";
+        else if (fastPath === "Media/CDN") targetIP = "8.8.8.8";
+        else {
+            const sorted = [...(config.upstreamPool || [])].sort((a,b) => (a.latency || 0) - (b.latency || 0));
+            if (sorted.length > 0) targetIP = sorted[0].ip;
         }
-        aiDecisionCache.set(d, category);
+        aiDecisionCache.set(d, JSON.stringify({ category: fastPath, targetIP }));
+        saveAICache();
+        return;
+    }
+    
+    // 2. Safe domains check
+    if (isSafeDomain(d)) {
+        aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
         saveAICache();
         return;
     }
     
     if (!config.groqApiKeys || config.groqApiKeys.length === 0) return;
-    aiDecisionCache.set(d, "General/Search");
+    aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
     
     groqQueue.push(d);
-    processGroqQueue();
+    // processGroqQueue will be triggered asynchronously by live queue workers
 }
 
-function processGroqQueue() {
-    if (isQueuePaused) return;
-    const maxConcurrent = getMaxConcurrentGroq();
-    if (activeGroqRequests >= maxConcurrent || groqQueue.length === 0) return;
-    if (queueTimeoutId) return;
+// Live Queue Multi-Key Concurrency Workers
+let liveWorkerTimeouts = [];
+function runLiveGroqQueue() {
+    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
+        liveWorkerTimeouts.forEach(clearTimeout);
+        liveWorkerTimeouts = [];
+        return;
+    }
+    
+    liveWorkerTimeouts.forEach(clearTimeout);
+    liveWorkerTimeouts = [];
+    
+    console.log(`[AI Live Queue] Starting ${config.groqApiKeys.length} concurrent live workers...`);
+    config.groqApiKeys.forEach((apiKey, idx) => {
+        const startDelay = idx * 1000;
+        const timeoutId = setTimeout(() => {
+            runLiveWorker(apiKey);
+        }, startDelay);
+        liveWorkerTimeouts.push(timeoutId);
+    });
+}
+
+function runLiveWorker(apiKey) {
+    if (!config.aiEnabled || !config.groqApiKeys || !config.groqApiKeys.includes(apiKey)) {
+        return;
+    }
+    
+    if (!isKeyAvailable(apiKey)) {
+        const timeoutId = setTimeout(() => runLiveWorker(apiKey), 5000);
+        liveWorkerTimeouts.push(timeoutId);
+        return;
+    }
+    
+    if (groqQueue.length === 0 || isQueuePaused) {
+        const timeoutId = setTimeout(() => runLiveWorker(apiKey), 2000);
+        liveWorkerTimeouts.push(timeoutId);
+        return;
+    }
     
     const domain = groqQueue.shift();
     activeGroqRequests++;
     
-    const apiKey = getNextGroqKey();
     checkDomainWithGroq(domain, apiKey, () => {
         activeGroqRequests--;
-        processGroqQueue();
+        const timeoutId = setTimeout(() => runLiveWorker(apiKey), 15000);
+        liveWorkerTimeouts.push(timeoutId);
     });
-    
-    queueTimeoutId = setTimeout(() => {
-        queueTimeoutId = null;
-        processGroqQueue();
-    }, QUEUE_DELAY_MS);
 }
 
 function gatherInternetContext(domain) {
     return new Promise((resolve) => {
         const result = {
             resolvedIPs: [],
+            resolvedCNAMEs: [],
+            resolvedNSs: [],
             httpStatus: null,
             serverHeader: null,
             contentType: null,
@@ -925,14 +1107,41 @@ function gatherInternetContext(domain) {
             error: null
         };
         const dns = require('dns');
-        dns.resolve4(domain, (dnsErr, addresses) => {
-            if (!dnsErr && addresses) {
+        
+        let pending = 3;
+        const checkDone = () => {
+            pending--;
+            if (pending === 0) {
+                probeHTTP();
+            }
+        };
+        
+        dns.resolve4(domain, (err, addresses) => {
+            if (!err && addresses) {
                 result.resolvedIPs = addresses.slice(0, 3);
             }
+            checkDone();
+        });
+        
+        dns.resolveCname(domain, (err, addresses) => {
+            if (!err && addresses) {
+                result.resolvedCNAMEs = addresses.slice(0, 3);
+            }
+            checkDone();
+        });
+        
+        dns.resolveNs(domain, (err, addresses) => {
+            if (!err && addresses) {
+                result.resolvedNSs = addresses.slice(0, 3);
+            }
+            checkDone();
+        });
+        
+        function probeHTTP() {
             const http = require('http');
             const url = `http://${domain}/`;
             let reqFinished = false;
-            const req = http.get(url, { timeout: 1500 }, (res) => {
+            const req = http.get(url, { timeout: 1200 }, (res) => {
                 reqFinished = true;
                 result.httpStatus = res.statusCode;
                 result.serverHeader = res.headers['server'] || null;
@@ -960,7 +1169,7 @@ function gatherInternetContext(domain) {
                     resolve(result);
                 }
             });
-        });
+        }
     });
 }
 
@@ -970,9 +1179,21 @@ function buildAIAnalysisContext(domain, internetContext = null) {
     const tld = parts[parts.length - 1];
     let prompt = `Domain to analyze: ${domain}\nTLD: .${tld}\n`;
     if (internetContext) {
-        prompt += `Live Probe Data:\n- IPs: ${JSON.stringify(internetContext.resolvedIPs)}\n- HTTP: ${internetContext.httpStatus}, Server: ${internetContext.serverHeader}, Title: "${internetContext.htmlTitle || 'N/A'}"\n- Error: ${internetContext.error || 'None'}\n`;
+        prompt += `Live Probe Data:\n- IPs: ${JSON.stringify(internetContext.resolvedIPs)}\n`;
+        if (internetContext.resolvedCNAMEs && internetContext.resolvedCNAMEs.length > 0) {
+            prompt += `- CNAMEs: ${JSON.stringify(internetContext.resolvedCNAMEs)}\n`;
+        }
+        if (internetContext.resolvedNSs && internetContext.resolvedNSs.length > 0) {
+            prompt += `- Name Servers (NS): ${JSON.stringify(internetContext.resolvedNSs)}\n`;
+        }
+        prompt += `- HTTP: ${internetContext.httpStatus}, Server: ${internetContext.serverHeader}, Title: "${internetContext.htmlTitle || 'N/A'}"\n- Error: ${internetContext.error || 'None'}\n`;
     }
     return prompt;
+}
+
+function getUpstreamPoolPromptContext() {
+    const pool = config.upstreamPool || [];
+    return pool.map(s => `- ${s.name} (${s.ip}): latency ${s.latency || 0}ms, status: ${s.online !== false ? 'ONLINE' : 'OFFLINE'}`).join('\n');
 }
 
 function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetContext = null) {
@@ -984,7 +1205,17 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
             } else if (domain.includes('cdn') || domain.includes('media') || domain.includes('video') || domain.includes('stream') || domain.includes('youtube') || domain.includes('tiktok')) {
                 category = "Media/CDN";
             }
-            aiDecisionCache.set(domain, category);
+            
+            let targetIP = "1.1.1.1";
+            if (category === "Security") targetIP = "9.9.9.9";
+            else if (category === "Media/CDN") targetIP = "8.8.8.8";
+            else {
+                const sorted = [...(config.upstreamPool || [])].sort((a,b) => (a.latency || 0) - (b.latency || 0));
+                if (sorted.length > 0) targetIP = sorted[0].ip;
+            }
+            
+            const cacheVal = JSON.stringify({ category, targetIP });
+            aiDecisionCache.set(domain, cacheVal);
             saveAICache();
             learnedExamples.push({ domain, category, reason: "Phân loại giả lập" });
             if (learnedExamples.length > 1000) learnedExamples.shift();
@@ -1016,7 +1247,7 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
         queueTimeoutId = setTimeout(() => {
             isQueuePaused = false;
             queueTimeoutId = null;
-            processGroqQueue();
+            runLiveGroqQueue();
         }, 60000);
         if (callback) callback();
         return;
@@ -1029,13 +1260,15 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert. Classify the domain name. Analyze if it belongs to security threats (ad/tracker/telemetry/scam/phishing), media/CDN streaming, general search/social portals, or API/app backend services.\n\n" +
-                          "Strict Rules:\n" +
-                          "1. Category 'Security': trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
-                          "2. Category 'Media/CDN': CDNs, media streams, video streaming, images CDN, static assets.\n" +
-                          "3. Category 'General/Search': search engines, news portals, social networking main sites (not CDNs).\n" +
-                          "4. Category 'API/App': application backend services, transactional APIs, main backend services.\n" +
-                          "5. Respond in strict JSON: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"reason\": \"1-3 words in Vietnamese\" }." +
+    const poolContext = getUpstreamPoolPromptContext();
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
+                          "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
+                          "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
+                          "Strict Routing Logic Rules:\n" +
+                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to Quad9 (9.9.9.9) for security filtering. If Quad9 is OFFLINE or latency is extremely high (>300ms), fallback and route to OpenDNS (208.67.222.222) or Cloudflare (1.1.1.1).\n" +
+                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to Google (8.8.8.8) or Cloudflare (1.1.1.1) depending on which is faster (lower latency).\n" +
+                          "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
+                          "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
@@ -1074,6 +1307,10 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
+                        if (res.statusCode === 429 || res.statusCode === 401) {
+                            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... error ${res.statusCode}. Cool down active for 60s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 60000);
+                        }
                         triggerFallback();
                         return;
                     }
@@ -1082,10 +1319,12 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
                     if (replyStr) {
                         const decision = JSON.parse(replyStr);
                         const category = decision.category || "General/Search";
-                        aiDecisionCache.set(domain, category);
+                        const targetIP = decision.targetIP || "1.1.1.1";
+                        const cacheVal = JSON.stringify({ category, targetIP });
+                        aiDecisionCache.set(domain, cacheVal);
                         saveAICache();
                         
-                        learnedExamples.push({ domain, category, reason: decision.reason || "Mối nguy hại" });
+                        learnedExamples.push({ domain, category, reason: decision.reason || "AI Cân bằng tải" });
                         if (learnedExamples.length > 1000) learnedExamples.shift();
                         saveAILearning();
                         
@@ -1152,7 +1391,9 @@ function loadConfig() {
                 aiEnabled: false,
                 groqApiKeys: [],
                 groqTrainKeys: [],
-                groqModel: "llama-3.1-8b-instant"
+                groqModel: "llama-3.1-8b-instant",
+                dnsRacingEnabled: true,
+                dnsRacingDelayMs: 15
             };
             saveConfig();
         }
@@ -1166,7 +1407,9 @@ function loadConfig() {
             aiEnabled: false,
             groqApiKeys: [],
             groqTrainKeys: [],
-            groqModel: "llama-3.1-8b-instant"
+            groqModel: "llama-3.1-8b-instant",
+            dnsRacingEnabled: true,
+            dnsRacingDelayMs: 15
         };
     }
     
@@ -1179,6 +1422,8 @@ function loadConfig() {
     config.upstreamPool = config.upstreamPool || defaultPool;
     config.lbAlgorithm = config.lbAlgorithm || "least-latency";
     config.gslbRecords = config.gslbRecords || {};
+    config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
+    config.dnsRacingDelayMs = config.dnsRacingDelayMs !== undefined ? config.dnsRacingDelayMs : 15;
     
     if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
     if (!Array.isArray(config.groqTrainKeys)) config.groqTrainKeys = [];
@@ -1262,8 +1507,24 @@ loadAICache();
 // Periodic Latency Checking
 setInterval(measureUpstreamPool, 30000);
 setTimeout(measureUpstreamPool, 3000); // Check shortly after start
+setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
 
 setTimeout(runStartupAITraining, 15000);
+setTimeout(runLiveGroqQueue, 16000);
+
+function runCacheGC() {
+    const now = Date.now();
+    let deletedCount = 0;
+    for (const [key, value] of dnsCache.entries()) {
+        if (now >= value.expiresAt) {
+            dnsCache.delete(key);
+            deletedCount++;
+        }
+    }
+    if (deletedCount > 0) {
+        console.log(`[Cache GC] Cleared ${deletedCount} expired cache entries. Current cache size: ${dnsCache.size}`);
+    }
+}
 
 // Raw body parser middleware for DNS binary payloads
 app.use((req, res, next) => {
@@ -1317,7 +1578,19 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         const logDomain = (domain !== originalDomain) ? `${domain} (${originalDomain})` : domain;
         const source = isGslb ? "gslb" : (fromCache ? "cache" : "upstream");
         const targetIP = isGslb ? gslbIPs : (fromCache ? "Local Cache" : targetDNS);
-        const category = aiDecisionCache.get(domain) || "General/Search";
+        
+        // Retrieve category from decision cache
+        let category = "General/Search";
+        const cacheVal = aiDecisionCache.get(domain);
+        if (cacheVal) {
+            try {
+                if (cacheVal.startsWith('{')) {
+                    category = JSON.parse(cacheVal).category || "General/Search";
+                } else {
+                    category = cacheVal;
+                }
+            } catch(e) {}
+        }
         
         logQuery(logDomain, category, clientIP, targetIP, source);
         config.stats.total += 1;
@@ -1423,8 +1696,10 @@ app.get('/dns/config', (req, res) => {
         stats: stats,
         aiEnabled: !!config.aiEnabled,
         groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqApiKeysCooldown: (config.groqApiKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqApiKeysCount: (config.groqApiKeys || []).length,
         groqTrainKeys: (config.groqTrainKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
+        groqTrainKeysCooldown: (config.groqTrainKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
         groqTrainKeysCount: (config.groqTrainKeys || []).length,
         aiTrainingStatus: aiTrainingStatus,
         groqModel: config.groqModel || "llama-3.1-8b-instant",
@@ -1436,7 +1711,10 @@ app.get('/dns/config', (req, res) => {
         upstreamPool: config.upstreamPool || [],
         lbAlgorithm: config.lbAlgorithm || "least-latency",
         gslbRecords: config.gslbRecords || {},
-        aiCacheCount: aiDecisionCache.size
+        aiCacheCount: aiDecisionCache.size,
+        aiQueueLength: groqQueue.length,
+        dnsRacingEnabled: !!config.dnsRacingEnabled,
+        dnsRacingDelayMs: config.dnsRacingDelayMs || 15
     });
 });
 
@@ -1540,8 +1818,24 @@ app.post('/dns/groq', (req, res) => {
     broadcastUpdate();
     if (enabled) {
         setTimeout(runStartupAITraining, 2000);
+        setTimeout(runLiveGroqQueue, 2000);
+    } else {
+        liveWorkerTimeouts.forEach(clearTimeout);
+        liveWorkerTimeouts = [];
     }
     res.send("Groq configuration updated");
+});
+
+app.post('/dns/racing', (req, res) => {
+    const enabled = req.query.enabled === 'true';
+    const delay = parseInt(req.query.delay, 10);
+    config.dnsRacingEnabled = enabled;
+    if (!isNaN(delay) && delay >= 0) {
+        config.dnsRacingDelayMs = delay;
+    }
+    saveConfig();
+    broadcastUpdate();
+    res.send("DNS Racing configuration updated");
 });
 
 app.post('/dns/groq/keys/add', (req, res) => {
@@ -1553,6 +1847,7 @@ app.post('/dns/groq/keys/add', (req, res) => {
     config.groqApiKeys.push(trimmedKey);
     saveConfig();
     broadcastUpdate();
+    if (config.aiEnabled) runLiveGroqQueue();
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
@@ -1563,6 +1858,7 @@ app.post('/dns/groq/keys/remove', (req, res) => {
     config.groqApiKeys.splice(index, 1);
     saveConfig();
     broadcastUpdate();
+    if (config.aiEnabled) runLiveGroqQueue();
     res.json({ count: config.groqApiKeys.length, maxConcurrent: config.groqApiKeys.length * GROQ_CONCURRENCY_PER_KEY });
 });
 
@@ -1600,13 +1896,15 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
     const examplesText = "\n\nVí dụ phân loại đã học gần đây để tuân theo:\n" + 
         recentExamples.map(ex => `- ${ex.domain} -> {"category": "${ex.category}", "reason": "${ex.reason}"}`).join('\n');
 
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert. Classify the domain name. Analyze if it belongs to security threats (ad/tracker/telemetry/scam/phishing), media/CDN streaming, general search/social portals, or API/app backend services.\n\n" +
-                          "Strict Rules:\n" +
-                          "1. Category 'Security': trackers, advertising, telemetry, analytics, scams, malware, phishing (especially fake brands, fake banks, fake government sites targeting Vietnamese users).\n" +
-                          "2. Category 'Media/CDN': CDNs, media streams, video streaming, images CDN, static assets.\n" +
-                          "3. Category 'General/Search': search engines, news portals, social networking main sites (not CDNs).\n" +
-                          "4. Category 'API/App': application backend services, transactional APIs, main backend services.\n" +
-                          "5. Respond in strict JSON: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"reason\": \"1-3 words in Vietnamese\" }." +
+    const poolContext = getUpstreamPoolPromptContext();
+    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
+                          "Analyze the domain name and determine the best upstream DNS IP to route the query based on the current upstream pool status and latency:\n\n" +
+                          "Current Upstream Pool Status:\n" + poolContext + "\n\n" +
+                          "Strict Routing Logic Rules:\n" +
+                          "1. Category 'Security' (ad, tracker, telemetry, scam, phishing): Route to Quad9 (9.9.9.9) for security filtering. If Quad9 is OFFLINE or latency is extremely high (>300ms), fallback and route to OpenDNS (208.67.222.222) or Cloudflare (1.1.1.1).\n" +
+                          "2. Category 'Media/CDN' (streaming, video, images, static assets): Route to Google (8.8.8.8) or Cloudflare (1.1.1.1) depending on which is faster (lower latency).\n" +
+                          "3. Category 'General/Search' or 'API/App': Route to the DNS server with the lowest latency in the pool.\n\n" +
+                          "Respond in strict JSON format: { \"category\": \"Security\" | \"Media/CDN\" | \"General/Search\" | \"API/App\", \"targetIP\": \"[chosen DNS server IP]\", \"reason\": \"1-3 words in Vietnamese explaining routing choice\" }." +
                           examplesText;
 
     const postData = JSON.stringify({
@@ -1646,6 +1944,10 @@ function runTestWithFallback(domain, apiKey, res, modelIndex = 0) {
                 try {
                     const responseString = Buffer.concat(body).toString('utf8');
                     if (response.statusCode !== 200) {
+                        if (response.statusCode === 429 || response.statusCode === 401) {
+                            console.warn(`[AI Test] Key ${apiKey.substring(0, 8)}... error ${response.statusCode}. Cool down active for 60s.`);
+                            keyCooldowns.set(apiKey, Date.now() + 60000);
+                        }
                         triggerFallback();
                         return;
                     }
