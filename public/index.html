@@ -316,6 +316,10 @@
             background: rgba(16, 185, 129, 0.15);
             color: var(--success);
         }
+        .dns-status-badge.stale {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+        }
 
         .latency-dot {
             display: inline-block;
@@ -879,6 +883,9 @@
                         if (status.includes('CACHED')) {
                             badgeClass = 'cached';
                             label = 'CACHED';
+                        } else if (status.includes('STALE')) {
+                            badgeClass = 'stale';
+                            label = 'STALE';
                         } else if (status.includes('GSLB')) {
                             badgeClass = 'gslb';
                             label = 'GSLB';

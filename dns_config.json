@@ -27,9 +27,7 @@
   ],
   "upstreamDNS": "1.1.1.1",
   "stats": {
-    "total": 2,
-    "blocked": 0,
-    "allowed": 0,
+    "total": 0,
     "cacheHits": 0,
     "cacheMisses": 0
   },
@@ -43,28 +41,36 @@
       "name": "Cloudflare",
       "latency": 30,
       "online": true,
-      "queryCount": 0
+      "queryCount": 0,
+      "history": [],
+      "successRate": 100
     },
     {
       "ip": "8.8.8.8",
       "name": "Google",
       "latency": 62,
       "online": true,
-      "queryCount": 0
+      "queryCount": 0,
+      "history": [],
+      "successRate": 100
     },
     {
       "ip": "9.9.9.9",
       "name": "Quad9",
       "latency": 57,
       "online": true,
-      "queryCount": 0
+      "queryCount": 0,
+      "history": [],
+      "successRate": 100
     },
     {
       "ip": "208.67.222.222",
       "name": "OpenDNS",
       "latency": 24,
       "online": true,
-      "queryCount": 0
+      "queryCount": 0,
+      "history": [],
+      "successRate": 100
     }
   ],
   "lbAlgorithm": "least-latency",
@@ -74,5 +80,6 @@
     ]
   },
   "dnsRacingEnabled": true,
-  "dnsRacingDelayMs": 15
+  "dnsRacingDelayMs": 15,
+  "minCacheTtlSeconds": 300
 }

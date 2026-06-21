@@ -202,8 +202,8 @@ function getWSUpdatePayload() {
 
 
 
-// Local DNS Cache with prefetching
-function checkCache(domain, qtype) {
+// Local DNS Cache with prefetching and Stale-While-Revalidate (SWR)
+function checkCache(domain, qtype, queryData = null) {
     const key = `${domain.toLowerCase()}_${qtype}`;
     const cached = dnsCache.get(key);
     if (cached) {
@@ -221,12 +221,12 @@ function checkCache(domain, qtype) {
                     console.log(`[Cache Prefetch] Triggering background prefetch for: ${domain} (remaining TTL: ${Math.round(remainingTTL)}s / ${Math.round(totalTTL)}s)`);
                     
                     const targetDNS = selectUpstreamDNS(domain);
-                    const prefetchQueryBuffer = buildQueryBufferForMeasure(domain);
+                    const prefetchQueryBuffer = queryData ? Buffer.from(queryData) : buildQueryBufferForMeasure(domain);
                     
                     fetchFromUpstreamDeduplicated(prefetchQueryBuffer, domain, qtype, targetDNS, (response) => {
                         activeUpstreamQueries.delete(prefetchKey);
                         if (response) {
-                            const newTtl = extractTTL(response, 12);
+                            const newTtl = extractTTL(response);
                             setCache(domain, qtype, response, newTtl);
                             console.log(`[Cache Prefetch] Asynchronously updated cache for: ${domain} (New TTL: ${newTtl}s)`);
                         }
@@ -236,9 +236,32 @@ function checkCache(domain, qtype) {
 
             dnsCache.delete(key);
             dnsCache.set(key, cached);
-            return cached.responseBuffer;
+            return { responseBuffer: cached.responseBuffer, fromStale: false };
         } else {
-            dnsCache.delete(key);
+            // Serve stale cache for up to 12 hours (43200 seconds)
+            const staleTtlLimitMs = 12 * 3600 * 1000;
+            if (queryData && (now - cached.expiresAt < staleTtlLimitMs)) {
+                const revalidateKey = `revalidate_${key}`;
+                if (!activeUpstreamQueries.has(revalidateKey)) {
+                    activeUpstreamQueries.set(revalidateKey, true);
+                    console.log(`[Cache SWR] Serving stale cache for: ${domain} (expired ${Math.round((now - cached.expiresAt) / 1000)}s ago). Triggering background revalidate...`);
+                    
+                    const targetDNS = selectUpstreamDNS(domain);
+                    const revalidateQueryBuffer = Buffer.from(queryData);
+                    
+                    fetchFromUpstreamDeduplicated(revalidateQueryBuffer, domain, qtype, targetDNS, (response) => {
+                        activeUpstreamQueries.delete(revalidateKey);
+                        if (response) {
+                            const newTtl = extractTTL(response);
+                            setCache(domain, qtype, response, newTtl);
+                            console.log(`[Cache SWR] Background revalidated cache for: ${domain} (New TTL: ${newTtl}s)`);
+                        }
+                    });
+                }
+                return { responseBuffer: cached.responseBuffer, fromStale: true };
+            } else {
+                dnsCache.delete(key);
+            }
         }
     }
     return null;
@@ -341,11 +364,33 @@ function buildGslbResponse(queryBuffer, questionEndOffset, ips) {
     return Buffer.concat([header, question, ...answers]);
 }
 
-function extractTTL(responseBuffer, questionEndOffset) {
+function extractTTL(responseBuffer) {
     try {
-        let offset = questionEndOffset + 4; // Start of Answer Section
+        if (!responseBuffer || responseBuffer.length < 12) return 300;
+        
+        // Skip DNS header (12 bytes)
+        let offset = 12;
+        
+        // Skip Question Section
+        while (offset < responseBuffer.length) {
+            let len = responseBuffer[offset];
+            if (len === 0) {
+                offset += 1;
+                break;
+            }
+            if ((len & 0xC0) === 0xC0) {
+                offset += 2;
+                break;
+            }
+            offset += 1 + len;
+        }
+        // Skip QTYPE (2 bytes) and QCLASS (2 bytes)
+        offset += 4;
+        
+        // Start of Answer Section
         if (offset + 10 > responseBuffer.length) return 300;
         
+        // Skip Answer Name
         let nameByte = responseBuffer[offset];
         if ((nameByte & 0xC0) === 0xC0) {
             offset += 2;
@@ -717,7 +762,7 @@ function runAILoadBalancerBrain() {
                           "2. BE EXTREMELY AGGRESSIVE WITH LATENCY: Assign weights such that the fastest server with the lowest RTT receives almost ALL the traffic (80% to 100%). Do NOT spread weights to slower servers (> 40ms or 2x slower than the fastest server) just to have 'balance'. Slow servers must receive 0% weight. Spreading weights to slow servers directly ruins the average latency of the system. Only spread weights (e.g. 70/30) if the fastest server has packet loss / success rate < 98%.\n" +
                           "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
                           "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 3600). Increase it (e.g., 900-3600s) to keep queries cached on the server and bypass network latency entirely if the primary DNS servers are fast and 100% stable, or decrease it (e.g., 300-600s) if the latency of the servers is fluctuating or success rates drop.\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) to keep queries cached in memory and bypass network latency entirely if the DNS servers are stable and fast, or decrease it (e.g., 300-600s) only if server RTTs are highly unstable or packet loss occurs.\n" +
                           "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
@@ -729,7 +774,7 @@ function runAILoadBalancerBrain() {
                           "  },\n" +
                           "  \"dnsRacingEnabled\": true,\n" +
                           "  \"dnsRacingDelayMs\": 15,\n" +
-                          "  \"minCacheTtlSeconds\": 1200,\n" +
+                          "  \"minCacheTtlSeconds\": 14400,\n" +
                           "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
@@ -806,7 +851,7 @@ function runAILoadBalancerBrain() {
                             config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
                         }
                         if (typeof decision.minCacheTtlSeconds === 'number') {
-                            config.minCacheTtlSeconds = Math.max(300, Math.min(3600, decision.minCacheTtlSeconds));
+                            config.minCacheTtlSeconds = Math.max(300, Math.min(43200, decision.minCacheTtlSeconds));
                         }
                         
                         config.aiLBReason = reason;
@@ -882,36 +927,74 @@ function selectAIWeightedDNS(activePool) {
     return precomputedAiPool[0].ip;
 }
 
-// Probability-weighted selector (Inverse Latency Squared)
+// Probability-weighted selector (Inverse Latency Cubed + Aggressive Penalty Filter)
 function selectWeightedDNS(activePool) {
     if (activePool.length === 0) return "1.1.1.1";
     if (activePool.length === 1) return activePool[0].ip;
     
-    let totalWeight = 0;
+    // Find the minimum latency among online servers
+    let minLatency = Infinity;
     for (let i = 0; i < activePool.length; i++) {
         const s = activePool[i];
-        if (s.online !== false && (s.latency || 0) < 9999) {
-            const lat = Math.max(s.latency || 5, 2);
-            const weight = Math.round(100000 / (lat * lat));
-            totalWeight += weight;
+        if (s.online !== false && typeof s.latency === 'number' && s.latency < minLatency && s.latency > 0) {
+            minLatency = s.latency;
         }
     }
     
-    if (totalWeight <= 0) return activePool[0].ip;
+    // Fallback if no latency measured yet
+    if (minLatency === Infinity) minLatency = 20;
     
-    let rand = Math.random() * totalWeight;
+    let totalWeight = 0;
+    const weights = [];
+    
     for (let i = 0; i < activePool.length; i++) {
         const s = activePool[i];
         if (s.online !== false && (s.latency || 0) < 9999) {
             const lat = Math.max(s.latency || 5, 2);
-            const weight = Math.round(100000 / (lat * lat));
-            rand -= weight;
-            if (rand <= 0) {
-                return s.ip;
+            
+            // Aggressive latency penalty:
+            // - If RTT > 1.5x minLatency, smoothly scale down weight
+            // - If RTT > 2.0x minLatency, drop weight to 0
+            let weightFactor = 1.0;
+            const ratio = lat / minLatency;
+            if (ratio > 2.0) {
+                weightFactor = 0.0;
+            } else if (ratio > 1.5) {
+                weightFactor = (2.0 - ratio) * 2; // Linear slide from 1 to 0
+            }
+            
+            // Cubed inverse latency for extremely steep selection towards the fastest server
+            const rawWeight = Math.round(1000000 / (lat * lat * lat));
+            const finalWeight = Math.round(rawWeight * weightFactor);
+            
+            weights.push({ ip: s.ip, weight: finalWeight });
+            totalWeight += finalWeight;
+        }
+    }
+    
+    if (totalWeight <= 0) {
+        // Fallback to the absolute fastest server if all weights got zeroed out
+        let fastest = activePool[0];
+        let bestLat = Infinity;
+        for (let i = 0; i < activePool.length; i++) {
+            const s = activePool[i];
+            if (s.online !== false && (s.latency || 9999) < bestLat) {
+                bestLat = s.latency || 9999;
+                fastest = s;
             }
         }
+        return fastest ? fastest.ip : activePool[0].ip;
     }
-    return activePool[0].ip;
+    
+    let rand = Math.random() * totalWeight;
+    for (let i = 0; i < weights.length; i++) {
+        const item = weights[i];
+        rand -= item.weight;
+        if (rand <= 0) {
+            return item.ip;
+        }
+    }
+    return weights[0].ip;
 }
 
 // Load Balancer DNS Selector
@@ -988,6 +1071,8 @@ function logQuery(domain, category, clientIP, targetIP, source = "upstream") {
     let statusText = `✈️ ROUTED [${targetIP}]`;
     if (source === "cache") {
         statusText = `⚡ CACHED`;
+    } else if (source === "stale") {
+        statusText = `⏳ STALE (SWR)`;
     } else if (source === "gslb") {
         statusText = `🔄 GSLB [${targetIP}]`;
     }
@@ -1190,14 +1275,17 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
     
     const targetDNS = selectUpstreamDNS(domain);
     
-    const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "") => {
+    const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "", sourceOverride = "") => {
         const latency = Date.now() - startTime;
         totalLatency += latency;
         latencyCount++;
         
         const logDomain = (domain !== originalDomain) ? `${domain} (${originalDomain})` : domain;
-        const source = isGslb ? "gslb" : (fromCache ? "cache" : "upstream");
-        const targetIP = isGslb ? gslbIPs : (fromCache ? "Local Cache" : targetDNS);
+        let source = isGslb ? "gslb" : (fromCache ? "cache" : "upstream");
+        if (sourceOverride) {
+            source = sourceOverride;
+        }
+        const targetIP = isGslb ? gslbIPs : ((fromCache || sourceOverride === "stale") ? "Local Cache" : targetDNS);
         
         let category = config.lbAlgorithm || "Balanced";
         
@@ -1231,23 +1319,23 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
     }
     
     // 1. Check local cache
-    const cachedResponse = checkCache(originalDomain, qtype);
-    if (cachedResponse) {
+    const cachedResponseObj = checkCache(originalDomain, qtype, queryData);
+    if (cachedResponseObj) {
         config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
-        const clientResponse = Buffer.from(cachedResponse);
+        const clientResponse = Buffer.from(cachedResponseObj.responseBuffer);
         clientResponse[0] = queryData[0];
         clientResponse[1] = queryData[1];
-        completeQuery(clientResponse, true, false);
+        completeQuery(clientResponse, true, false, "", cachedResponseObj.fromStale ? "stale" : "cache");
     } else {
         // 2. Fetch from chosen upstream DNS
         fetchFromUpstreamDeduplicated(queryData, originalDomain, qtype, targetDNS, (response, isSecondary) => {
             if (response) {
                 if (isSecondary) {
                     config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
-                    completeQuery(response, true, false);
+                    completeQuery(response, true, false, "", "cache");
                 } else {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
-                    const ttl = extractTTL(response, parsed.questionEndOffset);
+                    const ttl = extractTTL(response);
                     setCache(originalDomain, qtype, response, ttl);
                     completeQuery(response, false, false);
                 }
@@ -1559,7 +1647,7 @@ app.get('/dns/groq/test', (req, res) => {
                           "2. BE EXTREMELY AGGRESSIVE WITH LATENCY: Assign weights such that the fastest server with the lowest RTT receives almost ALL the traffic (80% to 100%). Do NOT spread weights to slower servers (> 40ms or 2x slower than the fastest server) just to have 'balance'. Slow servers must receive 0% weight. Spreading weights to slow servers directly ruins the average latency of the system. Only spread weights (e.g. 70/30) if the fastest server has packet loss / success rate < 98%.\n" +
                           "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
                           "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 3600). Increase it (e.g., 900-3600s) to keep queries cached on the server and bypass network latency entirely if the primary DNS servers are fast and 100% stable, or decrease it (e.g., 300-600s) if the latency of the servers is fluctuating or success rates drop.\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) to keep queries cached in memory and bypass network latency entirely if the DNS servers are stable and fast, or decrease it (e.g., 300-600s) only if server RTTs are highly unstable or packet loss occurs.\n" +
                           "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
@@ -1571,7 +1659,7 @@ app.get('/dns/groq/test', (req, res) => {
                           "  },\n" +
                           "  \"dnsRacingEnabled\": true,\n" +
                           "  \"dnsRacingDelayMs\": 15,\n" +
-                          "  \"minCacheTtlSeconds\": 1200,\n" +
+                          "  \"minCacheTtlSeconds\": 14400,\n" +
                           "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
@@ -1631,7 +1719,7 @@ app.get('/dns/groq/test', (req, res) => {
                             config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
                         }
                         if (typeof decision.minCacheTtlSeconds === 'number') {
-                            config.minCacheTtlSeconds = Math.max(300, Math.min(3600, decision.minCacheTtlSeconds));
+                            config.minCacheTtlSeconds = Math.max(300, Math.min(43200, decision.minCacheTtlSeconds));
                         }
                         
                         config.aiLBReason = reason;
