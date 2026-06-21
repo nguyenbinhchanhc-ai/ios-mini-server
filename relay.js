@@ -149,7 +149,8 @@ function saveAICache() {
 const groqQueue = [];
 let activeGroqRequests = 0;
 const GROQ_CONCURRENCY_PER_KEY = 1; // Max 1 concurrent request per key to prevent rate limiting
-const GROQ_MIN_GAP_PER_KEY_MS = 3000; // Minimum 3 seconds between requests on the same key
+const GROQ_MIN_GAP_PER_KEY_MS = 15000; // Minimum 15 seconds between requests on the SAME key
+const GROQ_GLOBAL_MIN_GAP_MS = 4000; // Minimum 4 seconds between ANY two Groq requests (~15 req/min max)
 let groqKeyIndex = 0;
 let isQueuePaused = false;
 let queueTimeoutId = null;
@@ -160,6 +161,7 @@ const FALLBACK_MODELS = [
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
 const activeRequestsPerKey = new Map(); // key -> number of active concurrent requests
 const lastRequestTimePerKey = new Map(); // key -> timestamp of last request sent
+let lastGlobalGroqRequestTime = 0; // timestamp of last Groq request sent (any key)
 
 function isKeyAvailable(key) {
     if (!key) return false;
@@ -1237,17 +1239,22 @@ function enqueueGroqCheck(domain) {
     scheduleNextDispatch();
 }
 
-// Live Queue Multi-Key Concurrency Workers with Rate Limiting Protection
+// Live Queue with Global Rate Limiting Protection
+// Maximum ~15 requests/minute total across ALL keys to prevent Groq rate limits
 let dispatchIntervalId = null;
-let dispatchScheduled = false;
+let dispatchTimerId = null;
 
 function scheduleNextDispatch() {
-    if (dispatchScheduled) return;
-    dispatchScheduled = true;
-    setTimeout(() => {
-        dispatchScheduled = false;
+    if (dispatchTimerId) return; // Already scheduled
+    
+    // Calculate how long to wait before next dispatch
+    const globalElapsed = Date.now() - lastGlobalGroqRequestTime;
+    const waitMs = Math.max(0, GROQ_GLOBAL_MIN_GAP_MS - globalElapsed);
+    
+    dispatchTimerId = setTimeout(() => {
+        dispatchTimerId = null;
         dispatchGroqQueue();
-    }, 500);
+    }, Math.max(waitMs, 500));
 }
 
 function dispatchGroqQueue() {
@@ -1258,11 +1265,23 @@ function dispatchGroqQueue() {
         return;
     }
     
+    // Enforce global minimum gap
+    const globalElapsed = Date.now() - lastGlobalGroqRequestTime;
+    if (globalElapsed < GROQ_GLOBAL_MIN_GAP_MS) {
+        const waitMs = GROQ_GLOBAL_MIN_GAP_MS - globalElapsed + 100;
+        if (!dispatchTimerId) {
+            dispatchTimerId = setTimeout(() => {
+                dispatchTimerId = null;
+                dispatchGroqQueue();
+            }, waitMs);
+        }
+        return;
+    }
+    
     const keys = config.groqApiKeys;
-    let dispatched = false;
     let earliestRetryMs = Infinity;
     
-    // Try each key exactly once in round-robin order
+    // Find ONE ready key in round-robin order
     for (let i = 0; i < keys.length; i++) {
         if (groqQueue.length === 0) break;
         
@@ -1283,7 +1302,7 @@ function dispatchGroqQueue() {
             continue;
         }
         
-        // Check minimum gap since last request on this key
+        // Check per-key minimum gap
         const lastTime = lastRequestTimePerKey.get(apiKey) || 0;
         const elapsed = Date.now() - lastTime;
         if (elapsed < GROQ_MIN_GAP_PER_KEY_MS) {
@@ -1294,38 +1313,46 @@ function dispatchGroqQueue() {
             continue;
         }
         
-        // This key is ready — dispatch one domain
+        // This key is ready — dispatch ONE domain
         const domain = groqQueue.shift();
         if (!domain) break;
         
         groqKeyIndex = (keyIdx + 1) % keys.length;
         activeRequestsPerKey.set(apiKey, activeCount + 1);
         lastRequestTimePerKey.set(apiKey, Date.now());
+        lastGlobalGroqRequestTime = Date.now();
         activeGroqRequests++;
-        dispatched = true;
         
         const maskedKey = apiKey.substring(0, 8) + '...';
-        console.log(`[AI Dispatch] Sending ${domain} via ${maskedKey} (active: ${activeCount + 1}/${GROQ_CONCURRENCY_PER_KEY}, queue: ${groqQueue.length})`);
+        console.log(`[AI Dispatch] Sending ${domain} via ${maskedKey} (queue: ${groqQueue.length})`);
         
         checkDomainWithGroq(domain, apiKey, () => {
             const currentActive = activeRequestsPerKey.get(apiKey) || 0;
             activeRequestsPerKey.set(apiKey, Math.max(0, currentActive - 1));
             activeGroqRequests = Math.max(0, activeGroqRequests - 1);
             
-            // Schedule next dispatch after the minimum gap
-            scheduleNextDispatch();
+            // Schedule next dispatch respecting global gap
+            if (groqQueue.length > 0) {
+                scheduleNextDispatch();
+            }
         });
         
-        break; // Only dispatch one at a time, then re-schedule
+        // Dispatched one — schedule the NEXT one after global gap
+        if (groqQueue.length > 0) {
+            scheduleNextDispatch();
+        }
+        return; // Only dispatch one at a time
     }
     
-    // If we dispatched one, schedule the next dispatch for the next available key
-    if (dispatched && groqQueue.length > 0) {
-        setTimeout(() => dispatchGroqQueue(), GROQ_MIN_GAP_PER_KEY_MS / Math.max(keys.length, 1));
-    } else if (!dispatched && groqQueue.length > 0 && earliestRetryMs < Infinity) {
-        // No key was ready, schedule retry when the earliest key becomes available
-        console.log(`[AI Dispatch] All keys busy/cooling. Retrying in ${Math.round(earliestRetryMs)}ms (queue: ${groqQueue.length})`);
-        setTimeout(() => dispatchGroqQueue(), Math.min(earliestRetryMs + 100, 10000));
+    // No key was ready — schedule retry
+    if (groqQueue.length > 0 && earliestRetryMs < Infinity) {
+        console.log(`[AI Dispatch] All keys busy/cooling. Retrying in ${Math.round(earliestRetryMs / 1000)}s (queue: ${groqQueue.length})`);
+        if (!dispatchTimerId) {
+            dispatchTimerId = setTimeout(() => {
+                dispatchTimerId = null;
+                dispatchGroqQueue();
+            }, Math.min(earliestRetryMs + 500, 30000));
+        }
     }
 }
 
@@ -1338,11 +1365,16 @@ function runLiveGroqQueue() {
         return;
     }
     
-    console.log(`[AI Live Queue] Initializing throttled dispatch queue (${config.groqApiKeys.length} keys, gap: ${GROQ_MIN_GAP_PER_KEY_MS}ms/key)...`);
-    dispatchGroqQueue();
+    console.log(`[AI Live Queue] Initializing throttled dispatch (${config.groqApiKeys.length} keys, global gap: ${GROQ_GLOBAL_MIN_GAP_MS}ms, per-key gap: ${GROQ_MIN_GAP_PER_KEY_MS}ms)...`);
+    scheduleNextDispatch();
     
+    // Safety net: periodically check if dispatch stalled
     if (!dispatchIntervalId) {
-        dispatchIntervalId = setInterval(dispatchGroqQueue, 10000);
+        dispatchIntervalId = setInterval(() => {
+            if (groqQueue.length > 0 && !dispatchTimerId) {
+                scheduleNextDispatch();
+            }
+        }, 30000);
     }
 }
 
@@ -2159,6 +2191,10 @@ app.post('/dns/groq', (req, res) => {
         if (dispatchIntervalId) {
             clearInterval(dispatchIntervalId);
             dispatchIntervalId = null;
+        }
+        if (dispatchTimerId) {
+            clearTimeout(dispatchTimerId);
+            dispatchTimerId = null;
         }
     }
     res.send("Groq configuration updated");
