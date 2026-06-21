@@ -550,6 +550,18 @@
                     </div>
 
                     <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq Training API Keys <span id="groqTrainKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
+                            <span style="font-size: 0.75rem; color: var(--text-muted);">Huấn luyện AI song song độc lập</span>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
+                            <input type="password" id="newGroqTrainKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
+                            <button onclick="addGroqTrainKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
+                        </div>
+                        <div id="groqTrainKeysList" style="display: flex; flex-direction: column; gap: 0.4rem;"></div>
+                    </div>
+
+                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
                         <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử phân loại AI</h4>
                         <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
                             <input type="text" id="aiTestDomain" placeholder="Ví dụ: scam-bank.com" style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
@@ -682,6 +694,10 @@
             document.getElementById('groqKeyCount').innerText = dnsConfig.groqApiKeysCount || 0;
             document.getElementById('groqConcurrencyInfo').innerText = (dnsConfig.groqMaxConcurrent || 0) + ' luồng xử lý song song';
             renderKeysList(dnsConfig.groqApiKeys || [], dnsConfig.groqApiKeysCooldown || []);
+            
+            // Training Keys
+            document.getElementById('groqTrainKeyCount').innerText = dnsConfig.groqTrainKeysCount || 0;
+            renderTrainKeysList(dnsConfig.groqTrainKeys || [], dnsConfig.groqTrainKeysCooldown || []);
             
             // Logs
             const logsList = document.getElementById('dnsLogsList');
@@ -851,6 +867,16 @@
                 .then(res => {
                     if (res.ok) {
                         showToast("Đã thêm API Key thành công");
+                        
+                        let localKeys = [];
+                        try {
+                            localKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
+                        } catch(e) {}
+                        if (!localKeys.includes(key)) {
+                            localKeys.push(key);
+                            localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
+                        }
+                        
                         input.value = '';
                         fetchConfig();
                     } else showToast("API Key trùng lặp hoặc lỗi", "error");
@@ -862,6 +888,14 @@
                 .then(res => {
                     if (res.ok) {
                         showToast("Đã xóa API Key");
+                        
+                        let localKeys = [];
+                        try {
+                            localKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
+                        } catch(e) {}
+                        localKeys.splice(idx, 1);
+                        localStorage.setItem('groq_api_keys', JSON.stringify(localKeys));
+                        
                         fetchConfig();
                     }
                 });
@@ -904,6 +938,119 @@
                 });
         }
 
+        function renderTrainKeysList(keys, cooldowns = []) {
+            const list = document.getElementById('groqTrainKeysList');
+            if (keys.length === 0) {
+                list.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-muted); text-align: center;">Chưa cấu hình Training API Keys</div>';
+            } else {
+                list.innerHTML = keys.map((k, i) => {
+                    const isCooldown = cooldowns[i] === true;
+                    const cooldownBadge = isCooldown 
+                        ? `<span style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem; animation: pulse 1.5s infinite;">Tạm khóa (429/401)</span>` 
+                        : `<span style="background: rgba(16, 185, 129, 0.15); color: #10b981; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem;">Sẵn sàng</span>`;
+                    return `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--card-border);">
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <span style="font-family: monospace; font-size: 0.8rem;">Key #${i+1}: ${k}</span>
+                                ${cooldownBadge}
+                            </div>
+                            <button onclick="removeGroqTrainKey(${i})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-weight: bold; font-size: 0.8rem;">Xóa</button>
+                        </div>
+                    `;
+                }).join('');
+            }
+        }
+
+        function addGroqTrainKey() {
+            const input = document.getElementById('newGroqTrainKey');
+            const key = input.value.trim();
+            if (!key) return;
+            fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã thêm Training API Key thành công");
+                        
+                        let localKeys = [];
+                        try {
+                            localKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
+                        } catch(e) {}
+                        if (!localKeys.includes(key)) {
+                            localKeys.push(key);
+                            localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
+                        }
+                        
+                        input.value = '';
+                        fetchConfig();
+                    } else showToast("Key trùng lặp hoặc lỗi", "error");
+                });
+        }
+
+        function removeGroqTrainKey(idx) {
+            fetch(`/dns/groq/train-keys/remove?index=${idx}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã xóa Training API Key");
+                        
+                        let localKeys = [];
+                        try {
+                            localKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
+                        } catch(e) {}
+                        localKeys.splice(idx, 1);
+                        localStorage.setItem('groq_train_keys', JSON.stringify(localKeys));
+                        
+                        fetchConfig();
+                    }
+                });
+        }
+
+        let isSyncingKeys = false;
+        function syncKeysWithServer() {
+            if (isSyncingKeys) return;
+            
+            let localApiKeys = [];
+            let localTrainKeys = [];
+            try {
+                localApiKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
+                localTrainKeys = JSON.parse(localStorage.getItem('groq_train_keys')) || [];
+            } catch(e) {}
+            
+            const needSyncApi = dnsConfig && dnsConfig.groqApiKeysCount === 0 && localApiKeys.length > 0;
+            const needSyncTrain = dnsConfig && dnsConfig.groqTrainKeysCount === 0 && localTrainKeys.length > 0;
+            
+            if (needSyncApi || needSyncTrain) {
+                isSyncingKeys = true;
+                showToast("Tự động khôi phục các API Keys từ trình duyệt của bạn...", "info");
+                
+                const tasks = [];
+                if (needSyncApi) {
+                    localApiKeys.forEach(key => {
+                        tasks.push(() => fetch(`/dns/groq/keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' }));
+                    });
+                }
+                if (needSyncTrain) {
+                    localTrainKeys.forEach(key => {
+                        tasks.push(() => fetch(`/dns/groq/train-keys/add?key=${encodeURIComponent(key)}`, { method: 'POST' }));
+                    });
+                }
+                
+                const runTasks = (index) => {
+                    if (index >= tasks.length) {
+                        isSyncingKeys = false;
+                        showToast("Đã khôi phục thành công toàn bộ API Keys!");
+                        fetchConfig();
+                        return;
+                    }
+                    tasks[index]()
+                        .then(() => runTasks(index + 1))
+                        .catch(() => {
+                            isSyncingKeys = false;
+                            showToast("Lỗi khi đồng bộ API Key #" + (index + 1), "error");
+                        });
+                };
+                runTasks(0);
+            }
+        }
+
         // Websocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const wsUrl = `${protocol}://${window.location.host}`;
@@ -915,6 +1062,7 @@
                 if (payload.type === 'update') {
                     dnsConfig = payload;
                     updateUI();
+                    syncKeysWithServer();
                 }
             } catch (e) {
                 console.error("WS parse error:", e);

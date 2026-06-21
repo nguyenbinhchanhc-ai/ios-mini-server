@@ -780,6 +780,15 @@ function initUpstreamSocketPool() {
                 pendingRequests.delete(txId);
                 if (req.timer) clearTimeout(req.timer);
                 
+                // Real-time latency measurement using EMA (Exponential Moving Average)
+                const elapsed = Date.now() - req.timestamp;
+                const server = config.upstreamPool.find(s => s.ip === req.targetIP);
+                if (server) {
+                    server.latency = Math.round((server.latency || 0) * 0.7 + elapsed * 0.3);
+                    server.online = true;
+                    throttledBroadcastUpdate();
+                }
+                
                 const clientResponse = Buffer.from(msg);
                 clientResponse[0] = req.originalIDBytes[0];
                 clientResponse[1] = req.originalIDBytes[1];
@@ -824,6 +833,13 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
         const req = pendingRequests.get(txId);
         if (req) {
             pendingRequests.delete(txId);
+            // Real-time timeout penalty: set server as offline / high latency
+            const server = config.upstreamPool.find(s => s.ip === upstreamIP);
+            if (server) {
+                server.latency = 9999;
+                server.online = false;
+                throttledBroadcastUpdate();
+            }
             callback(null);
         }
     }, 4000); // 4 seconds query timeout
@@ -832,7 +848,8 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback) {
         callback,
         originalIDBytes,
         timer,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        targetIP: upstreamIP
     });
     
     socket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, 53, upstreamIP, (err) => {
@@ -924,6 +941,32 @@ function getMaxConcurrentGroq() {
     return keys.length * GROQ_CONCURRENCY_PER_KEY;
 }
 
+// Probability-weighted selector (Inverse Latency Squared)
+function selectWeightedDNS(activePool) {
+    if (activePool.length === 0) return "1.1.1.1";
+    if (activePool.length === 1) return activePool[0].ip;
+    
+    const pool = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
+    if (pool.length === 0) return activePool[0].ip;
+    
+    let totalWeight = 0;
+    const items = pool.map(s => {
+        const lat = Math.max(s.latency || 5, 2);
+        const weight = Math.round(100000 / (lat * lat));
+        totalWeight += weight;
+        return { ip: s.ip, weight };
+    });
+    
+    let rand = Math.random() * totalWeight;
+    for (const item of items) {
+        rand -= item.weight;
+        if (rand <= 0) {
+            return item.ip;
+        }
+    }
+    return items[0].ip;
+}
+
 // Load Balancer DNS Selector
 function selectUpstreamDNS(domain) {
     const pool = config.upstreamPool || [];
@@ -961,9 +1004,8 @@ function selectUpstreamDNS(domain) {
         }
     }
     
-    // Default: least-latency
-    const sorted = [...activePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
-    return sorted[0].ip;
+    // Default: least-latency (Weighted Random based on inverse latency squared)
+    return selectWeightedDNS(activePool);
 }
 
 // Famous safe networks
