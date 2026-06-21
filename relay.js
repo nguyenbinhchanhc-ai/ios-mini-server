@@ -158,6 +158,8 @@ const FALLBACK_MODELS = [
 ];
 
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
+const activeRequestsPerKey = new Map(); // key -> number of active concurrent requests
+
 function isKeyAvailable(key) {
     if (!key) return false;
     const cooldownUntil = keyCooldowns.get(key);
@@ -960,7 +962,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
                     server.queryCount = (server.queryCount || 0) + 1;
                 }
                 onResponse(res);
-            }, true);
+            }, false); // Pass false so the socket message handler does not increment queryCount again
         });
         return;
     }
@@ -973,11 +975,15 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     let resolved = false;
     let queriesActive = 1;
     
-    const onResponse = (response) => {
+    const onResponse = (response, respondingIP) => {
         if (resolved) return;
         
         if (response) {
             resolved = true;
+            const winningServer = config.upstreamPool.find(s => s.ip === respondingIP);
+            if (winningServer) {
+                winningServer.queryCount = (winningServer.queryCount || 0) + 1;
+            }
             const queue = activeUpstreamQueries.get(key) || [];
             activeUpstreamQueries.delete(key);
             
@@ -998,14 +1004,14 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         }
     };
     
-    queryUpstream(queryData, upstreamDNS, onResponse, true);
+    queryUpstream(queryData, upstreamDNS, (res) => onResponse(res, upstreamDNS), false);
     
     if (config.dnsRacingEnabled && secondUpstreamDNS) {
         queriesActive++;
         const racingDelay = config.dnsRacingDelayMs || 15;
         setTimeout(() => {
             if (!resolved) {
-                queryUpstream(queryData, secondUpstreamDNS, onResponse, true);
+                queryUpstream(queryData, secondUpstreamDNS, (res) => onResponse(res, secondUpstreamDNS), false);
             } else {
                 queriesActive--;
             }
@@ -1215,56 +1221,70 @@ function enqueueGroqCheck(domain) {
     aiDecisionCache.set(d, JSON.stringify({ category: "General/Search", targetIP: "1.1.1.1" }));
     
     groqQueue.push(d);
-    // processGroqQueue will be triggered asynchronously by live queue workers
+    setTimeout(dispatchGroqQueue, 10);
 }
 
 // Live Queue Multi-Key Concurrency Workers
-let liveWorkerTimeouts = [];
-function runLiveGroqQueue() {
+let dispatchIntervalId = null;
+
+function dispatchGroqQueue() {
     if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
-        liveWorkerTimeouts.forEach(clearTimeout);
-        liveWorkerTimeouts = [];
+        return;
+    }
+    if (groqQueue.length === 0 || isQueuePaused) {
         return;
     }
     
-    liveWorkerTimeouts.forEach(clearTimeout);
-    liveWorkerTimeouts = [];
+    const keys = config.groqApiKeys;
+    const maxConcurrency = GROQ_CONCURRENCY_PER_KEY;
+    let checkedCount = 0;
     
-    console.log(`[AI Live Queue] Starting ${config.groqApiKeys.length} concurrent live workers...`);
-    config.groqApiKeys.forEach((apiKey, idx) => {
-        const startDelay = idx * 1000;
-        const timeoutId = setTimeout(() => {
-            runLiveWorker(apiKey);
-        }, startDelay);
-        liveWorkerTimeouts.push(timeoutId);
-    });
+    while (checkedCount < keys.length && groqQueue.length > 0) {
+        const apiKey = keys[groqKeyIndex % keys.length];
+        groqKeyIndex = (groqKeyIndex + 1) % keys.length;
+        checkedCount++;
+        
+        if (!isKeyAvailable(apiKey)) {
+            continue;
+        }
+        
+        const activeCount = activeRequestsPerKey.get(apiKey) || 0;
+        if (activeCount < maxConcurrency) {
+            const domain = groqQueue.shift();
+            if (!domain) break;
+            
+            activeRequestsPerKey.set(apiKey, activeCount + 1);
+            activeGroqRequests++;
+            
+            checkDomainWithGroq(domain, apiKey, () => {
+                const currentActive = activeRequestsPerKey.get(apiKey) || 0;
+                activeRequestsPerKey.set(apiKey, Math.max(0, currentActive - 1));
+                activeGroqRequests = Math.max(0, activeGroqRequests - 1);
+                
+                setTimeout(dispatchGroqQueue, 10);
+            });
+            
+            // Dispatched, reset checkedCount to check all keys starting from the new index
+            checkedCount = 0;
+        }
+    }
 }
 
-function runLiveWorker(apiKey) {
-    if (!config.aiEnabled || !config.groqApiKeys || !config.groqApiKeys.includes(apiKey)) {
+function runLiveGroqQueue() {
+    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
+        if (dispatchIntervalId) {
+            clearInterval(dispatchIntervalId);
+            dispatchIntervalId = null;
+        }
         return;
     }
     
-    if (!isKeyAvailable(apiKey)) {
-        const timeoutId = setTimeout(() => runLiveWorker(apiKey), 5000);
-        liveWorkerTimeouts.push(timeoutId);
-        return;
+    console.log(`[AI Live Queue] Initializing dispatch queue...`);
+    dispatchGroqQueue();
+    
+    if (!dispatchIntervalId) {
+        dispatchIntervalId = setInterval(dispatchGroqQueue, 5000);
     }
-    
-    if (groqQueue.length === 0 || isQueuePaused) {
-        const timeoutId = setTimeout(() => runLiveWorker(apiKey), 2000);
-        liveWorkerTimeouts.push(timeoutId);
-        return;
-    }
-    
-    const domain = groqQueue.shift();
-    activeGroqRequests++;
-    
-    checkDomainWithGroq(domain, apiKey, () => {
-        activeGroqRequests--;
-        const timeoutId = setTimeout(() => runLiveWorker(apiKey), 15000);
-        liveWorkerTimeouts.push(timeoutId);
-    });
 }
 
 function gatherInternetContext(domain) {
@@ -1414,15 +1434,26 @@ function checkDomainWithGroq(domain, apiKey, callback, modelIndex = 0, internetC
     }
     
     if (modelIndex >= FALLBACK_MODELS.length) {
-        isQueuePaused = true;
+        keyCooldowns.set(apiKey, Date.now() + 60000);
+        
+        const keys = config.groqApiKeys || [];
+        const availableKeys = keys.filter(isKeyAvailable);
+        
+        if (availableKeys.length === 0) {
+            isQueuePaused = true;
+            console.warn(`[AI Live] All API keys are on cooldown. Pausing queue for 60 seconds.`);
+            if (queueTimeoutId) clearTimeout(queueTimeoutId);
+            queueTimeoutId = setTimeout(() => {
+                isQueuePaused = false;
+                queueTimeoutId = null;
+                dispatchGroqQueue();
+            }, 60000);
+        } else {
+            console.warn(`[AI Live] Key ${apiKey.substring(0, 8)}... failed all models. Cooldown active. Remaining available keys: ${availableKeys.length}`);
+        }
+        
         if (!groqQueue.includes(domain)) groqQueue.unshift(domain);
         aiDecisionCache.delete(domain);
-        if (queueTimeoutId) clearTimeout(queueTimeoutId);
-        queueTimeoutId = setTimeout(() => {
-            isQueuePaused = false;
-            queueTimeoutId = null;
-            runLiveGroqQueue();
-        }, 60000);
         if (callback) callback();
         return;
     }
@@ -2053,8 +2084,10 @@ app.post('/dns/groq', (req, res) => {
         setTimeout(runStartupAITraining, 2000);
         setTimeout(runLiveGroqQueue, 2000);
     } else {
-        liveWorkerTimeouts.forEach(clearTimeout);
-        liveWorkerTimeouts = [];
+        if (dispatchIntervalId) {
+            clearInterval(dispatchIntervalId);
+            dispatchIntervalId = null;
+        }
     }
     res.send("Groq configuration updated");
 });
