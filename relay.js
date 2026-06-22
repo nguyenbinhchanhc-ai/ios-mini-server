@@ -575,12 +575,12 @@ function initUpstreamSocketPool() {
                     // Reset consecutive failures on success
                     server.consecutiveFailures = 0;
                     
-                    // Latency spike quarantine: if response takes > 2.5x of running average AND elapsed is > 100ms
-                    if (oldLatency > 0 && elapsed > oldLatency * 2.5 && elapsed > 100 && !server.quarantined) {
+                    // Quarantine only on extremely high latency (> 800ms) which indicates severe network congestion or server issues
+                    if (elapsed > 800 && !server.quarantined) {
                         const qDuration = (config.quarantineDurationSeconds || 60) * 1000;
                         server.quarantined = true;
                         server.quarantineUntil = Date.now() + Math.round(qDuration / 2); // Half duration for latency spikes
-                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 2000)}s due to latency spike (${elapsed}ms vs avg ${oldLatency}ms).`);
+                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 2000)}s due to extremely high latency (${elapsed}ms).`);
                     } else if (server.quarantined && Date.now() > (server.quarantineUntil || 0)) {
                         // Lift quarantine if we get a successful response and time expired
                         server.quarantined = false;
@@ -592,15 +592,10 @@ function initUpstreamSocketPool() {
                     }
                     
                     const onlineChanged = (oldOnline === false);
-                    const latencyDelta = Math.abs(server.latency - oldLatency);
-                    const latencyPct = oldLatency > 0 ? (latencyDelta / oldLatency) : 0;
-                    const significantLatencyChange = latencyDelta > 30 && latencyPct > 0.4;
                     
                     if (onlineChanged) {
                         rebuildAiRoutingCache();
                         triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went ONLINE`);
-                    } else if (significantLatencyChange) {
-                        triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) latency changed significantly (${oldLatency}ms -> ${server.latency}ms)`);
                     }
                     
                     throttledBroadcastUpdate();
@@ -1039,11 +1034,11 @@ function runAILoadBalancerBrain() {
                 try {
                     if (res.statusCode !== 200) {
                         if (res.statusCode === 429) {
-                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429). Cooling down for 90s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 90000);
-                        } else if (res.statusCode === 401) {
-                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized (401). Cooling down for 120s.`);
-                            keyCooldowns.set(apiKey, Date.now() + 120000);
+                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429). Cooling down for 10m.`);
+                            keyCooldowns.set(apiKey, Date.now() + 600000);
+                        } else if (res.statusCode === 401 || res.statusCode === 403) {
+                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized/invalid (${res.statusCode}). Cooling down for 24h.`);
+                            keyCooldowns.set(apiKey, Date.now() + 24 * 3600 * 1000);
                         } else {
                             console.warn(`[AI LB Brain] Groq API returned status code ${res.statusCode}`);
                         }
@@ -1465,14 +1460,12 @@ function buildQueryBufferForMeasure(domain) {
 }
 
 function measureUpstreamLatency(ip) {
-    const domains = ["google.com", "cloudflare.com", "facebook.com"];
-    domains.forEach(domain => {
-        const queryBuffer = buildQueryBufferForMeasure(domain);
-        queryUpstream(queryBuffer, ip, (response) => {
-            // Note: queryUpstream response/timeout/error handlers will automatically
-            // calculate latency, online status, and success rates.
-        }, false);
-    });
+    const domain = "google.com";
+    const queryBuffer = buildQueryBufferForMeasure(domain);
+    queryUpstream(queryBuffer, ip, (response) => {
+        // Note: queryUpstream response/timeout/error handlers will automatically
+        // calculate latency, online status, and success rates.
+    }, false);
 }
 
 function measureUpstreamPool() {
@@ -2069,6 +2062,13 @@ app.get('/dns/groq/test', (req, res) => {
             groqRes.on('end', () => {
                 try {
                     if (groqRes.statusCode !== 200) {
+                        if (groqRes.statusCode === 429) {
+                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429) on test. Cooling down for 10m.`);
+                            keyCooldowns.set(apiKey, Date.now() + 600000);
+                        } else if (groqRes.statusCode === 401 || groqRes.statusCode === 403) {
+                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized/invalid (${groqRes.statusCode}) on test. Cooling down for 24h.`);
+                            keyCooldowns.set(apiKey, Date.now() + 24 * 3600 * 1000);
+                        }
                         isAILBRunning = false;
                         broadcastUpdate();
                         return res.status(500).json({ error: `Groq API error status: ${groqRes.statusCode}` });

@@ -145,5 +145,9 @@
   },
   "dnsRacingEnabled": true,
   "dnsRacingDelayMs": 15,
-  "minCacheTtlSeconds": 300
+  "minCacheTtlSeconds": 300,
+  "latencyEMAWeight": 0.3,
+  "quarantineDurationSeconds": 60,
+  "staleCacheWindowSeconds": 86400,
+  "ecsIPv4PrefixLength": 24
 }
