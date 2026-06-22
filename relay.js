@@ -25,19 +25,8 @@ const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
 // State variables
 let config = {};
 let logs = [];
-let precomputedAiPool = [];
-let precomputedAiTotalWeight = 0;
 const domainQueryWeights = new Map();
 let lastSeenClientIP = "115.79.0.1"; // Track client IP for background queries
-
-function rebuildAiRoutingCache() {
-    const pool = config.upstreamPool || [];
-    precomputedAiPool = pool.filter(s => s.online !== false).map(s => ({
-        ip: s.ip,
-        weight: typeof s.aiWeight === 'number' ? s.aiWeight : 10
-    }));
-    precomputedAiTotalWeight = precomputedAiPool.reduce((sum, item) => sum + item.weight, 0);
-}
 
 // WebSocket client registry
 const wsClients = new Set();
@@ -46,22 +35,6 @@ const wsClients = new Set();
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
 const MAX_CACHE_SIZE = 15000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
-
-// AI Load Balancer Brain State
-let aiLoadBalancerTimeout = null;
-let isAILBRunning = false;
-const AI_LB_INTERVAL_MS = 900000; // Run every 15 minutes
-let groqKeyIndex = 0;
-const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
-
-function isKeyAvailable(key) {
-    if (!key) return false;
-    const cooldownUntil = keyCooldowns.get(key);
-    if (cooldownUntil && Date.now() < cooldownUntil) {
-        return false;
-    }
-    return true;
-}
 
 function recordServerHealth(server, isSuccess) {
     if (!server) return;
@@ -177,18 +150,8 @@ function getWSUpdatePayload() {
         running: true,
         logs: logs,
         stats: stats,
-        aiEnabled: !!config.aiEnabled,
-        groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
-        groqApiKeysCooldown: (config.groqApiKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
-        groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqModel: config.groqModel || "llama-3.1-8b-instant",
         serverStatus: getServerStatus(),
         minCacheTtlSeconds: config.minCacheTtlSeconds || 300,
-        
-        // AI Load Balancer Brain fields
-        isAILBRunning: isAILBRunning,
-        aiLBReason: config.aiLBReason || "Chưa có phân tích tải nào.",
-        lastAiLBTime: config.lastAiLBTime || 0,
         
         // Load Balancer fields
         upstreamPool: (config.upstreamPool || []).map(s => {
@@ -870,332 +833,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     }
 }
 
-// Groq API helpers
-function getNextGroqKey() {
-    const keys = config.groqApiKeys || [];
-    const availableKeys = keys.filter(isKeyAvailable);
-    if (availableKeys.length === 0) return null;
-    const key = availableKeys[groqKeyIndex % availableKeys.length];
-    groqKeyIndex = (groqKeyIndex + 1) % availableKeys.length;
-    return key;
-}
 
-let lastAIBrainRunTime = 0;
-
-// AI Load Balancer Brain implementation
-function runAILoadBalancerBrain() {
-    if (aiLoadBalancerTimeout) {
-        clearTimeout(aiLoadBalancerTimeout);
-        aiLoadBalancerTimeout = null;
-    }
-    
-    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
-        isAILBRunning = false;
-        broadcastUpdate();
-        // Do NOT schedule a retry. We will be triggered when config/keys are updated.
-        return;
-    }
-    
-    isAILBRunning = true;
-    lastAIBrainRunTime = Date.now();
-    broadcastUpdate();
-    
-    const apiKey = getNextGroqKey();
-    if (!apiKey) {
-        let nextAvailableTime = Date.now() + AI_LB_INTERVAL_MS;
-        for (const [key, cooldownUntil] of keyCooldowns.entries()) {
-            if (config.groqApiKeys.includes(key)) {
-                if (cooldownUntil < nextAvailableTime) {
-                    nextAvailableTime = cooldownUntil;
-                }
-            }
-        }
-        const delay = Math.max(15000, nextAvailableTime - Date.now());
-        console.warn(`[AI LB Brain] No API keys available. Retrying in ${Math.round(delay/1000)}s.`);
-        
-        isAILBRunning = false;
-        config.aiLBReason = `Tất cả API Keys đang tạm khóa. Sẽ tự động thử lại sau ${Math.round(delay/1000)} giây.`;
-        broadcastUpdate();
-        
-        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, delay);
-        return;
-    }
-    
-    console.log(`[AI LB Brain] Triggering analysis using API Key: ${apiKey.substring(0, 8)}...`);
-    
-    const pool = config.upstreamPool || [];
-    const onlinePool = pool.filter(s => s.online !== false);
-    
-    if (onlinePool.length === 0) {
-        console.log("[AI LB Brain] No online DNS servers in pool. Skipping analysis.");
-        isAILBRunning = false;
-        broadcastUpdate();
-        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 30000);
-        return;
-    }
-    
-    // Construct the pool status context for the prompt
-    const poolStatusContext = pool.map(s => {
-        const rate = typeof s.successRate === 'number' ? s.successRate + '%' : '100%';
-        const ecs = s.ecsSupported !== false ? 'CÓ' : 'KHÔNG';
-        const quarantine = s.quarantined ? 'ĐANG CÁCH LY' : 'HOẠT ĐỘNG';
-        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'} (${quarantine}), RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Hỗ trợ ECS = ${ecs}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
-    }).join('\n');
-    
-    const cacheTotal = (config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0);
-    const clientCacheHitRate = cacheTotal > 0 ? ((config.stats.cacheHits || 0) / cacheTotal * 100).toFixed(1) + '%' : '0%';
-    const clientAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount).toFixed(1) + 'ms' : '0ms';
-    const clientRacingWinRate = (config.stats.racingTotal || 0) > 0 ? ((config.stats.racingWins || 0) / config.stats.racingTotal * 100).toFixed(1) + '%' : '0%';
-    
-    const clientMetricsContext = `\nChỉ số hiệu năng phía Client thực tế:\n` +
-                                 `- Tỷ lệ Cache Hit của client: ${clientCacheHitRate}\n` +
-                                 `- Độ trễ client trung bình: ${clientAvgLatency}\n` +
-                                 `- Tỷ lệ server phụ thắng Đua DNS: ${clientRacingWinRate} (Tổng lượt đua: ${config.stats.racingTotal || 0})\n`;
-
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL, quarantine cooldown, stale cache window, and ECS prefix length.\n\n" +
-                          "Instructions:\n" +
-                          "1. Only assign weights to ONLINE and non-quarantined servers. Assign 0 weight to OFFLINE or QUARANTINED (ĐANG CÁCH LY) servers.\n" +
-                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters. Slower or non-ECS servers must receive 0% weight.\n" +
-                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating.\n" +
-                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Look at the client's DNS Racing win rate: if the win rate is high (> 30%), suggest a tight delay (8-12ms).\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively if the cache hit rate is low and server RTTs are stable.\n" +
-                          "6. Suggest the optimal latency EMA smoothing factor (\"latencyEMAWeight\": float, between 0.1 and 0.9). Suggest lower values (0.1 - 0.2) to smooth out random latency spikes, or higher values (0.4 - 0.7) to adapt rapidly to server latency state transitions.\n" +
-                          "7. Suggest the optimal quarantine duration in seconds (\"quarantineDurationSeconds\": integer, between 15 and 600) when server timeouts/spikes occur. Suggest higher values if a server is persistently failing.\n" +
-                          "8. Suggest the optimal stale cache retention window in seconds (\"staleCacheWindowSeconds\": integer, between 3600 and 86400). Suggest higher values if upstream servers are unstable to ensure a fallback record exists.\n" +
-                          "9. Suggest the optimal IPv4 ECS prefix length (\"ecsIPv4PrefixLength\": integer, 24 or 32). Use 24 for privacy and maximum cache hit rate sharing, or 32 for extremely accurate location routing.\n" +
-                          "10. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", \"latencyEMAWeight\", \"quarantineDurationSeconds\", \"staleCacheWindowSeconds\", \"ecsIPv4PrefixLength\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
-                          "JSON response format:\n" +
-                          "{\n" +
-                          "  \"weights\": {\n" +
-                          "    \"8.8.8.8\": 50,\n" +
-                          "    \"9.9.9.9\": 50,\n" +
-                          "    \"1.1.1.1\": 0,\n" +
-                          "    \"208.67.222.222\": 0\n" +
-                          "  },\n" +
-                          "  \"dnsRacingEnabled\": true,\n" +
-                          "  \"dnsRacingDelayMs\": 15,\n" +
-                          "  \"minCacheTtlSeconds\": 14400,\n" +
-                          "  \"latencyEMAWeight\": 0.3,\n" +
-                          "  \"quarantineDurationSeconds\": 60,\n" +
-                          "  \"staleCacheWindowSeconds\": 86400,\n" +
-                          "  \"ecsIPv4PrefixLength\": 24,\n" +
-                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
-                          "}";
-                           
-    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
-    
-    const postData = JSON.stringify({
-        model: config.groqModel || "llama-3.1-8b-instant",
-        messages: [
-            { role: "system", content: systemContent },
-            { role: "user", content: userContent }
-        ],
-        response_format: { type: "json_object" }
-    });
-    
-    const options = {
-        hostname: 'api.groq.com',
-        port: 443,
-        path: '/openai/v1/chat/completions',
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Length': Buffer.byteLength(postData)
-        }
-    };
-    
-    try {
-        const req = https.request(options, (res) => {
-            let body = [];
-            res.on('data', chunk => body.push(chunk));
-            res.on('end', () => {
-                try {
-                    if (res.statusCode !== 200) {
-                        let errMsg = `Lỗi Groq API: Status ${res.statusCode}`;
-                        if (res.statusCode === 429) {
-                            errMsg = "Lỗi Groq API: Rate limited (429) - Hết hạn mức request.";
-                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429). Cooling down for 10m.`);
-                            keyCooldowns.set(apiKey, Date.now() + 600000);
-                        } else if (res.statusCode === 401 || res.statusCode === 403) {
-                            errMsg = `Lỗi Groq API: Key không hợp lệ (${res.statusCode}) - Khóa API không hợp lệ.`;
-                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized/invalid (${res.statusCode}). Cooling down for 24h.`);
-                            keyCooldowns.set(apiKey, Date.now() + 24 * 3600 * 1000);
-                        } else {
-                            console.warn(`[AI LB Brain] Groq API returned status code ${res.statusCode}`);
-                        }
-                        config.aiLBReason = errMsg;
-                        saveConfig();
-                        isAILBRunning = false;
-                        broadcastUpdate();
-                        // Retry shortly with next key
-                        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 10000);
-                        return;
-                    }
-                    
-                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
-                    const replyStr = resData.choices?.[0]?.message?.content;
-                    if (replyStr) {
-                        const decision = JSON.parse(replyStr);
-                        const weights = decision.weights || {};
-                        const reason = decision.reason || "Cân bằng tải AI";
-                        
-                        console.log(`[AI LB Brain] Weight recommendation received:`, weights);
-                        console.log(`[AI LB Brain] Rationale: ${reason}`);
-                        
-                        // Update config
-                        pool.forEach(server => {
-                            if (weights[server.ip] !== undefined) {
-                                server.aiWeight = Math.max(0, parseInt(weights[server.ip], 10) || 0);
-                            } else {
-                                // Default fallback weight for online or missing
-                                server.aiWeight = server.online !== false ? 10 : 0;
-                            }
-                        });
-                        
-                        if (decision.dnsRacingEnabled !== undefined) {
-                            config.dnsRacingEnabled = !!decision.dnsRacingEnabled;
-                        }
-                        if (typeof decision.dnsRacingDelayMs === 'number') {
-                            config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
-                        }
-                        if (typeof decision.minCacheTtlSeconds === 'number') {
-                            config.minCacheTtlSeconds = Math.max(300, Math.min(43200, decision.minCacheTtlSeconds));
-                        }
-                        if (typeof decision.latencyEMAWeight === 'number') {
-                            config.latencyEMAWeight = Math.max(0.1, Math.min(0.9, decision.latencyEMAWeight));
-                        }
-                        if (typeof decision.quarantineDurationSeconds === 'number') {
-                            config.quarantineDurationSeconds = Math.max(15, Math.min(600, decision.quarantineDurationSeconds));
-                        }
-                        if (typeof decision.staleCacheWindowSeconds === 'number') {
-                            config.staleCacheWindowSeconds = Math.max(3600, Math.min(86400, decision.staleCacheWindowSeconds));
-                        }
-                        if (decision.ecsIPv4PrefixLength === 24 || decision.ecsIPv4PrefixLength === 32) {
-                            config.ecsIPv4PrefixLength = decision.ecsIPv4PrefixLength;
-                        }
-                        
-                        config.aiLBReason = reason;
-                        config.lastAiLBTime = Date.now();
-                        saveConfig();
-                        
-                        // Log locally
-                        const now = new Date();
-                        const vnTime = new Date(now.getTime() + 7 * 60 * 60 * 1000);
-                        const timeStr = vnTime.toISOString().substring(11, 19);
-                        const statusMessage = `[${timeStr}] [AI BRAIN] Phân phối tải: ` + 
-                            pool.map(s => `${s.name}: ${s.aiWeight || 0}%`).join(', ') + 
-                            ` | Racing: ${config.dnsRacingEnabled ? 'Bật (' + config.dnsRacingDelayMs + 'ms)' : 'Tắt'} - ${reason}`;
-                        
-                        logs.push(statusMessage);
-                        if (logs.length > 100) logs.shift();
-                        
-                        isAILBRunning = false;
-                        rebuildAiRoutingCache();
-                        broadcastUpdate();
-                    } else {
-                        isAILBRunning = false;
-                        broadcastUpdate();
-                    }
-                    
-                    // Run next analysis after interval
-                    aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, AI_LB_INTERVAL_MS);
-                } catch (e) {
-                    console.error("[AI LB Brain] Error parsing response body:", e);
-                    config.aiLBReason = `Lỗi phân tích cú pháp: ${e.message}`;
-                    saveConfig();
-                    isAILBRunning = false;
-                    broadcastUpdate();
-                    aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
-                }
-            });
-        });
-        
-        req.on('error', (err) => {
-            console.error("[AI LB Brain] HTTP request error:", err);
-            config.aiLBReason = `Lỗi kết nối Groq: ${err.message}`;
-            saveConfig();
-            isAILBRunning = false;
-            broadcastUpdate();
-            aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
-        });
-        
-        req.write(postData);
-        req.end();
-    } catch (e) {
-        console.error("[AI LB Brain] Execution error:", e);
-        config.aiLBReason = `Lỗi thực thi: ${e.message}`;
-        saveConfig();
-        isAILBRunning = false;
-        broadcastUpdate();
-        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
-    }
-}
-
-function selectAIWeightedDNS(activePool) {
-    if (activePool.length === 0) return "1.1.1.1";
-    if (activePool.length === 1) return activePool[0].ip;
-    
-    // Find the minimum latency among activePool servers
-    let minLatency = Infinity;
-    for (let i = 0; i < activePool.length; i++) {
-        const s = activePool[i];
-        if (s.online !== false && typeof s.latency === 'number' && s.latency < minLatency && s.latency > 0) {
-            minLatency = s.latency;
-        }
-    }
-    if (minLatency === Infinity) minLatency = 20;
-    
-    // Filter to lowest-latency servers (LLES logic)
-    const threshold = Math.max(15, minLatency * 0.5);
-    const lowLatencyServers = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999 && (s.latency <= minLatency + threshold));
-    
-    if (lowLatencyServers.length === 0) {
-        // Fallback to the absolute fastest server
-        let fastest = activePool[0];
-        let bestLat = Infinity;
-        for (let i = 0; i < activePool.length; i++) {
-            const s = activePool[i];
-            if (s.online !== false && (s.latency || 9999) < bestLat) {
-                bestLat = s.latency || 9999;
-                fastest = s;
-            }
-        }
-        return fastest ? fastest.ip : activePool[0].ip;
-    }
-    
-    if (lowLatencyServers.length === 1) {
-        return lowLatencyServers[0].ip;
-    }
-    
-    // Filter precomputedAiPool to only include the low-latency servers
-    const lowLatencyIps = new Set(lowLatencyServers.map(s => s.ip));
-    const pool = precomputedAiPool.filter(item => lowLatencyIps.has(item.ip));
-    
-    if (pool.length === 0) {
-        // Fallback to equal distribution among low-latency servers (LLES)
-        const idx = Math.floor(Math.random() * lowLatencyServers.length);
-        return lowLatencyServers[idx].ip;
-    }
-    
-    const totalWeight = pool.reduce((sum, item) => sum + item.weight, 0);
-    if (totalWeight <= 0) {
-        // Fallback to equal distribution among low-latency servers (LLES)
-        const idx = Math.floor(Math.random() * lowLatencyServers.length);
-        return lowLatencyServers[idx].ip;
-    }
-    
-    let rand = Math.random() * totalWeight;
-    for (let i = 0; i < pool.length; i++) {
-        const item = pool[i];
-        rand -= item.weight;
-        if (rand <= 0) {
-            return item.ip;
-        }
-    }
-    return pool[0].ip;
-}
 
 // Low-Latency Equal Share (LLES) Load Balancer DNS Selector
 function selectWeightedDNS(activePool) {
@@ -1318,13 +956,7 @@ function selectUpstreamDNS(domain, hasECS = false) {
         return activePool[idx].ip;
     }
     
-    if (algo === "ai-routing") {
-        if (config.aiEnabled) {
-            return selectAIWeightedDNS(activePool);
-        } else {
-            return selectWeightedDNS(activePool);
-        }
-    }
+
     
     // Default fallback (least-latency)
     return selectWeightedDNS(activePool);
@@ -1377,12 +1009,9 @@ function loadConfig() {
         } else {
             config = {
                 upstreamPool: defaultPool,
-                lbAlgorithm: "ai-routing",
+                lbAlgorithm: "least-latency",
                 gslbRecords: {},
                 stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
-                aiEnabled: true,
-                groqApiKeys: [],
-                groqModel: "llama-3.1-8b-instant",
                 dnsRacingEnabled: true,
                 dnsRacingDelayMs: 15,
                 minCacheTtlSeconds: 300,
@@ -1397,12 +1026,9 @@ function loadConfig() {
         console.error("Failed to load config, using defaults:", e);
         config = {
             upstreamPool: defaultPool,
-            lbAlgorithm: "ai-routing",
+            lbAlgorithm: "least-latency",
             gslbRecords: {},
             stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
-            aiEnabled: true,
-            groqApiKeys: [],
-            groqModel: "llama-3.1-8b-instant",
             dnsRacingEnabled: true,
             dnsRacingDelayMs: 15,
             minCacheTtlSeconds: 300,
@@ -1419,8 +1045,6 @@ function loadConfig() {
     config.stats.cacheMisses = config.stats.cacheMisses || 0;
     config.stats.racingWins = config.stats.racingWins || 0;
     config.stats.racingTotal = config.stats.racingTotal || 0;
-    config.aiEnabled = config.aiEnabled !== undefined ? config.aiEnabled : true;
-    config.groqModel = "llama-3.1-8b-instant";
     config.upstreamPool = config.upstreamPool || [];
     // Ensure all defaultPool servers are present in the pool
     defaultPool.forEach(defaultServer => {
@@ -1437,7 +1061,7 @@ function loadConfig() {
             server.ecsSupported = !noEcsIps.includes(server.ip);
         }
     });
-    config.lbAlgorithm = config.lbAlgorithm || "ai-routing";
+    config.lbAlgorithm = config.lbAlgorithm || "least-latency";
     config.gslbRecords = config.gslbRecords || {};
     config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
     config.dnsRacingDelayMs = config.dnsRacingDelayMs !== undefined ? config.dnsRacingDelayMs : 15;
@@ -1446,17 +1070,6 @@ function loadConfig() {
     config.quarantineDurationSeconds = config.quarantineDurationSeconds !== undefined ? config.quarantineDurationSeconds : 60;
     config.staleCacheWindowSeconds = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 86400;
     config.ecsIPv4PrefixLength = config.ecsIPv4PrefixLength !== undefined ? config.ecsIPv4PrefixLength : 24;
-    
-    if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
-    
-    if (process.env.GROQ_API_KEYS) {
-        const envKeys = process.env.GROQ_API_KEYS.split(',').map(k => k.trim()).filter(k => k.length > 0);
-        envKeys.forEach(k => {
-            if (!config.groqApiKeys.includes(k)) config.groqApiKeys.push(k);
-        });
-    }
-    config.groqApiKeys = config.groqApiKeys.filter(k => k && k.trim().length > 0);
-    rebuildAiRoutingCache();
 }
 
 function saveConfig() {
@@ -1511,8 +1124,6 @@ setInterval(measureUpstreamPool, 30000);
 setTimeout(measureUpstreamPool, 3000); // Check shortly after start
 setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
 setInterval(runPopularKeepAlive, 60000); // Always-Hot Cache prefetch and decay
-
-setTimeout(runAILoadBalancerBrain, 5000);
 
 function runCacheGC() {
     const now = Date.now();
@@ -1822,18 +1433,18 @@ app.get('/dns/config', (req, res) => {
         running: true,
         logs: logs,
         stats: stats,
-        aiEnabled: !!config.aiEnabled,
-        groqApiKeys: (config.groqApiKeys || []).map(k => k.substring(0, 8) + '...' + k.substring(k.length - 4)),
-        groqApiKeysCooldown: (config.groqApiKeys || []).map(k => keyCooldowns.has(k) && Date.now() < keyCooldowns.get(k)),
-        groqApiKeysCount: (config.groqApiKeys || []).length,
-        groqModel: config.groqModel || "llama-3.1-8b-instant",
+        aiEnabled: false,
+        groqApiKeys: [],
+        groqApiKeysCooldown: [],
+        groqApiKeysCount: 0,
+        groqModel: "",
         serverStatus: getServerStatus(),
         minCacheTtlSeconds: config.minCacheTtlSeconds || 300,
         
         // AI Load Balancer Brain fields
-        isAILBRunning: isAILBRunning,
-        aiLBReason: config.aiLBReason || "Chưa có phân tích tải nào.",
-        lastAiLBTime: config.lastAiLBTime || 0,
+        isAILBRunning: false,
+        aiLBReason: "AI đã được gỡ bỏ hoàn toàn.",
+        lastAiLBTime: 0,
         
         // Load Balancer fields
         upstreamPool: (config.upstreamPool || []).map(s => {
@@ -1867,7 +1478,6 @@ app.post('/dns/upstream/pool/add', (req, res) => {
     
     config.upstreamPool.push({ ip, name, latency: 0, online: true, ecsSupported });
     saveConfig();
-    rebuildAiRoutingCache();
     measureUpstreamLatency(ip);
     broadcastUpdate();
     res.send(`Added ${ip} to pool`);
@@ -1879,14 +1489,13 @@ app.post('/dns/upstream/pool/remove', (req, res) => {
     
     config.upstreamPool = (config.upstreamPool || []).filter(s => s.ip !== ip);
     saveConfig();
-    rebuildAiRoutingCache();
     broadcastUpdate();
     res.send(`Removed ${ip} from pool`);
 });
 
 app.post('/dns/lb/algorithm', (req, res) => {
     const algo = req.query.algo;
-    const validAlgos = ["round-robin", "least-latency", "random", "ai-routing", "weighted-round-robin", "failover", "all-racing"];
+    const validAlgos = ["round-robin", "least-latency", "random", "weighted-round-robin", "failover", "all-racing"];
     if (!algo || !validAlgos.includes(algo)) {
         return res.status(400).send("Invalid algorithm");
     }
@@ -1943,34 +1552,6 @@ app.post('/dns/gslb/remove', (req, res) => {
     res.send(`Removed GSLB mapping for ${d}`);
 });
 
-app.post('/dns/groq', (req, res) => {
-    const enabled = req.query.enabled === 'true';
-    const model = req.query.model || "llama-3.1-8b-instant";
-    config.aiEnabled = enabled;
-    config.groqModel = model;
-    
-    if (enabled) {
-        config.lbAlgorithm = "ai-routing";
-        keyCooldowns.clear();
-    } else {
-        if (config.lbAlgorithm === "ai-routing") {
-            config.lbAlgorithm = "least-latency";
-        }
-    }
-    
-    saveConfig();
-    broadcastUpdate();
-    if (enabled) {
-        setTimeout(runAILoadBalancerBrain, 2000);
-    } else {
-        if (aiLoadBalancerTimeout) {
-            clearTimeout(aiLoadBalancerTimeout);
-            aiLoadBalancerTimeout = null;
-        }
-    }
-    res.send("Groq configuration updated");
-});
-
 app.post('/dns/racing', (req, res) => {
     const enabled = req.query.enabled === 'true';
     const delay = parseInt(req.query.delay, 10);
@@ -1983,217 +1564,12 @@ app.post('/dns/racing', (req, res) => {
     res.send("DNS Racing configuration updated");
 });
 
-app.post('/dns/groq/keys/update', (req, res) => {
-    try {
-        if (!req.rawBody || req.rawBody.length === 0) {
-            return res.status(400).send("Empty body");
-        }
-        const keys = JSON.parse(req.rawBody.toString('utf8'));
-        if (Array.isArray(keys)) {
-            config.groqApiKeys = keys.map(k => k.trim()).filter(k => k.length > 0);
-            keyCooldowns.clear();
-            saveConfig();
-            broadcastUpdate();
-            if (config.aiEnabled) setTimeout(runAILoadBalancerBrain, 2000);
-            return res.json({ count: config.groqApiKeys.length });
-        }
-    } catch(e) {
-        console.error("Failed to update groq keys:", e);
-    }
-    res.status(400).send("Invalid JSON payload");
-});
-
-app.get('/dns/groq/test', (req, res) => {
-    const apiKey = getNextGroqKey();
-    if (!apiKey) return res.status(400).json({ error: "Không có API Keys nào được cấu hình hoặc tất cả đang bị khóa tạm thời." });
-    
-    const pool = config.upstreamPool || [];
-    const onlinePool = pool.filter(s => s.online !== false);
-    if (onlinePool.length === 0) return res.status(400).json({ error: "Không có máy chủ DNS online." });
-    
-    isAILBRunning = true;
-    broadcastUpdate();
-    
-    const poolStatusContext = pool.map(s => {
-        const rate = typeof s.successRate === 'number' ? s.successRate + '%' : '100%';
-        const ecs = s.ecsSupported !== false ? 'CÓ' : 'KHÔNG';
-        const quarantine = s.quarantined ? 'ĐANG CÁCH LY' : 'HOẠT ĐỘNG';
-        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'} (${quarantine}), RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Hỗ trợ ECS = ${ecs}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
-    }).join('\n');
-    
-    const cacheTotal = (config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0);
-    const clientCacheHitRate = cacheTotal > 0 ? ((config.stats.cacheHits || 0) / cacheTotal * 100).toFixed(1) + '%' : '0%';
-    const clientAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount).toFixed(1) + 'ms' : '0ms';
-    const clientRacingWinRate = (config.stats.racingTotal || 0) > 0 ? ((config.stats.racingWins || 0) / config.stats.racingTotal * 100).toFixed(1) + '%' : '0%';
-    
-    const clientMetricsContext = `\nChỉ số hiệu năng phía Client thực tế:\n` +
-                                 `- Tỷ lệ Cache Hit của client: ${clientCacheHitRate}\n` +
-                                 `- Độ trễ client trung bình: ${clientAvgLatency}\n` +
-                                 `- Tỷ lệ server phụ thắng Đua DNS: ${clientRacingWinRate} (Tổng lượt đua: ${config.stats.racingTotal || 0})\n`;
-
-    const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL, quarantine cooldown, stale cache window, and ECS prefix length.\n\n" +
-                          "Instructions:\n" +
-                          "1. Only assign weights to ONLINE and non-quarantined servers. Assign 0 weight to OFFLINE or QUARANTINED (ĐANG CÁCH LY) servers.\n" +
-                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters. Slower or non-ECS servers must receive 0% weight.\n" +
-                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating.\n" +
-                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Look at the client's DNS Racing win rate: if the win rate is high (> 30%), suggest a tight delay (8-12ms).\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively if the cache hit rate is low and server RTTs are stable.\n" +
-                          "6. Suggest the optimal latency EMA smoothing factor (\"latencyEMAWeight\": float, between 0.1 and 0.9). Suggest lower values (0.1 - 0.2) to smooth out random latency spikes, or higher values (0.4 - 0.7) to adapt rapidly to server latency state transitions.\n" +
-                          "7. Suggest the optimal quarantine duration in seconds (\"quarantineDurationSeconds\": integer, between 15 and 600) when server timeouts/spikes occur. Suggest higher values if a server is persistently failing.\n" +
-                          "8. Suggest the optimal stale cache retention window in seconds (\"staleCacheWindowSeconds\": integer, between 3600 and 86400). Suggest higher values if upstream servers are unstable to ensure a fallback record exists.\n" +
-                          "9. Suggest the optimal IPv4 ECS prefix length (\"ecsIPv4PrefixLength\": integer, 24 or 32). Use 24 for privacy and maximum cache hit rate sharing, or 32 for extremely accurate location routing.\n" +
-                          "10. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", \"latencyEMAWeight\", \"quarantineDurationSeconds\", \"staleCacheWindowSeconds\", \"ecsIPv4PrefixLength\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
-                          "JSON response format:\n" +
-                          "{\n" +
-                          "  \"weights\": {\n" +
-                          "    \"8.8.8.8\": 50,\n" +
-                          "    \"9.9.9.9\": 50,\n" +
-                          "    \"1.1.1.1\": 0,\n" +
-                          "    \"208.67.222.222\": 0\n" +
-                          "  },\n" +
-                          "  \"dnsRacingEnabled\": true,\n" +
-                          "  \"dnsRacingDelayMs\": 15,\n" +
-                          "  \"minCacheTtlSeconds\": 14400,\n" +
-                          "  \"latencyEMAWeight\": 0.3,\n" +
-                          "  \"quarantineDurationSeconds\": 60,\n" +
-                          "  \"staleCacheWindowSeconds\": 86400,\n" +
-                          "  \"ecsIPv4PrefixLength\": 24,\n" +
-                          "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
-                          "}";
-                          
-    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
-    
-    const postData = JSON.stringify({
-        model: config.groqModel || "llama-3.1-8b-instant",
-        messages: [
-            { role: "system", content: systemContent },
-            { role: "user", content: userContent }
-        ],
-        response_format: { type: "json_object" }
-    });
-    
-    const options = {
-        hostname: 'api.groq.com',
-        port: 443,
-        path: '/openai/v1/chat/completions',
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Length': Buffer.byteLength(postData)
-        }
-    };
-    
-    try {
-        const groqReq = https.request(options, (groqRes) => {
-            let body = [];
-            groqRes.on('data', chunk => body.push(chunk));
-            groqRes.on('end', () => {
-                try {
-                    if (groqRes.statusCode !== 200) {
-                        let errMsg = `Lỗi Groq API: Status ${groqRes.statusCode}`;
-                        if (groqRes.statusCode === 429) {
-                            errMsg = "Lỗi Groq API: Rate limited (429) - Hết hạn mức request.";
-                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429) on test. Cooling down for 10m.`);
-                            keyCooldowns.set(apiKey, Date.now() + 600000);
-                        } else if (groqRes.statusCode === 401 || groqRes.statusCode === 403) {
-                            errMsg = `Lỗi Groq API: Key không hợp lệ (${groqRes.statusCode}) - Khóa API không hợp lệ.`;
-                            console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized/invalid (${groqRes.statusCode}) on test. Cooling down for 24h.`);
-                            keyCooldowns.set(apiKey, Date.now() + 24 * 3600 * 1000);
-                        }
-                        config.aiLBReason = errMsg;
-                        saveConfig();
-                        isAILBRunning = false;
-                        broadcastUpdate();
-                        return res.status(500).json({ error: errMsg });
-                    }
-                    const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
-                    const replyStr = resData.choices?.[0]?.message?.content;
-                    if (replyStr) {
-                        const decision = JSON.parse(replyStr);
-                        const weights = decision.weights || {};
-                        const reason = decision.reason || "Cân bằng tải AI";
-                        
-                        pool.forEach(server => {
-                            if (weights[server.ip] !== undefined) {
-                                server.aiWeight = Math.max(0, parseInt(weights[server.ip], 10) || 0);
-                            } else {
-                                server.aiWeight = server.online !== false ? 10 : 0;
-                            }
-                        });
-                        
-                        if (decision.dnsRacingEnabled !== undefined) {
-                            config.dnsRacingEnabled = !!decision.dnsRacingEnabled;
-                        }
-                        if (typeof decision.dnsRacingDelayMs === 'number') {
-                            config.dnsRacingDelayMs = Math.max(0, Math.min(1000, decision.dnsRacingDelayMs));
-                        }
-                        if (typeof decision.minCacheTtlSeconds === 'number') {
-                            config.minCacheTtlSeconds = Math.max(300, Math.min(43200, decision.minCacheTtlSeconds));
-                        }
-                        if (typeof decision.latencyEMAWeight === 'number') {
-                            config.latencyEMAWeight = Math.max(0.1, Math.min(0.9, decision.latencyEMAWeight));
-                        }
-                        if (typeof decision.quarantineDurationSeconds === 'number') {
-                            config.quarantineDurationSeconds = Math.max(15, Math.min(600, decision.quarantineDurationSeconds));
-                        }
-                        if (typeof decision.staleCacheWindowSeconds === 'number') {
-                            config.staleCacheWindowSeconds = Math.max(3600, Math.min(86400, decision.staleCacheWindowSeconds));
-                        }
-                        if (decision.ecsIPv4PrefixLength === 24 || decision.ecsIPv4PrefixLength === 32) {
-                            config.ecsIPv4PrefixLength = decision.ecsIPv4PrefixLength;
-                        }
-                        
-                        config.aiLBReason = reason;
-                        config.lastAiLBTime = Date.now();
-                        saveConfig();
-                        
-                        isAILBRunning = false;
-                        rebuildAiRoutingCache();
-                        broadcastUpdate();
-                        
-                        decision.modelUsed = config.groqModel || "llama-3.1-8b-instant";
-                        return res.json(decision);
-                    } else {
-                        isAILBRunning = false;
-                        broadcastUpdate();
-                        return res.status(500).json({ error: "Không nhận được phản hồi từ Groq." });
-                    }
-                } catch(e) {
-                    config.aiLBReason = `Lỗi test Groq: ${e.message}`;
-                    saveConfig();
-                    isAILBRunning = false;
-                    broadcastUpdate();
-                    return res.status(500).json({ error: e.message });
-                }
-            });
-        });
-        groqReq.on('error', (err) => {
-            config.aiLBReason = `Lỗi kết nối test Groq: ${err.message}`;
-            saveConfig();
-            isAILBRunning = false;
-            broadcastUpdate();
-            res.status(500).json({ error: err.message });
-        });
-        groqReq.write(postData);
-        groqReq.end();
-    } catch(e) {
-        config.aiLBReason = `Lỗi thực thi test Groq: ${e.message}`;
-        saveConfig();
-        isAILBRunning = false;
-        broadcastUpdate();
-        return res.status(500).json({ error: e.message });
-    }
-});
-
 
 
 app.post('/dns/stats/reset', (req, res) => {
     config.stats = { total: 0, cacheHits: 0, cacheMisses: 0 };
     totalLatency = 0;
     latencyCount = 0;
-    keyCooldowns.clear();
     saveConfig();
     broadcastUpdate();
     res.send("Stats reset");

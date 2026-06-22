@@ -413,14 +413,7 @@
                 <div class="stat-card-title">Trạng thái Server</div>
                 <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-card-title">Bộ não AI LB</div>
-                <div class="stat-card-val purple-val" id="dnsStatAIBrainStatus">Tắt</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-card-title">Cập nhật AI Brain</div>
-                <div class="stat-card-val" id="dnsStatAIBrainLastRun" style="font-size: 1.1rem; padding-top: 0.2rem;">Chưa có</div>
-            </div>
+
         </div>
 
         <div class="grid">
@@ -437,17 +430,16 @@
                 
                 <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
                     <h3>Thuật toán Cân bằng tải</h3>
-                    <div style="background: rgba(147, 51, 234, 0.1); border: 1px solid rgba(147, 51, 234, 0.3); padding: 1rem; border-radius: 12px; margin-top: 0.5rem; box-shadow: 0 4px 20px rgba(147, 51, 234, 0.15); border-left: 4px solid #a855f7;">
-                        <div style="display: flex; align-items: center; gap: 0.5rem; color: #d8b4fe; font-weight: 700; font-size: 0.9rem;">
-                            <span>🧠 CÂN BẰNG TẢI AI (AUTOPILOT)</span>
+                    <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); padding: 1rem; border-radius: 12px; margin-top: 0.5rem; box-shadow: 0 4px 20px rgba(16, 185, 129, 0.15); border-left: 4px solid #10b981;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; color: #6ee7b7; font-weight: 700; font-size: 0.9rem;">
+                            <span>⚡ BỘ ĐIỀU PHỐI LLES AUTOPILOT (LEAST-LATENCY)</span>
                         </div>
                         <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem; line-height: 1.45;">
-                            Hệ thống định tuyến được quản lý tự động bởi AI. Bộ não AI liên tục đo lường RTT, tỉ lệ thành công, cách ly máy chủ lỗi và phân phối tải đều dựa trên số lượng truy vấn thực tế.
+                            Hệ thống tự động giám sát & định tuyến tối ưu cục bộ. LLES liên tục đo lường RTT thực tế của từng DNS, áp dụng trọng số EMA (Exponential Moving Average), cách ly tự động các máy chủ có độ trễ > 800ms hoặc lỗi kết nối, và thực hiện đua tốc DNS Racing để giảm thiểu tối đa độ trễ.
                         </p>
                     </div>
                     <!-- Hidden selector to maintain JS compatibility -->
                     <select id="lbAlgoSelector" onchange="changeLbAlgorithm()" style="display: none;">
-                        <option value="ai-routing">AI Routing (Định tuyến AI)</option>
                         <option value="least-latency">Least Latency (Nhanh nhất)</option>
                         <option value="round-robin">Round-Robin (Xoay vòng)</option>
                         <option value="weighted-round-robin">Weighted Round-Robin (Trọng số trễ)</option>
@@ -482,7 +474,7 @@
                     <div class="tab active" id="tab-logs" onclick="switchTab('logs')">Query Logs</div>
                     <div class="tab" id="tab-upstream" onclick="switchTab('upstream')">Điều phối DNS</div>
                     <div class="tab" id="tab-gslb" onclick="switchTab('gslb')">Cân bằng tải GSLB</div>
-                    <div class="tab" id="tab-ai" onclick="switchTab('ai')">Trí tuệ AI</div>
+                    <div class="tab" id="tab-lles" onclick="switchTab('lles')">Giám sát LLES</div>
                 </div>
                 
                 <!-- Logs subtab -->
@@ -539,95 +531,55 @@
                     </div>
                 </div>
 
-                <!-- AI Config subtab -->
-                <div id="panel-ai" class="subtab-content">
-                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Bộ não Cân bằng tải Động (AI Load Balancer Brain)</h4>
+                <!-- LLES Config & Monitoring subtab -->
+                <div id="panel-lles" class="subtab-content">
+                    <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Cơ chế Giám sát & Định tuyến LLES (Least-Latency Estimation System)</h4>
                     <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem; line-height: 1.4;">
-                        Bộ não AI sẽ tự động phân tích độ trễ thực tế RTT và hiệu năng của các máy chủ DNS thượng nguồn để tính toán và điều phối phân chia lưu lượng truy vấn một cách hợp lý và nhanh nhất.
+                        Hệ thống tự động theo dõi, cách ly và tối ưu hóa hiệu năng DNS cục bộ mà không cần phụ thuộc AI bên ngoài.
                     </p>
                     
-                    <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 0.25rem;">
-                        <div style="display: flex; align-items: center; gap: 0.5rem;">
-                            <input type="checkbox" id="aiEnabled" onchange="saveGroqConfig()" style="cursor: pointer; width: 16px; height: 16px; accent-color: var(--primary);">
-                            <label for="aiEnabled" style="font-size: 0.85rem; color: #fff; cursor: pointer; font-weight: 500;">Kích hoạt Bộ não AI Load Balancer</label>
+                    <div style="background: rgba(0,0,0,0.15); padding: 1rem; border-radius: 14px; border: 1px solid var(--card-border); font-size: 0.82rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                        <div>
+                            <strong style="color: var(--text-muted);">Trạng thái hệ thống:</strong>
+                            <span style="color: var(--success); font-weight: bold; margin-left: 0.25rem;">⚡ Tự động hóa cục bộ (Hoạt động)</span>
                         </div>
-                    </div>
-                    
-                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Groq API Keys <span id="groqKeyCount" style="color: var(--primary); font-weight: bold;">0</span></h4>
-                        </div>
-                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem;">
-                            <input type="password" id="newGroqKey" placeholder="Nhập gsk_..." style="flex: 1; padding: 0.6rem; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.85rem;">
-                            <button onclick="addGroqKey()" style="padding: 0.6rem 1rem; border-radius: 8px; background: #10b981; color: #fff; border: none; font-weight: bold; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">+ Thêm Key</button>
-                        </div>
-                        <div id="groqKeysList" style="display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1rem;"></div>
-                    </div>
-
-                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
-                            <h4 style="font-size: 0.9rem; color: var(--text-muted);">Trạng thái Tối ưu hóa AI Brain</h4>
-                            <div id="aiLBBrainStatusBadge" style="display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 6px; background: rgba(255, 255, 255, 0.05); color: var(--text-muted);">
-                                <span class="latency-dot yellow" id="aiLBBrainStatusDot"></span>
-                                <span id="aiLBBrainStatusText">Chờ / Tắt</span>
-                            </div>
-                        </div>
-                        
-                        <div id="aiLBBrainDetails" style="background: rgba(0,0,0,0.15); padding: 1rem; border-radius: 14px; border: 1px solid var(--card-border); font-size: 0.82rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                        <div style="margin-top: 0.25rem; display: flex; gap: 1rem; flex-wrap: wrap; border-top: 1px dashed rgba(255,255,255,0.05); padding-top: 0.5rem; row-gap: 0.75rem;">
                             <div>
-                                <strong style="color: var(--text-muted);">Lý do tối ưu mới nhất:</strong>
-                                <div id="aiLBRationale" style="color: #a78bfa; margin-top: 0.25rem; font-style: italic;">Chưa có phân tích nào.</div>
+                                <strong style="color: var(--text-muted);">Tự động DNS Racing:</strong>
+                                <span id="llesRacingStatus" style="color: #60a5fa; margin-left: 0.25rem; font-weight: bold;">Đang chạy</span>
                             </div>
-                            <div style="margin-top: 0.25rem;">
-                                <strong style="color: var(--text-muted);">Thời gian phân tích:</strong>
-                                <span id="aiLBTime" style="color: var(--text-main); margin-left: 0.25rem;">Chưa cập nhật</span>
+                            <div>
+                                <strong style="color: var(--text-muted);">Độ trễ Racing:</strong>
+                                <span id="llesRacingDelay" style="color: #34d399; margin-left: 0.25rem; font-weight: bold;">- ms</span>
                             </div>
-                            <div style="margin-top: 0.25rem; display: flex; gap: 1rem; flex-wrap: wrap; border-top: 1px dashed rgba(255,255,255,0.05); padding-top: 0.5rem; row-gap: 0.75rem;">
-                                <div>
-                                    <strong style="color: var(--text-muted);">Tự động DNS Racing:</strong>
-                                    <span id="aiLBRacingStatus" style="color: #60a5fa; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-muted);">Độ trễ Racing:</strong>
-                                    <span id="aiLBRacingDelay" style="color: #34d399; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-muted);">Cache TTL tối thiểu:</strong>
-                                    <span id="aiLBCacheTtl" style="color: #fbbf24; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-muted);">EMA Smooth Alpha:</strong>
-                                    <span id="aiLBEMAWeight" style="color: #f472b6; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-muted);">Cách ly:</strong>
-                                    <span id="aiLBQuarantineDuration" style="color: #fb7185; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-muted);">Stale Cache:</strong>
-                                    <span id="aiLBStaleCacheWindow" style="color: #38bdf8; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-muted);">Subnet ECS:</strong>
-                                    <span id="aiLBECSPrefix" style="color: #c084fc; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
-                                </div>
+                            <div>
+                                <strong style="color: var(--text-muted);">Cache TTL tối thiểu:</strong>
+                                <span id="llesCacheTtl" style="color: #fbbf24; margin-left: 0.25rem; font-weight: bold;">- giây</span>
                             </div>
-                        </div>
-
-                        <div id="aiWeightsContainer" style="background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); padding: 1rem; border-radius: 14px; margin-bottom: 1rem;">
-                            <h5 style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; font-weight: 600;">Phân bổ Trọng số do AI đề xuất</h5>
-                            <div style="display: flex; flex-direction: column; gap: 0.75rem;" id="aiWeightsBars">
-                                <div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 1rem;">Chưa có phân tích tải</div>
+                            <div>
+                                <strong style="color: var(--text-muted);">EMA Smooth Alpha:</strong>
+                                <span id="llesEMAWeight" style="color: #f472b6; margin-left: 0.25rem; font-weight: bold;">0.3</span>
+                            </div>
+                            <div>
+                                <strong style="color: var(--text-muted);">Ngưỡng cách ly RTT:</strong>
+                                <span id="llesQuarantineThreshold" style="color: #fb7185; margin-left: 0.25rem; font-weight: bold;">> 800 ms</span>
+                            </div>
+                            <div>
+                                <strong style="color: var(--text-muted);">Thời gian cách ly:</strong>
+                                <span id="llesQuarantineDuration" style="color: #fb7185; margin-left: 0.25rem; font-weight: bold;">- giây</span>
+                            </div>
+                            <div>
+                                <strong style="color: var(--text-muted);">Subnet ECS:</strong>
+                                <span id="llesECSPrefix" style="color: #c084fc; margin-left: 0.25rem; font-weight: bold;">-</span>
                             </div>
                         </div>
                     </div>
 
-                    <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.25rem;">
-                        <h4 style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 0.5rem;">Kiểm thử & Khởi chạy AI Brain</h4>
-                        <button onclick="testGroqAI()" style="width: 100%; padding: 0.75rem 1rem; border-radius: 8px; background: #1f2937; color: #fff; border: 1px solid var(--card-border); font-weight: bold; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
-                            ⚡ Chạy phân tích & Tối ưu tải ngay lập tức
-                        </button>
-                        <div id="aiTestResult" style="padding: 0.75rem; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); font-size: 0.8rem; color: var(--text-muted); display: none; line-height: 1.4; margin-top: 0.75rem;"></div>
+                    <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); padding: 1rem; border-radius: 14px;">
+                        <h5 style="font-size: 0.82rem; color: var(--text-muted); margin-bottom: 0.75rem; text-transform: uppercase; font-weight: 600;">Phân bổ Định tuyến LLES Thực tế</h5>
+                        <div style="display: flex; flex-direction: column; gap: 0.75rem;" id="llesWeightsBars">
+                            <!-- LLES dynamic shares will be loaded here -->
+                        </div>
                     </div>
                 </div>
             </div>
@@ -639,12 +591,6 @@
     <script>
         const toastContainer = document.getElementById('toastContainer');
         let dnsConfig = {};
-        let currentFullApiKeys = [];
-        try {
-            currentFullApiKeys = JSON.parse(localStorage.getItem('groq_api_keys')) || [];
-        } catch(e) {
-            currentFullApiKeys = [];
-        }
 
         function showToast(message, type = 'success') {
             const toast = document.createElement('div');
@@ -687,8 +633,8 @@
             document.getElementById('dnsStatCacheHit').innerText = (stats.cacheHitRate || 0).toFixed(1) + '%';
             document.getElementById('dnsStatLatency').innerText = (stats.avgLatency || 0).toFixed(1) + ' ms';
             let algoName = dnsConfig.lbAlgorithm || 'least-latency';
-            if (algoName === 'ai-routing') {
-                algoName = '🧠 AI Autopilot';
+            if (algoName === 'least-latency') {
+                algoName = '⚡ Least Latency (LLES)';
             }
             document.getElementById('dnsStatAlgo').innerText = algoName;
             document.getElementById('lbAlgoSelector').value = dnsConfig.lbAlgorithm || 'least-latency';
@@ -700,72 +646,39 @@
             statusEl.innerText = server.status || 'Ổn định';
             statusEl.style.color = server.statusClass === 'stable' ? '#10b981' : (server.statusClass === 'warning' ? '#f59e0b' : '#ef4444');
             
-            // AI Settings
-            document.getElementById('aiEnabled').checked = !!dnsConfig.aiEnabled;
+            // LLES Settings & Monitoring
             document.getElementById('dnsRacingEnabled').checked = !!dnsConfig.dnsRacingEnabled;
             document.getElementById('dnsRacingDelayMs').value = dnsConfig.dnsRacingDelayMs || 15;
 
-            // AI Brain Stats cards
-            const aiBrainStatus = dnsConfig.aiEnabled ? (dnsConfig.isAILBRunning ? "Đang chạy..." : "Hoạt động") : "Tắt";
-            document.getElementById('dnsStatAIBrainStatus').innerText = aiBrainStatus;
+            document.getElementById('llesRacingStatus').innerText = dnsConfig.dnsRacingEnabled ? "Kích hoạt" : "Tắt";
+            document.getElementById('llesRacingDelay').innerText = (dnsConfig.dnsRacingDelayMs || 15) + " ms";
+            document.getElementById('llesCacheTtl').innerText = (dnsConfig.minCacheTtlSeconds || 300) + " giây";
+            document.getElementById('llesEMAWeight').innerText = dnsConfig.latencyEMAWeight !== undefined ? dnsConfig.latencyEMAWeight : "0.3";
+            document.getElementById('llesQuarantineDuration').innerText = (dnsConfig.quarantineDurationSeconds || 60) + " giây";
+            document.getElementById('llesECSPrefix').innerText = dnsConfig.ecsIPv4PrefixLength !== undefined ? "/" + dnsConfig.ecsIPv4PrefixLength : "/24";
 
-            let lastRunText = "Chưa có";
-            if (dnsConfig.lastAiLBTime) {
-                const date = new Date(dnsConfig.lastAiLBTime);
-                lastRunText = date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            }
-            document.getElementById('dnsStatAIBrainLastRun').innerText = lastRunText;
-            
-            // AI Brain Details in panel
-            const statusDot = document.getElementById('aiLBBrainStatusDot');
-            const statusText = document.getElementById('aiLBBrainStatusText');
-            const statusBadge = document.getElementById('aiLBBrainStatusBadge');
-            if (dnsConfig.aiEnabled) {
-                if (dnsConfig.isAILBRunning) {
-                    statusBadge.style.background = 'rgba(16, 185, 129, 0.1)';
-                    statusBadge.style.color = 'var(--success)';
-                    statusDot.className = 'latency-dot green';
-                    statusText.innerText = 'Đang phân tích tải...';
-                } else {
-                    statusBadge.style.background = 'rgba(59, 130, 246, 0.1)';
-                    statusBadge.style.color = 'var(--primary)';
-                    statusDot.className = 'latency-dot blue';
-                    statusText.innerText = 'Hoạt động';
-                }
-            } else {
-                statusBadge.style.background = 'rgba(255, 255, 255, 0.05)';
-                statusBadge.style.color = 'var(--text-muted)';
-                statusDot.className = 'latency-dot yellow';
-                statusText.innerText = 'Chờ / Tắt';
-            }
-
-            document.getElementById('aiLBRationale').innerText = dnsConfig.aiLBReason || "Chưa có phân tích nào.";
-
-            let aiTimeText = "Chưa cập nhật";
-            if (dnsConfig.lastAiLBTime) {
-                const date = new Date(dnsConfig.lastAiLBTime);
-                aiTimeText = date.toLocaleString('vi-VN');
-            }
-            document.getElementById('aiLBTime').innerText = aiTimeText;
-            
-            document.getElementById('aiLBRacingStatus').innerText = dnsConfig.dnsRacingEnabled ? "Kích hoạt" : "Tắt";
-            document.getElementById('aiLBRacingDelay').innerText = (dnsConfig.dnsRacingDelayMs || 15) + " ms";
-            document.getElementById('aiLBCacheTtl').innerText = (dnsConfig.minCacheTtlSeconds || 300) + " giây";
-            document.getElementById('aiLBEMAWeight').innerText = dnsConfig.latencyEMAWeight !== undefined ? dnsConfig.latencyEMAWeight : "0.3";
-            document.getElementById('aiLBQuarantineDuration').innerText = (dnsConfig.quarantineDurationSeconds || 60) + " giây";
-            document.getElementById('aiLBStaleCacheWindow').innerText = dnsConfig.staleCacheWindowSeconds !== undefined ? (dnsConfig.staleCacheWindowSeconds / 3600).toFixed(1) + " giờ" : "24.0 giờ";
-            document.getElementById('aiLBECSPrefix').innerText = dnsConfig.ecsIPv4PrefixLength !== undefined ? "/" + dnsConfig.ecsIPv4PrefixLength : "/24";
-
-            // AI Weights Progress Bars
-            const aiWeightsBars = document.getElementById('aiWeightsBars');
+            // LLES Weights Progress Bars
+            const llesWeightsBars = document.getElementById('llesWeightsBars');
             const pool = dnsConfig.upstreamPool || [];
             if (pool.length === 0) {
-                aiWeightsBars.innerHTML = '<div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 1rem;">Chưa có cấu hình máy chủ DNS nào.</div>';
+                llesWeightsBars.innerHTML = '<div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 1rem;">Chưa có cấu hình máy chủ DNS nào.</div>';
             } else {
-                aiWeightsBars.innerHTML = pool.map(s => {
-                    const weight = typeof s.aiWeight === 'number' ? s.aiWeight : (s.online !== false ? 10 : 0);
-                    const barColor = s.online !== false ? 'linear-gradient(90deg, #a78bfa, #8b5cf6)' : 'var(--text-muted)';
-                    const statusText = s.online !== false ? `Trọng số: ${weight}%` : 'OFFLINE (0%)';
+                // Find min latency of online servers
+                const onlinePool = pool.filter(s => s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999);
+                let minLat = Infinity;
+                onlinePool.forEach(s => {
+                    if (s.latency < minLat) minLat = s.latency;
+                });
+                if (minLat === Infinity) minLat = 20;
+                const thresh = Math.max(15, minLat * 0.5);
+                const lowLatCount = onlinePool.filter(s => s.latency <= minLat + thresh).length;
+
+                llesWeightsBars.innerHTML = pool.map(s => {
+                    const online = s.online !== false;
+                    const isLowLat = online && typeof s.latency === 'number' && s.latency > 0 && s.latency <= minLat + thresh;
+                    const share = isLowLat ? (100 / lowLatCount) : 0;
+                    const barColor = isLowLat ? 'linear-gradient(90deg, #10b981, #34d399)' : 'var(--text-muted)';
+                    const statusText = isLowLat ? `Trọng số tải: ${share.toFixed(0)}%` : (online ? 'Trễ cao (0%)' : 'Cách ly (0%)');
                     return `
                         <div>
                             <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 0.25rem;">
@@ -773,7 +686,7 @@
                                 <strong>${statusText}</strong>
                             </div>
                             <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
-                                <div style="width: ${weight}%; height: 100%; background: ${barColor}; border-radius: 10px; transition: width 0.5s ease;"></div>
+                                <div style="width: ${share}%; height: 100%; background: ${barColor}; border-radius: 10px; transition: width 0.5s ease;"></div>
                             </div>
                         </div>
                     `;
@@ -793,6 +706,16 @@
                     fastestIP = sorted[0].ip;
                 }
 
+                // Find min latency of online servers for table LLES indicators
+                const onlinePoolForTable = pool.filter(s => s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999);
+                let minLatForTable = Infinity;
+                onlinePoolForTable.forEach(srv => {
+                    if (srv.latency < minLatForTable) minLatForTable = srv.latency;
+                });
+                if (minLatForTable === Infinity) minLatForTable = 20;
+                const threshForTable = Math.max(15, minLatForTable * 0.5);
+                const lowLatCountForTable = onlinePoolForTable.filter(srv => srv.latency <= minLatForTable + threshForTable).length;
+
                 poolList.innerHTML = `
                     <div style="overflow-x: auto; width: 100%; border-radius: 12px; border: 1px solid var(--card-border); background: rgba(0, 0, 0, 0.2);">
                         <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; min-width: 550px;">
@@ -801,7 +724,7 @@
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600;">Máy chủ DNS</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Độ trễ RTT</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Tỷ lệ thành công</th>
-                                    <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Trọng số AI</th>
+                                    <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Định tuyến LLES</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Lượt truy vấn đã gánh</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Trạng thái</th>
                                     <th style="padding: 0.75rem 1rem; color: var(--text-muted); font-weight: 600; text-align: center;">Hành động</th>
@@ -824,8 +747,12 @@
                                         : `<span style="background: rgba(239, 68, 68, 0.1); color: var(--danger); padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: 500; font-size: 0.75rem;">Offline</span>`;
                                         
                                     const fastestBadge = isFastest 
-                                        ? `<span style="background: linear-gradient(135deg, #a78bfa, #8b5cf6); color: white; font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 20px; box-shadow: 0 0 10px rgba(139, 92, 246, 0.4); margin-left: 0.5rem; text-transform: uppercase; white-space: nowrap;">Nhanh nhất</span>`
+                                        ? `<span style="background: linear-gradient(135deg, #34d399, #10b981); color: white; font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 20px; box-shadow: 0 0 10px rgba(16, 185, 129, 0.4); margin-left: 0.5rem; text-transform: uppercase; white-space: nowrap;">Nhanh nhất</span>`
                                         : '';
+
+                                    const isLowLatForTable = online && typeof s.latency === 'number' && s.latency > 0 && s.latency <= minLatForTable + threshForTable;
+                                    const routingShare = isLowLatForTable ? (100 / lowLatCountForTable).toFixed(0) + '%' : (online ? '0% (Trễ cao)' : '0% (Offline)');
+                                    const routingColor = isLowLatForTable ? 'var(--success)' : (online ? '#f59e0b' : 'var(--text-muted)');
 
                                     return `
                                         <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255, 255, 255, 0.01)'" onmouseout="this.style.backgroundColor='transparent'">
@@ -845,8 +772,8 @@
                                             <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: ${online ? (successRate >= 90 ? 'var(--success)' : (successRate >= 75 ? '#f59e0b' : '#ef4444')) : 'var(--text-muted)'};">
                                                 ${online ? successRate + '%' : '-'}
                                             </td>
-                                            <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: #a78bfa;">
-                                                ${online ? (typeof s.aiWeight === 'number' ? s.aiWeight + '%' : '10%') : '-'}
+                                            <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: ${routingColor};">
+                                                ${routingShare}
                                             </td>
                                             <td style="padding: 0.75rem 1rem; text-align: center; font-weight: bold; font-family: monospace; color: #60a5fa;">
                                                 ${queryCount.toLocaleString('vi-VN')}
@@ -892,10 +819,6 @@
                     `;
                 }).join('');
             }
-
-            // Keys
-            document.getElementById('groqKeyCount').innerText = dnsConfig.groqApiKeysCount || 0;
-            renderKeysList(dnsConfig.groqApiKeys || [], dnsConfig.groqApiKeysCooldown || []);
             
             // Logs
             const logsList = document.getElementById('dnsLogsList');
@@ -938,29 +861,6 @@
                     }
                     return `<tr><td colspan="3" style="padding-left: 0.75rem; color: var(--text-muted);">${line}</td></tr>`;
                 }).reverse().join('');
-            }
-        }
-
-        function renderKeysList(keys, cooldowns = []) {
-            const list = document.getElementById('groqKeysList');
-            if (keys.length === 0) {
-                list.innerHTML = '<div style="font-size: 0.8rem; color: var(--text-muted); text-align: center;">Chưa cấu hình API Keys</div>';
-            } else {
-                list.innerHTML = keys.map((k, i) => {
-                    const isCooldown = cooldowns[i] === true;
-                    const cooldownBadge = isCooldown 
-                        ? `<span style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem; animation: pulse 1.5s infinite;">Tạm khóa (429/401)</span>` 
-                        : `<span style="background: rgba(16, 185, 129, 0.15); color: #10b981; font-size: 0.7rem; padding: 0.15rem 0.35rem; border-radius: 4px; font-weight: bold; margin-left: 0.5rem;">Sẵn sàng</span>`;
-                    return `
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid var(--card-border);">
-                            <div style="display: flex; align-items: center; gap: 0.25rem;">
-                                <span style="font-family: monospace; font-size: 0.8rem;">Key #${i+1}: ${k}</span>
-                                ${cooldownBadge}
-                            </div>
-                            <button onclick="removeGroqKey(${i})" style="background: none; border: none; color: var(--danger); cursor: pointer; font-weight: bold; font-size: 0.8rem;">Xóa</button>
-                        </div>
-                    `;
-                }).join('');
             }
         }
 
@@ -1040,19 +940,6 @@
                 });
         }
 
-        function saveGroqConfig() {
-            const enabled = document.getElementById('aiEnabled').checked;
-            
-            localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
-            localStorage.setItem('ai_enabled', enabled ? 'true' : 'false');
-            
-            fetch(`/dns/groq?enabled=${enabled}`, { method: 'POST' })
-                .then(res => {
-                    if (res.ok) showToast(enabled ? "Đã kích hoạt AI Load Balancer!" : "Đã tắt AI Load Balancer!");
-                    else showToast("Cập nhật thất bại", "error");
-                });
-        }
-        
         function saveRacingConfig() {
             const enabled = document.getElementById('dnsRacingEnabled').checked;
             const delay = parseInt(document.getElementById('dnsRacingDelayMs').value, 10) || 15;
@@ -1060,74 +947,6 @@
                 .then(res => {
                     if (res.ok) showToast("Đã cập nhật cấu hình DNS Racing");
                     else showToast("Lưu cấu hình thất bại", "error");
-                });
-        }
-
-        function updateGroqKeysOnServer() {
-            return fetch('/dns/groq/keys/update', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(currentFullApiKeys)
-            }).then(res => {
-                if (res.ok) fetchConfig();
-            });
-        }
-
-        function addGroqKey() {
-            const input = document.getElementById('newGroqKey');
-            const key = input.value.trim();
-            if (!key) return;
-            
-            if (currentFullApiKeys.includes(key)) {
-                showToast("API Key đã tồn tại", "error");
-                return;
-            }
-            
-            currentFullApiKeys.push(key);
-            localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
-            input.value = '';
-            
-            updateGroqKeysOnServer().then(() => {
-                showToast("Đã thêm API Key!");
-            });
-        }
-
-        function removeGroqKey(idx) {
-            currentFullApiKeys.splice(idx, 1);
-            localStorage.setItem('groq_api_keys', JSON.stringify(currentFullApiKeys));
-            
-            updateGroqKeysOnServer().then(() => {
-                showToast("Đã xóa API Key");
-            });
-        }
-
-        function testGroqAI() {
-            const resultBox = document.getElementById('aiTestResult');
-            resultBox.style.display = 'block';
-            resultBox.innerHTML = '⚡ Đang gửi yêu cầu phân tích tải lên Groq AI...';
-            
-            fetch('/dns/groq/test')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.error) {
-                        resultBox.innerHTML = `<span style="color:var(--danger);">${data.error}</span>`;
-                    } else {
-                        let weightsStr = Object.entries(data.weights || {})
-                            .map(([ip, w]) => `• ${ip}: <strong>${w}%</strong>`)
-                            .join('<br>');
-                        resultBox.innerHTML = `
-                            <strong style="color: var(--success);">Phân tích thành công!</strong><br>
-                            <strong>Lý do điều phối:</strong> <span style="color:#a78bfa;">${data.reason}</span><br>
-                            <strong>Trọng số đề xuất:</strong><br>${weightsStr}<br>
-                            <strong>DNS Racing:</strong> <span style="color:#60a5fa;">${data.dnsRacingEnabled ? 'Bật (' + data.dnsRacingDelayMs + 'ms)' : 'Tắt'}</span><br>
-                            <strong>Cache TTL tối thiểu:</strong> <span style="color:#fbbf24;">${data.minCacheTtlSeconds || 300} giây</span><br>
-                            <span style="font-size:0.75rem; color:var(--text-muted);">Model: ${data.modelUsed}</span>
-                        `;
-                        fetchConfig();
-                    }
-                })
-                .catch(() => {
-                    resultBox.innerHTML = '<span style="color:var(--danger);">Lỗi kết nối hoặc server không phản hồi.</span>';
                 });
         }
 
@@ -1139,51 +958,6 @@
                         fetchConfig();
                     }
                 });
-        }
-
-        let isSyncingKeys = false;
-        function syncKeysWithServer() {
-            if (isSyncingKeys) return;
-            
-            const needSyncApi = dnsConfig && dnsConfig.groqApiKeysCount === 0 && currentFullApiKeys.length > 0;
-            const needSyncAI = dnsConfig && dnsConfig.aiEnabled === false && localStorage.getItem('ai_enabled') === 'true';
-            
-            if (needSyncApi || needSyncAI) {
-                isSyncingKeys = true;
-                
-                const promises = [];
-                let syncMsgs = [];
-                
-                if (needSyncApi) {
-                    syncMsgs.push("API Keys");
-                    promises.push(
-                        fetch('/dns/groq/keys/update', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(currentFullApiKeys)
-                        })
-                    );
-                }
-                if (needSyncAI) {
-                    syncMsgs.push("Kích hoạt AI Router");
-                    promises.push(
-                        fetch('/dns/groq?enabled=true', { method: 'POST' })
-                    );
-                }
-                
-                showToast(`Tự động khôi phục ${syncMsgs.join(', ')} từ trình duyệt...`, "info");
-                
-                Promise.all(promises)
-                    .then(() => {
-                        isSyncingKeys = false;
-                        showToast(`Đã khôi phục thành công: ${syncMsgs.join(', ')}!`);
-                        fetchConfig();
-                    })
-                    .catch(() => {
-                        isSyncingKeys = false;
-                        showToast("Lỗi khi khôi phục cấu hình AI/Keys", "error");
-                    });
-            }
         }
 
         // Websocket connection with auto-reconnect
@@ -1199,7 +973,6 @@
                     if (payload.type === 'update') {
                         dnsConfig = payload;
                         updateUI();
-                        syncKeysWithServer();
                     }
                 } catch (e) {
                     console.error("WS parse error:", e);
