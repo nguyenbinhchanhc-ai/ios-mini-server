@@ -436,12 +436,21 @@
                 </div>
                 
                 <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
-                    <h3>Chọn Thuật toán Cân bằng tải</h3>
-                    <select id="lbAlgoSelector" onchange="changeLbAlgorithm()" style="width: 100%; margin-top: 0.5rem; padding: 0.75rem; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: #fff; outline: none; font-size: 0.9rem; font-weight: 500;">
+                    <h3>Thuật toán Cân bằng tải</h3>
+                    <div style="background: rgba(147, 51, 234, 0.1); border: 1px solid rgba(147, 51, 234, 0.3); padding: 1rem; border-radius: 12px; margin-top: 0.5rem; box-shadow: 0 4px 20px rgba(147, 51, 234, 0.15); border-left: 4px solid #a855f7;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; color: #d8b4fe; font-weight: 700; font-size: 0.9rem;">
+                            <span>🧠 CÂN BẰNG TẢI AI (AUTOPILOT)</span>
+                        </div>
+                        <p style="font-size: 0.75rem; color: var(--text-muted); margin-top: 0.5rem; line-height: 1.45;">
+                            Hệ thống định tuyến được quản lý tự động bởi AI. Bộ não AI liên tục đo lường RTT, tỉ lệ thành công, cách ly máy chủ lỗi và phân phối tải đều dựa trên số lượng truy vấn thực tế.
+                        </p>
+                    </div>
+                    <!-- Hidden selector to maintain JS compatibility -->
+                    <select id="lbAlgoSelector" onchange="changeLbAlgorithm()" style="display: none;">
+                        <option value="ai-routing">AI Routing (Định tuyến AI)</option>
                         <option value="least-latency">Least Latency (Nhanh nhất)</option>
                         <option value="round-robin">Round-Robin (Xoay vòng)</option>
                         <option value="weighted-round-robin">Weighted Round-Robin (Trọng số trễ)</option>
-                        <option value="ai-routing">AI Routing (Định tuyến AI)</option>
                         <option value="failover">Failover (Dự phòng tuần tự)</option>
                         <option value="all-racing">All-Racing (Đua tốc song song)</option>
                         <option value="random">Random (Ngẫu nhiên)</option>
@@ -573,18 +582,34 @@
                                 <strong style="color: var(--text-muted);">Thời gian phân tích:</strong>
                                 <span id="aiLBTime" style="color: var(--text-main); margin-left: 0.25rem;">Chưa cập nhật</span>
                             </div>
-                            <div style="margin-top: 0.25rem; display: flex; gap: 1rem; flex-wrap: wrap; border-top: 1px dashed rgba(255,255,255,0.05); padding-top: 0.5rem;">
+                            <div style="margin-top: 0.25rem; display: flex; gap: 1rem; flex-wrap: wrap; border-top: 1px dashed rgba(255,255,255,0.05); padding-top: 0.5rem; row-gap: 0.75rem;">
                                 <div>
                                     <strong style="color: var(--text-muted);">Tự động DNS Racing:</strong>
                                     <span id="aiLBRacingStatus" style="color: #60a5fa; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
                                 </div>
                                 <div>
-                                    <strong style="color: var(--text-muted);">Độ trễ Racing tối ưu:</strong>
+                                    <strong style="color: var(--text-muted);">Độ trễ Racing:</strong>
                                     <span id="aiLBRacingDelay" style="color: #34d399; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
                                 </div>
                                 <div>
                                     <strong style="color: var(--text-muted);">Cache TTL tối thiểu:</strong>
                                     <span id="aiLBCacheTtl" style="color: #fbbf24; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
+                                <div>
+                                    <strong style="color: var(--text-muted);">EMA Smooth Alpha:</strong>
+                                    <span id="aiLBEMAWeight" style="color: #f472b6; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
+                                <div>
+                                    <strong style="color: var(--text-muted);">Cách ly:</strong>
+                                    <span id="aiLBQuarantineDuration" style="color: #fb7185; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
+                                <div>
+                                    <strong style="color: var(--text-muted);">Stale Cache:</strong>
+                                    <span id="aiLBStaleCacheWindow" style="color: #38bdf8; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
+                                </div>
+                                <div>
+                                    <strong style="color: var(--text-muted);">Subnet ECS:</strong>
+                                    <span id="aiLBECSPrefix" style="color: #c084fc; margin-left: 0.25rem; font-weight: bold;">Chưa có</span>
                                 </div>
                             </div>
                         </div>
@@ -661,7 +686,11 @@
             document.getElementById('dnsStatTotal').innerText = stats.total || 0;
             document.getElementById('dnsStatCacheHit').innerText = (stats.cacheHitRate || 0).toFixed(1) + '%';
             document.getElementById('dnsStatLatency').innerText = (stats.avgLatency || 0).toFixed(1) + ' ms';
-            document.getElementById('dnsStatAlgo').innerText = dnsConfig.lbAlgorithm || 'least-latency';
+            let algoName = dnsConfig.lbAlgorithm || 'least-latency';
+            if (algoName === 'ai-routing') {
+                algoName = '🧠 AI Autopilot';
+            }
+            document.getElementById('dnsStatAlgo').innerText = algoName;
             document.getElementById('lbAlgoSelector').value = dnsConfig.lbAlgorithm || 'least-latency';
             
             // Server RAM & Status
@@ -722,6 +751,10 @@
             document.getElementById('aiLBRacingStatus').innerText = dnsConfig.dnsRacingEnabled ? "Kích hoạt" : "Tắt";
             document.getElementById('aiLBRacingDelay').innerText = (dnsConfig.dnsRacingDelayMs || 15) + " ms";
             document.getElementById('aiLBCacheTtl').innerText = (dnsConfig.minCacheTtlSeconds || 300) + " giây";
+            document.getElementById('aiLBEMAWeight').innerText = dnsConfig.latencyEMAWeight !== undefined ? dnsConfig.latencyEMAWeight : "0.3";
+            document.getElementById('aiLBQuarantineDuration').innerText = (dnsConfig.quarantineDurationSeconds || 60) + " giây";
+            document.getElementById('aiLBStaleCacheWindow').innerText = dnsConfig.staleCacheWindowSeconds !== undefined ? (dnsConfig.staleCacheWindowSeconds / 3600).toFixed(1) + " giờ" : "24.0 giờ";
+            document.getElementById('aiLBECSPrefix').innerText = dnsConfig.ecsIPv4PrefixLength !== undefined ? "/" + dnsConfig.ecsIPv4PrefixLength : "/24";
 
             // AI Weights Progress Bars
             const aiWeightsBars = document.getElementById('aiWeightsBars');

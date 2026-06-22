@@ -369,8 +369,9 @@ function addECS(dnsQueryBuffer, clientIP) {
             ipBytes = ipBytes.slice(0, 6);
         } else {
             family = 1;
-            prefix = 24; // /24 subnet for IPv4 GeoIP
-            ipBytes = ipBytes.slice(0, 3);
+            prefix = config.ecsIPv4PrefixLength !== undefined ? config.ecsIPv4PrefixLength : 24; // /24 or /32 subnet for IPv4 GeoIP
+            const sliceLen = Math.min(4, Math.ceil(prefix / 8));
+            ipBytes = ipBytes.slice(0, sliceLen);
         }
         
         const ecsOptionLen = 4 + ipBytes.length; // family (2) + source (1) + scope (1) + address
@@ -566,7 +567,8 @@ function initUpstreamSocketPool() {
                     const oldLatency = server.latency || 0;
                     
                     server.lastLatency = oldLatency;
-                    server.latency = Math.round((server.latency || 0) * 0.7 + elapsed * 0.3);
+                    const alpha = config.latencyEMAWeight !== undefined ? config.latencyEMAWeight : 0.3;
+                    server.latency = Math.round((server.latency || 0) * (1 - alpha) + elapsed * alpha);
                     server.online = true;
                     recordServerHealth(server, true);
                     
@@ -575,9 +577,10 @@ function initUpstreamSocketPool() {
                     
                     // Latency spike quarantine: if response takes > 2.5x of running average AND elapsed is > 100ms
                     if (oldLatency > 0 && elapsed > oldLatency * 2.5 && elapsed > 100 && !server.quarantined) {
+                        const qDuration = (config.quarantineDurationSeconds || 60) * 1000;
                         server.quarantined = true;
-                        server.quarantineUntil = Date.now() + 30000; // Quarantine for 30 seconds
-                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for 30s due to latency spike (${elapsed}ms vs avg ${oldLatency}ms).`);
+                        server.quarantineUntil = Date.now() + Math.round(qDuration / 2); // Half duration for latency spikes
+                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 2000)}s due to latency spike (${elapsed}ms vs avg ${oldLatency}ms).`);
                     } else if (server.quarantined && Date.now() > (server.quarantineUntil || 0)) {
                         // Lift quarantine if we get a successful response and time expired
                         server.quarantined = false;
@@ -658,9 +661,10 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                 // Autopilot quarantine: increment consecutive failures
                 server.consecutiveFailures = (server.consecutiveFailures || 0) + 1;
                 if (server.consecutiveFailures >= 3 && !server.quarantined) {
+                    const qDuration = (config.quarantineDurationSeconds || 60) * 1000;
                     server.quarantined = true;
-                    server.quarantineUntil = Date.now() + 60000; // Quarantine for 60 seconds
-                    console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for 60s due to 3 consecutive timeouts.`);
+                    server.quarantineUntil = Date.now() + qDuration;
+                    console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 1000)}s due to 3 consecutive timeouts.`);
                 }
                 
                 if (oldOnline !== false) {
@@ -700,9 +704,10 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     // Autopilot quarantine: increment consecutive failures
                     server.consecutiveFailures = (server.consecutiveFailures || 0) + 1;
                     if (server.consecutiveFailures >= 3 && !server.quarantined) {
+                        const qDuration = (config.quarantineDurationSeconds || 60) * 1000;
                         server.quarantined = true;
-                        server.quarantineUntil = Date.now() + 60000; // Quarantine for 60 seconds
-                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for 60s due to consecutive send errors.`);
+                        server.quarantineUntil = Date.now() + qDuration;
+                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 1000)}s due to consecutive send errors.`);
                     }
                     
                     if (oldOnline !== false) {
@@ -973,14 +978,18 @@ function runAILoadBalancerBrain() {
                                  `- Tỷ lệ server phụ thắng Đua DNS: ${clientRacingWinRate} (Tổng lượt đua: ${config.stats.racingTotal || 0})\n`;
 
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL, quarantine cooldown, stale cache window, and ECS prefix length.\n\n" +
                           "Instructions:\n" +
                           "1. Only assign weights to ONLINE and non-quarantined servers. Assign 0 weight to OFFLINE or QUARANTINED (ĐANG CÁCH LY) servers.\n" +
-                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters like dnsRacingDelayMs or minCacheTtlSeconds. Slower or non-ECS servers must receive 0% weight.\n" +
-                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
-                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher. Look at the client's DNS Racing win rate: if the win rate is high (> 30%), the primary server is struggling, so keep racing enabled and suggest a tight delay (8-12ms).\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) if the cache hit rate is low and server RTTs are stable, or decrease it only if server latency is fluctuating or packet loss occurs.\n" +
-                          "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
+                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters. Slower or non-ECS servers must receive 0% weight.\n" +
+                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating.\n" +
+                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Look at the client's DNS Racing win rate: if the win rate is high (> 30%), suggest a tight delay (8-12ms).\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively if the cache hit rate is low and server RTTs are stable.\n" +
+                          "6. Suggest the optimal latency EMA smoothing factor (\"latencyEMAWeight\": float, between 0.1 and 0.9). Suggest lower values (0.1 - 0.2) to smooth out random latency spikes, or higher values (0.4 - 0.7) to adapt rapidly to server latency state transitions.\n" +
+                          "7. Suggest the optimal quarantine duration in seconds (\"quarantineDurationSeconds\": integer, between 15 and 600) when server timeouts/spikes occur. Suggest higher values if a server is persistently failing.\n" +
+                          "8. Suggest the optimal stale cache retention window in seconds (\"staleCacheWindowSeconds\": integer, between 3600 and 86400). Suggest higher values if upstream servers are unstable to ensure a fallback record exists.\n" +
+                          "9. Suggest the optimal IPv4 ECS prefix length (\"ecsIPv4PrefixLength\": integer, 24 or 32). Use 24 for privacy and maximum cache hit rate sharing, or 32 for extremely accurate location routing.\n" +
+                          "10. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", \"latencyEMAWeight\", \"quarantineDurationSeconds\", \"staleCacheWindowSeconds\", \"ecsIPv4PrefixLength\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
@@ -992,9 +1001,13 @@ function runAILoadBalancerBrain() {
                           "  \"dnsRacingEnabled\": true,\n" +
                           "  \"dnsRacingDelayMs\": 15,\n" +
                           "  \"minCacheTtlSeconds\": 14400,\n" +
+                          "  \"latencyEMAWeight\": 0.3,\n" +
+                          "  \"quarantineDurationSeconds\": 60,\n" +
+                          "  \"staleCacheWindowSeconds\": 86400,\n" +
+                          "  \"ecsIPv4PrefixLength\": 24,\n" +
                           "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
-                          
+                           
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
     
     const postData = JSON.stringify({
@@ -1069,6 +1082,18 @@ function runAILoadBalancerBrain() {
                         }
                         if (typeof decision.minCacheTtlSeconds === 'number') {
                             config.minCacheTtlSeconds = Math.max(300, Math.min(43200, decision.minCacheTtlSeconds));
+                        }
+                        if (typeof decision.latencyEMAWeight === 'number') {
+                            config.latencyEMAWeight = Math.max(0.1, Math.min(0.9, decision.latencyEMAWeight));
+                        }
+                        if (typeof decision.quarantineDurationSeconds === 'number') {
+                            config.quarantineDurationSeconds = Math.max(15, Math.min(600, decision.quarantineDurationSeconds));
+                        }
+                        if (typeof decision.staleCacheWindowSeconds === 'number') {
+                            config.staleCacheWindowSeconds = Math.max(3600, Math.min(86400, decision.staleCacheWindowSeconds));
+                        }
+                        if (decision.ecsIPv4PrefixLength === 24 || decision.ecsIPv4PrefixLength === 32) {
+                            config.ecsIPv4PrefixLength = decision.ecsIPv4PrefixLength;
                         }
                         
                         config.aiLBReason = reason;
@@ -1329,15 +1354,19 @@ function loadConfig() {
         } else {
             config = {
                 upstreamPool: defaultPool,
-                lbAlgorithm: "least-latency",
+                lbAlgorithm: "ai-routing",
                 gslbRecords: {},
                 stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
-                aiEnabled: false,
+                aiEnabled: true,
                 groqApiKeys: [],
                 groqModel: "llama-3.1-8b-instant",
                 dnsRacingEnabled: true,
                 dnsRacingDelayMs: 15,
-                minCacheTtlSeconds: 300
+                minCacheTtlSeconds: 300,
+                latencyEMAWeight: 0.3,
+                quarantineDurationSeconds: 60,
+                staleCacheWindowSeconds: 86400,
+                ecsIPv4PrefixLength: 24
             };
             saveConfig();
         }
@@ -1345,15 +1374,19 @@ function loadConfig() {
         console.error("Failed to load config, using defaults:", e);
         config = {
             upstreamPool: defaultPool,
-            lbAlgorithm: "least-latency",
+            lbAlgorithm: "ai-routing",
             gslbRecords: {},
             stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
-            aiEnabled: false,
+            aiEnabled: true,
             groqApiKeys: [],
             groqModel: "llama-3.1-8b-instant",
             dnsRacingEnabled: true,
             dnsRacingDelayMs: 15,
-            minCacheTtlSeconds: 300
+            minCacheTtlSeconds: 300,
+            latencyEMAWeight: 0.3,
+            quarantineDurationSeconds: 60,
+            staleCacheWindowSeconds: 86400,
+            ecsIPv4PrefixLength: 24
         };
     }
     
@@ -1363,7 +1396,7 @@ function loadConfig() {
     config.stats.cacheMisses = config.stats.cacheMisses || 0;
     config.stats.racingWins = config.stats.racingWins || 0;
     config.stats.racingTotal = config.stats.racingTotal || 0;
-    config.aiEnabled = config.aiEnabled || false;
+    config.aiEnabled = config.aiEnabled !== undefined ? config.aiEnabled : true;
     config.groqModel = "llama-3.1-8b-instant";
     config.upstreamPool = config.upstreamPool || [];
     // Ensure all defaultPool servers are present in the pool
@@ -1381,11 +1414,15 @@ function loadConfig() {
             server.ecsSupported = !noEcsIps.includes(server.ip);
         }
     });
-    config.lbAlgorithm = config.lbAlgorithm || "least-latency";
+    config.lbAlgorithm = config.lbAlgorithm || "ai-routing";
     config.gslbRecords = config.gslbRecords || {};
     config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
     config.dnsRacingDelayMs = config.dnsRacingDelayMs !== undefined ? config.dnsRacingDelayMs : 15;
     config.minCacheTtlSeconds = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
+    config.latencyEMAWeight = config.latencyEMAWeight !== undefined ? config.latencyEMAWeight : 0.3;
+    config.quarantineDurationSeconds = config.quarantineDurationSeconds !== undefined ? config.quarantineDurationSeconds : 60;
+    config.staleCacheWindowSeconds = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 86400;
+    config.ecsIPv4PrefixLength = config.ecsIPv4PrefixLength !== undefined ? config.ecsIPv4PrefixLength : 24;
     
     if (!Array.isArray(config.groqApiKeys)) config.groqApiKeys = [];
     
@@ -1459,7 +1496,7 @@ setTimeout(runAILoadBalancerBrain, 5000);
 function runCacheGC() {
     const now = Date.now();
     let deletedCount = 0;
-    const maxStaleLimitMs = 24 * 3600 * 1000; // Keep expired records for 24 hours for RFC 8767 fallback
+    const maxStaleLimitMs = (config.staleCacheWindowSeconds || 86400) * 1000;
     for (const [key, value] of dnsCache.entries()) {
         if (now >= value.expiresAt + maxStaleLimitMs) {
             dnsCache.delete(key);
@@ -1972,14 +2009,18 @@ app.get('/dns/groq/test', (req, res) => {
                                  `- Tỷ lệ server phụ thắng Đua DNS: ${clientRacingWinRate} (Tổng lượt đua: ${config.stats.racingTotal || 0})\n`;
 
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL, quarantine cooldown, stale cache window, and ECS prefix length.\n\n" +
                           "Instructions:\n" +
                           "1. Only assign weights to ONLINE and non-quarantined servers. Assign 0 weight to OFFLINE or QUARANTINED (ĐANG CÁCH LY) servers.\n" +
-                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters like dnsRacingDelayMs or minCacheTtlSeconds. Slower or non-ECS servers must receive 0% weight.\n" +
-                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
-                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher. Look at the client's DNS Racing win rate: if the win rate is high (> 30%), the primary server is struggling, so keep racing enabled and suggest a tight delay (8-12ms).\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) if the cache hit rate is low and server RTTs are stable, or decrease it only if server latency is fluctuating or packet loss occurs.\n" +
-                          "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
+                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters. Slower or non-ECS servers must receive 0% weight.\n" +
+                          "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating.\n" +
+                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Look at the client's DNS Racing win rate: if the win rate is high (> 30%), suggest a tight delay (8-12ms).\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively if the cache hit rate is low and server RTTs are stable.\n" +
+                          "6. Suggest the optimal latency EMA smoothing factor (\"latencyEMAWeight\": float, between 0.1 and 0.9). Suggest lower values (0.1 - 0.2) to smooth out random latency spikes, or higher values (0.4 - 0.7) to adapt rapidly to server latency state transitions.\n" +
+                          "7. Suggest the optimal quarantine duration in seconds (\"quarantineDurationSeconds\": integer, between 15 and 600) when server timeouts/spikes occur. Suggest higher values if a server is persistently failing.\n" +
+                          "8. Suggest the optimal stale cache retention window in seconds (\"staleCacheWindowSeconds\": integer, between 3600 and 86400). Suggest higher values if upstream servers are unstable to ensure a fallback record exists.\n" +
+                          "9. Suggest the optimal IPv4 ECS prefix length (\"ecsIPv4PrefixLength\": integer, 24 or 32). Use 24 for privacy and maximum cache hit rate sharing, or 32 for extremely accurate location routing.\n" +
+                          "10. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", \"latencyEMAWeight\", \"quarantineDurationSeconds\", \"staleCacheWindowSeconds\", \"ecsIPv4PrefixLength\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
@@ -1991,6 +2032,10 @@ app.get('/dns/groq/test', (req, res) => {
                           "  \"dnsRacingEnabled\": true,\n" +
                           "  \"dnsRacingDelayMs\": 15,\n" +
                           "  \"minCacheTtlSeconds\": 14400,\n" +
+                          "  \"latencyEMAWeight\": 0.3,\n" +
+                          "  \"quarantineDurationSeconds\": 60,\n" +
+                          "  \"staleCacheWindowSeconds\": 86400,\n" +
+                          "  \"ecsIPv4PrefixLength\": 24,\n" +
                           "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
@@ -2051,6 +2096,18 @@ app.get('/dns/groq/test', (req, res) => {
                         }
                         if (typeof decision.minCacheTtlSeconds === 'number') {
                             config.minCacheTtlSeconds = Math.max(300, Math.min(43200, decision.minCacheTtlSeconds));
+                        }
+                        if (typeof decision.latencyEMAWeight === 'number') {
+                            config.latencyEMAWeight = Math.max(0.1, Math.min(0.9, decision.latencyEMAWeight));
+                        }
+                        if (typeof decision.quarantineDurationSeconds === 'number') {
+                            config.quarantineDurationSeconds = Math.max(15, Math.min(600, decision.quarantineDurationSeconds));
+                        }
+                        if (typeof decision.staleCacheWindowSeconds === 'number') {
+                            config.staleCacheWindowSeconds = Math.max(3600, Math.min(86400, decision.staleCacheWindowSeconds));
+                        }
+                        if (decision.ecsIPv4PrefixLength === 24 || decision.ecsIPv4PrefixLength === 32) {
+                            config.ecsIPv4PrefixLength = decision.ecsIPv4PrefixLength;
                         }
                         
                         config.aiLBReason = reason;
