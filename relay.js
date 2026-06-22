@@ -50,7 +50,7 @@ const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Ar
 // AI Load Balancer Brain State
 let aiLoadBalancerTimeout = null;
 let isAILBRunning = false;
-const AI_LB_INTERVAL_MS = 60000; // Run every 60 seconds
+const AI_LB_INTERVAL_MS = 300000; // Run every 5 minutes
 let groqKeyIndex = 0;
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
 
@@ -595,7 +595,6 @@ function initUpstreamSocketPool() {
                     
                     if (onlineChanged) {
                         rebuildAiRoutingCache();
-                        triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went ONLINE`);
                     }
                     
                     throttledBroadcastUpdate();
@@ -664,7 +663,6 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                 
                 if (oldOnline !== false) {
                     rebuildAiRoutingCache();
-                    triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went OFFLINE (Timeout)`);
                 }
                 
                 throttledBroadcastUpdate();
@@ -707,7 +705,6 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     
                     if (oldOnline !== false) {
                         rebuildAiRoutingCache();
-                        triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went OFFLINE (Send error)`);
                     }
                     
                     throttledBroadcastUpdate();
@@ -884,34 +881,6 @@ function getNextGroqKey() {
 }
 
 let lastAIBrainRunTime = 0;
-let aiBrainTriggerTimeout = null;
-
-function triggerAIBrainOnEvent(reason) {
-    if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) return;
-    
-    const now = Date.now();
-    const minInterval = 15000; // Throttle to at most once per 15 seconds
-    const timeSinceLastRun = now - lastAIBrainRunTime;
-    
-    if (timeSinceLastRun >= minInterval) {
-        if (aiBrainTriggerTimeout) {
-            clearTimeout(aiBrainTriggerTimeout);
-            aiBrainTriggerTimeout = null;
-        }
-        console.log(`[AI LB Brain] Triggering immediate analysis. Reason: ${reason}`);
-        runAILoadBalancerBrain();
-    } else {
-        // Schedule it to run as soon as the throttle expires
-        const delay = minInterval - timeSinceLastRun;
-        if (!aiBrainTriggerTimeout) {
-            console.log(`[AI LB Brain] Event trigger throttled. Scheduled in ${Math.round(delay/1000)}s. Reason: ${reason}`);
-            aiBrainTriggerTimeout = setTimeout(() => {
-                aiBrainTriggerTimeout = null;
-                runAILoadBalancerBrain();
-            }, delay);
-        }
-    }
-}
 
 // AI Load Balancer Brain implementation
 function runAILoadBalancerBrain() {
@@ -1143,19 +1112,56 @@ function runAILoadBalancerBrain() {
 }
 
 function selectAIWeightedDNS(activePool) {
-    const allowedIps = new Set(activePool.map(s => s.ip));
-    const pool = precomputedAiPool.filter(item => allowedIps.has(item.ip));
+    if (activePool.length === 0) return "1.1.1.1";
+    if (activePool.length === 1) return activePool[0].ip;
+    
+    // Find the minimum latency among activePool servers
+    let minLatency = Infinity;
+    for (let i = 0; i < activePool.length; i++) {
+        const s = activePool[i];
+        if (s.online !== false && typeof s.latency === 'number' && s.latency < minLatency && s.latency > 0) {
+            minLatency = s.latency;
+        }
+    }
+    if (minLatency === Infinity) minLatency = 20;
+    
+    // Filter to lowest-latency servers (LLES logic)
+    const threshold = Math.max(15, minLatency * 0.5);
+    const lowLatencyServers = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999 && (s.latency <= minLatency + threshold));
+    
+    if (lowLatencyServers.length === 0) {
+        // Fallback to the absolute fastest server
+        let fastest = activePool[0];
+        let bestLat = Infinity;
+        for (let i = 0; i < activePool.length; i++) {
+            const s = activePool[i];
+            if (s.online !== false && (s.latency || 9999) < bestLat) {
+                bestLat = s.latency || 9999;
+                fastest = s;
+            }
+        }
+        return fastest ? fastest.ip : activePool[0].ip;
+    }
+    
+    if (lowLatencyServers.length === 1) {
+        return lowLatencyServers[0].ip;
+    }
+    
+    // Filter precomputedAiPool to only include the low-latency servers
+    const lowLatencyIps = new Set(lowLatencyServers.map(s => s.ip));
+    const pool = precomputedAiPool.filter(item => lowLatencyIps.has(item.ip));
     
     if (pool.length === 0) {
-        return selectWeightedDNS(activePool);
-    }
-    if (pool.length === 1) {
-        return pool[0].ip;
+        // Fallback to equal distribution among low-latency servers (LLES)
+        const idx = Math.floor(Math.random() * lowLatencyServers.length);
+        return lowLatencyServers[idx].ip;
     }
     
     const totalWeight = pool.reduce((sum, item) => sum + item.weight, 0);
     if (totalWeight <= 0) {
-        return selectWeightedDNS(activePool);
+        // Fallback to equal distribution among low-latency servers (LLES)
+        const idx = Math.floor(Math.random() * lowLatencyServers.length);
+        return lowLatencyServers[idx].ip;
     }
     
     let rand = Math.random() * totalWeight;
