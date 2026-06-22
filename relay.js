@@ -27,6 +27,8 @@ let config = {};
 let logs = [];
 let precomputedAiPool = [];
 let precomputedAiTotalWeight = 0;
+const domainQueryWeights = new Map();
+let lastSeenClientIP = "115.79.0.1"; // Track client IP for background queries
 
 function rebuildAiRoutingCache() {
     const pool = config.upstreamPool || [];
@@ -73,7 +75,7 @@ function recordServerHealth(server, isSuccess) {
 }
 
 // Upstream UDP Client Sockets Pool
-const SOCKET_POOL_SIZE = 5;
+const SOCKET_POOL_SIZE = 15;
 const upstreamSocketPool = [];
 let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
@@ -203,7 +205,7 @@ function getWSUpdatePayload() {
 
 
 // Local DNS Cache with prefetching and Stale-While-Revalidate (SWR)
-function checkCache(domain, qtype, queryData = null) {
+function checkCache(domain, qtype, queryData = null, hasECS = false) {
     const key = `${domain.toLowerCase()}_${qtype}`;
     const cached = dnsCache.get(key);
     if (cached) {
@@ -220,7 +222,7 @@ function checkCache(domain, qtype, queryData = null) {
                     activeUpstreamQueries.set(prefetchKey, true);
                     console.log(`[Cache Prefetch] Triggering background prefetch for: ${domain} (remaining TTL: ${Math.round(remainingTTL)}s / ${Math.round(totalTTL)}s)`);
                     
-                    const targetDNS = selectUpstreamDNS(domain);
+                    const targetDNS = selectUpstreamDNS(domain, hasECS);
                     const prefetchQueryBuffer = queryData ? Buffer.from(queryData) : buildQueryBufferForMeasure(domain);
                     
                     fetchFromUpstreamDeduplicated(prefetchQueryBuffer, domain, qtype, targetDNS, (response) => {
@@ -230,7 +232,7 @@ function checkCache(domain, qtype, queryData = null) {
                             setCache(domain, qtype, response, newTtl);
                             console.log(`[Cache Prefetch] Asynchronously updated cache for: ${domain} (New TTL: ${newTtl}s)`);
                         }
-                    });
+                    }, hasECS);
                 }
             }
 
@@ -246,7 +248,7 @@ function checkCache(domain, qtype, queryData = null) {
                     activeUpstreamQueries.set(revalidateKey, true);
                     console.log(`[Cache SWR] Serving stale cache for: ${domain} (expired ${Math.round((now - cached.expiresAt) / 1000)}s ago). Triggering background revalidate...`);
                     
-                    const targetDNS = selectUpstreamDNS(domain);
+                    const targetDNS = selectUpstreamDNS(domain, hasECS);
                     const revalidateQueryBuffer = Buffer.from(queryData);
                     
                     fetchFromUpstreamDeduplicated(revalidateQueryBuffer, domain, qtype, targetDNS, (response) => {
@@ -256,11 +258,9 @@ function checkCache(domain, qtype, queryData = null) {
                             setCache(domain, qtype, response, newTtl);
                             console.log(`[Cache SWR] Background revalidated cache for: ${domain} (New TTL: ${newTtl}s)`);
                         }
-                    });
+                    }, hasECS);
                 }
                 return { responseBuffer: cached.responseBuffer, fromStale: true };
-            } else {
-                dnsCache.delete(key);
             }
         }
     }
@@ -478,6 +478,17 @@ function buildGslbResponse(queryBuffer, questionEndOffset, ips) {
     return Buffer.concat([header, question, ...answers]);
 }
 
+function buildServfailResponse(queryBuffer) {
+    if (!queryBuffer || queryBuffer.length < 12) return Buffer.alloc(0);
+    const response = Buffer.from(queryBuffer);
+    response.writeUInt16BE(0x8182, 2); // Set flags to SERVFAIL response
+    response.writeUInt16BE(0, 4); // QDCOUNT remains 1 (same as query)
+    response.writeUInt16BE(0, 6); // ANCOUNT = 0
+    response.writeUInt16BE(0, 8); // NSCOUNT = 0
+    response.writeUInt16BE(0, 10); // ARCOUNT = 0
+    return response;
+}
+
 function extractTTL(responseBuffer) {
     try {
         if (!responseBuffer || responseBuffer.length < 12) return 300;
@@ -554,9 +565,25 @@ function initUpstreamSocketPool() {
                     const oldOnline = server.online;
                     const oldLatency = server.latency || 0;
                     
+                    server.lastLatency = oldLatency;
                     server.latency = Math.round((server.latency || 0) * 0.7 + elapsed * 0.3);
                     server.online = true;
                     recordServerHealth(server, true);
+                    
+                    // Reset consecutive failures on success
+                    server.consecutiveFailures = 0;
+                    
+                    // Latency spike quarantine: if response takes > 2.5x of running average AND elapsed is > 100ms
+                    if (oldLatency > 0 && elapsed > oldLatency * 2.5 && elapsed > 100 && !server.quarantined) {
+                        server.quarantined = true;
+                        server.quarantineUntil = Date.now() + 30000; // Quarantine for 30 seconds
+                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for 30s due to latency spike (${elapsed}ms vs avg ${oldLatency}ms).`);
+                    } else if (server.quarantined && Date.now() > (server.quarantineUntil || 0)) {
+                        // Lift quarantine if we get a successful response and time expired
+                        server.quarantined = false;
+                        console.log(`[Upstream Autopilot] Lifted quarantine for ${server.name} (${server.ip}) on successful response.`);
+                    }
+
                     if (req.isClientQuery) {
                         server.queryCount = (server.queryCount || 0) + 1;
                     }
@@ -628,6 +655,14 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                 server.online = false;
                 recordServerHealth(server, false);
                 
+                // Autopilot quarantine: increment consecutive failures
+                server.consecutiveFailures = (server.consecutiveFailures || 0) + 1;
+                if (server.consecutiveFailures >= 3 && !server.quarantined) {
+                    server.quarantined = true;
+                    server.quarantineUntil = Date.now() + 60000; // Quarantine for 60 seconds
+                    console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for 60s due to 3 consecutive timeouts.`);
+                }
+                
                 if (oldOnline !== false) {
                     rebuildAiRoutingCache();
                     triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went OFFLINE (Timeout)`);
@@ -662,6 +697,14 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     server.online = false;
                     recordServerHealth(server, false);
                     
+                    // Autopilot quarantine: increment consecutive failures
+                    server.consecutiveFailures = (server.consecutiveFailures || 0) + 1;
+                    if (server.consecutiveFailures >= 3 && !server.quarantined) {
+                        server.quarantined = true;
+                        server.quarantineUntil = Date.now() + 60000; // Quarantine for 60 seconds
+                        console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for 60s due to consecutive send errors.`);
+                    }
+                    
                     if (oldOnline !== false) {
                         rebuildAiRoutingCache();
                         triggerAIBrainOnEvent(`Server ${server.name} (${server.ip}) went OFFLINE (Send error)`);
@@ -675,7 +718,23 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
     });
 }
 
-function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, callback) {
+function isHighPerformanceDomain(domain) {
+    if (!domain) return false;
+    const d = domain.toLowerCase();
+    return d.includes("speedtest") || 
+           d.includes("ookla") || 
+           d.includes("fast.com") || 
+           d.includes("cdn") ||
+           d.includes("vnexpress") ||
+           d.includes("zing") ||
+           d.includes("tiktok") ||
+           d.includes("netflix") ||
+           d.includes("facebook") ||
+           d.includes("youtube") ||
+           d.includes("google");
+}
+
+function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, callback, hasECS = false) {
     const key = `${domain.toLowerCase()}_${qtype}`;
     const originalIDBytes = Buffer.from([queryData[0], queryData[1]]);
     
@@ -687,7 +746,16 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     activeUpstreamQueries.set(key, [{ callback, originalIDBytes, isSecondary: false }]);
     
     const pool = config.upstreamPool || [];
-    const onlinePool = pool.filter(s => s.online !== false);
+    let onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
+    if (onlinePool.length === 0) onlinePool = pool.filter(s => s.online !== false);
+    if (onlinePool.length === 0) onlinePool = pool;
+    
+    if (hasECS) {
+        const ecsPool = onlinePool.filter(s => s.ecsSupported !== false);
+        if (ecsPool.length > 0) {
+            onlinePool = ecsPool;
+        }
+    }
     
     // CUSTOM PATH: All-Racing algorithm queries all online servers concurrently
     if (config.lbAlgorithm === "all-racing" && onlinePool.length > 1) {
@@ -743,6 +811,13 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         
         if (response) {
             resolved = true;
+            
+            // Check if secondary DNS won the race
+            if (secondUpstreamDNS && respondingIP === secondUpstreamDNS) {
+                config.stats.racingWins = (config.stats.racingWins || 0) + 1;
+                console.log(`[DNS Racing] Secondary DNS ${respondingIP} won the race against ${upstreamDNS}!`);
+            }
+
             const winningServer = config.upstreamPool.find(s => s.ip === respondingIP);
             if (winningServer) {
                 winningServer.queryCount = (winningServer.queryCount || 0) + 1;
@@ -771,9 +846,25 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     
     if (config.dnsRacingEnabled && secondUpstreamDNS) {
         queriesActive++;
-        const racingDelay = config.dnsRacingDelayMs || 15;
+        
+        // Calculate Adaptive Racing Delay based on jitter of primary server
+        const primaryServer = config.upstreamPool.find(s => s.ip === upstreamDNS);
+        let racingDelay = config.dnsRacingDelayMs || 15;
+        
+        if (isHighPerformanceDomain(domain)) {
+            racingDelay = 0; // Force immediate parallel query for speedtest/CDN domains!
+            console.log(`[DNS Racing] Ultra-low latency mode activated for: ${domain}. Racing delay set to 0ms.`);
+        } else if (primaryServer) {
+            const jitter = Math.abs((primaryServer.latency || 0) - (primaryServer.lastLatency || 0));
+            const primaryLatency = primaryServer.latency || 15;
+            // Adaptive delay: shrink delay if latency is unstable
+            const adaptiveDelay = Math.max(3, Math.round(primaryLatency - jitter * 1.5));
+            racingDelay = Math.min(config.dnsRacingDelayMs || 15, adaptiveDelay);
+        }
+        
         setTimeout(() => {
             if (!resolved) {
+                config.stats.racingTotal = (config.stats.racingTotal || 0) + 1;
                 queryUpstream(queryData, secondUpstreamDNS, (res) => onResponse(res, secondUpstreamDNS), false);
             } else {
                 queriesActive--;
@@ -866,24 +957,36 @@ function runAILoadBalancerBrain() {
     // Construct the pool status context for the prompt
     const poolStatusContext = pool.map(s => {
         const rate = typeof s.successRate === 'number' ? s.successRate + '%' : '100%';
-        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
+        const ecs = s.ecsSupported !== false ? 'CÓ' : 'KHÔNG';
+        const quarantine = s.quarantined ? 'ĐANG CÁCH LY' : 'HOẠT ĐỘNG';
+        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'} (${quarantine}), RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Hỗ trợ ECS = ${ecs}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
     }).join('\n');
     
+    const cacheTotal = (config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0);
+    const clientCacheHitRate = cacheTotal > 0 ? ((config.stats.cacheHits || 0) / cacheTotal * 100).toFixed(1) + '%' : '0%';
+    const clientAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount).toFixed(1) + 'ms' : '0ms';
+    const clientRacingWinRate = (config.stats.racingTotal || 0) > 0 ? ((config.stats.racingWins || 0) / config.stats.racingTotal * 100).toFixed(1) + '%' : '0%';
+    
+    const clientMetricsContext = `\nChỉ số hiệu năng phía Client thực tế:\n` +
+                                 `- Tỷ lệ Cache Hit của client: ${clientCacheHitRate}\n` +
+                                 `- Độ trễ client trung bình: ${clientAvgLatency}\n` +
+                                 `- Tỷ lệ server phụ thắng Đua DNS: ${clientRacingWinRate} (Tổng lượt đua: ${config.stats.racingTotal || 0})\n`;
+
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
                           "Instructions:\n" +
-                          "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
-                          "2. BE EXTREMELY AGGRESSIVE WITH LATENCY: Assign weights such that the fastest server with the lowest RTT receives almost ALL the traffic (80% to 100%). Do NOT spread weights to slower servers (> 40ms or 2x slower than the fastest server) just to have 'balance'. Slow servers must receive 0% weight. Spreading weights to slow servers directly ruins the average latency of the system. Only spread weights (e.g. 70/30) if the fastest server has packet loss / success rate < 98%.\n" +
+                          "1. Only assign weights to ONLINE and non-quarantined servers. Assign 0 weight to OFFLINE or QUARANTINED (ĐANG CÁCH LY) servers.\n" +
+                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters like dnsRacingDelayMs or minCacheTtlSeconds. Slower or non-ECS servers must receive 0% weight.\n" +
                           "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
-                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) to keep queries cached in memory and bypass network latency entirely if the DNS servers are stable and fast, or decrease it (e.g., 300-600s) only if server RTTs are highly unstable or packet loss occurs.\n" +
+                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher. Look at the client's DNS Racing win rate: if the win rate is high (> 30%), the primary server is struggling, so keep racing enabled and suggest a tight delay (8-12ms).\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) if the cache hit rate is low and server RTTs are stable, or decrease it only if server latency is fluctuating or packet loss occurs.\n" +
                           "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
-                          "    \"1.1.1.1\": 90,\n" +
-                          "    \"8.8.8.8\": 10,\n" +
-                          "    \"9.9.9.9\": 0,\n" +
+                          "    \"8.8.8.8\": 50,\n" +
+                          "    \"9.9.9.9\": 50,\n" +
+                          "    \"1.1.1.1\": 0,\n" +
                           "    \"208.67.222.222\": 0\n" +
                           "  },\n" +
                           "  \"dnsRacingEnabled\": true,\n" +
@@ -892,7 +995,7 @@ function runAILoadBalancerBrain() {
                           "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
-    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
+    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
     
     const postData = JSON.stringify({
         model: "llama-3.1-8b-instant",
@@ -1020,33 +1123,38 @@ function runAILoadBalancerBrain() {
 }
 
 function selectAIWeightedDNS(activePool) {
-    if (precomputedAiPool.length === 0) {
+    const allowedIps = new Set(activePool.map(s => s.ip));
+    const pool = precomputedAiPool.filter(item => allowedIps.has(item.ip));
+    
+    if (pool.length === 0) {
         return selectWeightedDNS(activePool);
     }
-    if (precomputedAiPool.length === 1) {
-        return precomputedAiPool[0].ip;
+    if (pool.length === 1) {
+        return pool[0].ip;
     }
-    if (precomputedAiTotalWeight <= 0) {
+    
+    const totalWeight = pool.reduce((sum, item) => sum + item.weight, 0);
+    if (totalWeight <= 0) {
         return selectWeightedDNS(activePool);
     }
     
-    let rand = Math.random() * precomputedAiTotalWeight;
-    for (let i = 0; i < precomputedAiPool.length; i++) {
-        const item = precomputedAiPool[i];
+    let rand = Math.random() * totalWeight;
+    for (let i = 0; i < pool.length; i++) {
+        const item = pool[i];
         rand -= item.weight;
         if (rand <= 0) {
             return item.ip;
         }
     }
-    return precomputedAiPool[0].ip;
+    return pool[0].ip;
 }
 
-// Probability-weighted selector (Inverse Latency Cubed + Aggressive Penalty Filter)
+// Low-Latency Equal Share (LLES) Load Balancer DNS Selector
 function selectWeightedDNS(activePool) {
     if (activePool.length === 0) return "1.1.1.1";
     if (activePool.length === 1) return activePool[0].ip;
     
-    // Find the minimum latency among online servers
+    // Find the minimum latency among online, non-quarantined servers
     let minLatency = Infinity;
     for (let i = 0; i < activePool.length; i++) {
         const s = activePool[i];
@@ -1058,36 +1166,13 @@ function selectWeightedDNS(activePool) {
     // Fallback if no latency measured yet
     if (minLatency === Infinity) minLatency = 20;
     
-    let totalWeight = 0;
-    const weights = [];
+    // Identify low-latency servers: latency <= minLatency + threshold
+    // Threshold is 50% of minLatency, but at least 15ms absolute
+    const threshold = Math.max(15, minLatency * 0.5);
+    const lowLatencyServers = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999 && (s.latency <= minLatency + threshold));
     
-    for (let i = 0; i < activePool.length; i++) {
-        const s = activePool[i];
-        if (s.online !== false && (s.latency || 0) < 9999) {
-            const lat = Math.max(s.latency || 5, 2);
-            
-            // Aggressive latency penalty:
-            // - If RTT > 1.5x minLatency, smoothly scale down weight
-            // - If RTT > 2.0x minLatency, drop weight to 0
-            let weightFactor = 1.0;
-            const ratio = lat / minLatency;
-            if (ratio > 2.0) {
-                weightFactor = 0.0;
-            } else if (ratio > 1.5) {
-                weightFactor = (2.0 - ratio) * 2; // Linear slide from 1 to 0
-            }
-            
-            // Cubed inverse latency for extremely steep selection towards the fastest server
-            const rawWeight = Math.round(1000000 / (lat * lat * lat));
-            const finalWeight = Math.round(rawWeight * weightFactor);
-            
-            weights.push({ ip: s.ip, weight: finalWeight });
-            totalWeight += finalWeight;
-        }
-    }
-    
-    if (totalWeight <= 0) {
-        // Fallback to the absolute fastest server if all weights got zeroed out
+    if (lowLatencyServers.length === 0) {
+        // Fallback to the absolute fastest server if the filter results in empty pool
         let fastest = activePool[0];
         let bestLat = Infinity;
         for (let i = 0; i < activePool.length; i++) {
@@ -1100,24 +1185,45 @@ function selectWeightedDNS(activePool) {
         return fastest ? fastest.ip : activePool[0].ip;
     }
     
-    let rand = Math.random() * totalWeight;
-    for (let i = 0; i < weights.length; i++) {
-        const item = weights[i];
-        rand -= item.weight;
-        if (rand <= 0) {
-            return item.ip;
-        }
-    }
-    return weights[0].ip;
+    // Divide traffic evenly among low-latency servers
+    const idx = Math.floor(Math.random() * lowLatencyServers.length);
+    return lowLatencyServers[idx].ip;
 }
 
 // Load Balancer DNS Selector
-function selectUpstreamDNS(domain) {
+function selectUpstreamDNS(domain, hasECS = false) {
     const pool = config.upstreamPool || [];
     if (pool.length === 0) return "1.1.1.1";
     
-    const onlinePool = pool.filter(s => s.online !== false);
-    const activePool = onlinePool.length > 0 ? onlinePool : pool;
+    const now = Date.now();
+    
+    // Clear expired quarantines
+    pool.forEach(s => {
+        if (s.quarantined && now > (s.quarantineUntil || 0)) {
+            s.quarantined = false;
+            s.consecutiveFailures = 0;
+            console.log(`[Upstream Autopilot] Quarantine expired. Server ${s.name} (${s.ip}) returned to active pool.`);
+        }
+    });
+    
+    // Filter out quarantined servers unless they are all quarantined
+    let onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
+    if (onlinePool.length === 0) {
+        onlinePool = pool.filter(s => s.online !== false);
+    }
+    if (onlinePool.length === 0) {
+        onlinePool = pool;
+    }
+    
+    let activePool = onlinePool;
+    
+    // ECS-aware filtering: if hasECS is true, prefer servers that support ECS
+    if (hasECS) {
+        const ecsPool = activePool.filter(s => s.ecsSupported !== false);
+        if (ecsPool.length > 0) {
+            activePool = ecsPool;
+        }
+    }
     
     const algo = config.lbAlgorithm || "least-latency";
     
@@ -1132,11 +1238,11 @@ function selectUpstreamDNS(domain) {
         if (selectUpstreamDNS.wrrIndex === undefined) selectUpstreamDNS.wrrIndex = 0;
         
         let wrrList = [];
-        const pool = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
-        if (pool.length === 0) return activePool[0].ip;
+        const activeFilter = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
+        if (activeFilter.length === 0) return activePool[0].ip;
         
-        const minLat = Math.min(...pool.map(s => Math.max(s.latency || 5, 2)));
-        pool.forEach(s => {
+        const minLat = Math.min(...activeFilter.map(s => Math.max(s.latency || 5, 2)));
+        activeFilter.forEach(s => {
             const lat = Math.max(s.latency || 5, 2);
             const weight = Math.max(1, Math.round((minLat / lat) * 10));
             for (let i = 0; i < weight; i++) {
@@ -1204,10 +1310,16 @@ function logQuery(domain, category, clientIP, targetIP, source = "upstream") {
 // DNS Configuration & Cache Load/Save
 function loadConfig() {
     const defaultPool = [
-        { ip: "1.1.1.1", name: "Cloudflare", latency: 0, online: true },
-        { ip: "8.8.8.8", name: "Google", latency: 0, online: true },
-        { ip: "9.9.9.9", name: "Quad9", latency: 0, online: true },
-        { ip: "208.67.222.222", name: "OpenDNS", latency: 0, online: true }
+        { ip: "1.1.1.1", name: "Cloudflare Primary", latency: 0, online: true, ecsSupported: false },
+        { ip: "1.0.0.1", name: "Cloudflare Secondary", latency: 0, online: true, ecsSupported: false },
+        { ip: "8.8.8.8", name: "Google Primary", latency: 0, online: true, ecsSupported: true },
+        { ip: "8.8.4.4", name: "Google Secondary", latency: 0, online: true, ecsSupported: true },
+        { ip: "9.9.9.9", name: "Quad9 Primary", latency: 0, online: true, ecsSupported: true },
+        { ip: "149.112.112.112", name: "Quad9 Secondary", latency: 0, online: true, ecsSupported: true },
+        { ip: "208.67.222.222", name: "OpenDNS Primary", latency: 0, online: true, ecsSupported: true },
+        { ip: "208.67.220.220", name: "OpenDNS Secondary", latency: 0, online: true, ecsSupported: true },
+        { ip: "94.140.14.14", name: "AdGuard DNS Primary", latency: 0, online: true, ecsSupported: true },
+        { ip: "94.140.15.15", name: "AdGuard DNS Secondary", latency: 0, online: true, ecsSupported: true }
     ];
 
     try {
@@ -1219,7 +1331,7 @@ function loadConfig() {
                 upstreamPool: defaultPool,
                 lbAlgorithm: "least-latency",
                 gslbRecords: {},
-                stats: { total: 0, cacheHits: 0, cacheMisses: 0 },
+                stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
                 aiEnabled: false,
                 groqApiKeys: [],
                 groqModel: "llama-3.1-8b-instant",
@@ -1235,7 +1347,7 @@ function loadConfig() {
             upstreamPool: defaultPool,
             lbAlgorithm: "least-latency",
             gslbRecords: {},
-            stats: { total: 0, cacheHits: 0, cacheMisses: 0 },
+            stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
             aiEnabled: false,
             groqApiKeys: [],
             groqModel: "llama-3.1-8b-instant",
@@ -1249,13 +1361,25 @@ function loadConfig() {
     config.stats.total = config.stats.total || 0;
     config.stats.cacheHits = config.stats.cacheHits || 0;
     config.stats.cacheMisses = config.stats.cacheMisses || 0;
+    config.stats.racingWins = config.stats.racingWins || 0;
+    config.stats.racingTotal = config.stats.racingTotal || 0;
     config.aiEnabled = config.aiEnabled || false;
     config.groqModel = "llama-3.1-8b-instant";
-    config.upstreamPool = config.upstreamPool || defaultPool;
+    config.upstreamPool = config.upstreamPool || [];
+    // Ensure all defaultPool servers are present in the pool
+    defaultPool.forEach(defaultServer => {
+        if (!config.upstreamPool.some(s => s.ip === defaultServer.ip)) {
+            config.upstreamPool.push(defaultServer);
+        }
+    });
     config.upstreamPool.forEach(server => {
         server.queryCount = server.queryCount || 0;
         server.history = [];
         server.successRate = 100;
+        if (server.ecsSupported === undefined) {
+            const noEcsIps = ["1.1.1.1", "1.0.0.1"];
+            server.ecsSupported = !noEcsIps.includes(server.ip);
+        }
     });
     config.lbAlgorithm = config.lbAlgorithm || "least-latency";
     config.gslbRecords = config.gslbRecords || {};
@@ -1328,20 +1452,59 @@ loadConfig();
 setInterval(measureUpstreamPool, 30000);
 setTimeout(measureUpstreamPool, 3000); // Check shortly after start
 setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
+setInterval(runPopularKeepAlive, 60000); // Always-Hot Cache prefetch and decay
 
 setTimeout(runAILoadBalancerBrain, 5000);
 
 function runCacheGC() {
     const now = Date.now();
     let deletedCount = 0;
+    const maxStaleLimitMs = 24 * 3600 * 1000; // Keep expired records for 24 hours for RFC 8767 fallback
     for (const [key, value] of dnsCache.entries()) {
-        if (now >= value.expiresAt) {
+        if (now >= value.expiresAt + maxStaleLimitMs) {
             dnsCache.delete(key);
             deletedCount++;
         }
     }
     if (deletedCount > 0) {
-        console.log(`[Cache GC] Cleared ${deletedCount} expired cache entries. Current cache size: ${dnsCache.size}`);
+        console.log(`[Cache GC] Cleared ${deletedCount} extremely stale cache entries. Current cache size: ${dnsCache.size}`);
+    }
+}
+
+function runPopularKeepAlive() {
+    const minPopularThreshold = 5;
+    for (const [domain, count] of domainQueryWeights.entries()) {
+        if (count >= minPopularThreshold) {
+            [1, 28].forEach(qtype => {
+                const key = `${domain}_${qtype}`;
+                const cached = dnsCache.get(key);
+                if (cached) {
+                    const now = Date.now();
+                    const remainingTTL = (cached.expiresAt - now) / 1000;
+                    const totalTTL = (cached.expiresAt - cached.createdAt) / 1000;
+                    if (remainingTTL < (totalTTL * 0.3)) {
+                        console.log(`[Always-Hot Cache] Refreshing popular domain cache: ${domain} (Qtype: ${qtype}, Queries: ${count})`);
+                        // Pass true for hasECS because client queries benefit from local geo-routing
+                        const targetDNS = selectUpstreamDNS(domain, true);
+                        // Inject ECS using lastSeenClientIP to prevent US IP caching
+                        const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
+                        fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                            if (response) {
+                                const newTtl = extractTTL(response);
+                                setCache(domain, qtype, response, newTtl);
+                            }
+                        }, true);
+                    }
+                }
+            });
+        }
+        
+        // Decay query count (half-life)
+        if (count <= 1) {
+            domainQueryWeights.delete(domain);
+        } else {
+            domainQueryWeights.set(domain, Math.floor(count * 0.5));
+        }
     }
 }
 
@@ -1363,8 +1526,10 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
     
     // Inject EDNS Client Subnet (ECS) to preserve local GeoDNS routing for the client
     let queryWithEcs = queryData;
-    if (clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1") {
+    const hasECS = !!(clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1");
+    if (hasECS) {
         queryWithEcs = addECS(queryData, clientIP);
+        lastSeenClientIP = clientIP; // Update last seen client IP for background queries
     }
     
     const parsed = parseDNSQuery(queryWithEcs);
@@ -1394,7 +1559,7 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         }
     }
     
-    const targetDNS = selectUpstreamDNS(domain);
+    const targetDNS = selectUpstreamDNS(domain, hasECS);
     
     const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "", sourceOverride = "") => {
         const latency = Date.now() - startTime;
@@ -1439,8 +1604,11 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         }
     }
     
+    // Increment query popularity weight
+    domainQueryWeights.set(originalDomain, (domainQueryWeights.get(originalDomain) || 0) + 1);
+
     // 1. Check local cache
-    const cachedResponseObj = checkCache(originalDomain, qtype, queryWithEcs);
+    const cachedResponseObj = checkCache(originalDomain, qtype, queryWithEcs, hasECS);
     if (cachedResponseObj) {
         config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
         const clientResponse = Buffer.from(cachedResponseObj.responseBuffer);
@@ -1456,17 +1624,44 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
                     completeQuery(response, true, false, "", "cache");
                 } else {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
-                    const ttl = extractTTL(response);
+                    
+                    // Parse response flags for negative caching (rcode === 2 (SERVFAIL) or rcode === 5 (REFUSED))
+                    const flags = response.length >= 4 ? response.readUInt16BE(2) : 0;
+                    const rcode = flags & 0x000f;
+                    let ttl = extractTTL(response);
+                    if (rcode === 2 || rcode === 5) {
+                        ttl = 10; // Negative cache temporary failures for 10 seconds
+                    }
+                    
                     setCache(originalDomain, qtype, response, ttl);
                     completeQuery(response, false, false);
                 }
             } else {
                 if (!isSecondary) {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
+                    
+                    // RFC 8767 Last-Resort Stale Cache Fallback:
+                    // Look for ANY cache entry for this domain and qtype, even if expired.
+                    const key = `${originalDomain.toLowerCase()}_${qtype}`;
+                    const cached = dnsCache.get(key);
+                    if (cached) {
+                        const clientResponse = Buffer.from(cached.responseBuffer);
+                        clientResponse[0] = queryWithEcs[0];
+                        clientResponse[1] = queryWithEcs[1];
+                        console.warn(`[Cache RFC8767] All upstreams failed/timed out for ${originalDomain}. Serving expired stale cache as last-resort fallback.`);
+                        completeQuery(clientResponse, true, false, "", "stale");
+                        return;
+                    }
+                    
+                    // Negative caching for timeouts: cache a synthetic SERVFAIL response for 10s
+                    const servfailRes = buildServfailResponse(queryWithEcs);
+                    if (servfailRes.length > 0) {
+                        setCache(originalDomain, qtype, servfailRes, 10);
+                    }
                 }
                 completeQuery(Buffer.alloc(0), false, false);
             }
-        });
+        }, hasECS);
     }
 }
 
@@ -1609,7 +1804,10 @@ app.post('/dns/upstream/pool/add', (req, res) => {
         return res.status(400).send("IP already exists in pool");
     }
     
-    config.upstreamPool.push({ ip, name, latency: 0, online: true });
+    const noEcsIps = ["1.1.1.1", "1.0.0.1"];
+    const ecsSupported = !noEcsIps.includes(ip);
+    
+    config.upstreamPool.push({ ip, name, latency: 0, online: true, ecsSupported });
     saveConfig();
     rebuildAiRoutingCache();
     measureUpstreamLatency(ip);
@@ -1758,24 +1956,36 @@ app.get('/dns/groq/test', (req, res) => {
     
     const poolStatusContext = pool.map(s => {
         const rate = typeof s.successRate === 'number' ? s.successRate + '%' : '100%';
-        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'}, Độ trễ RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
+        const ecs = s.ecsSupported !== false ? 'CÓ' : 'KHÔNG';
+        const quarantine = s.quarantined ? 'ĐANG CÁCH LY' : 'HOẠT ĐỘNG';
+        return `- ${s.name} (${s.ip}): Trạng thái = ${s.online !== false ? 'ONLINE' : 'OFFLINE'} (${quarantine}), RTT = ${s.online !== false ? (s.latency || 0) + 'ms' : 'N/A'}, Hỗ trợ ECS = ${ecs}, Tỷ lệ thành công = ${rate}, Tổng lượt truy vấn = ${s.queryCount || 0}`;
     }).join('\n');
     
+    const cacheTotal = (config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0);
+    const clientCacheHitRate = cacheTotal > 0 ? ((config.stats.cacheHits || 0) / cacheTotal * 100).toFixed(1) + '%' : '0%';
+    const clientAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount).toFixed(1) + 'ms' : '0ms';
+    const clientRacingWinRate = (config.stats.racingTotal || 0) > 0 ? ((config.stats.racingWins || 0) / config.stats.racingTotal * 100).toFixed(1) + '%' : '0%';
+    
+    const clientMetricsContext = `\nChỉ số hiệu năng phía Client thực tế:\n` +
+                                 `- Tỷ lệ Cache Hit của client: ${clientCacheHitRate}\n` +
+                                 `- Độ trễ client trung bình: ${clientAvgLatency}\n` +
+                                 `- Tỷ lệ server phụ thắng Đua DNS: ${clientRacingWinRate} (Tổng lượt đua: ${config.stats.racingTotal || 0})\n`;
+
     const systemContent = "You are a DNS Traffic Load Balancer & AI Routing expert.\n" +
-                          "Your task is to analyze the performance (RTT latency, online status, success rate, and query counts) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
+                          "Your task is to analyze the performance (RTT latency, online status, success rate, quarantine status, and ECS support) of the upstream DNS servers and distribute traffic weights among the ONLINE servers, dynamically optimize the DNS Racing configuration, and suggest the optimal minimum cache TTL.\n\n" +
                           "Instructions:\n" +
-                          "1. Only assign weights to ONLINE servers. Assign 0 weight to OFFLINE servers.\n" +
-                          "2. BE EXTREMELY AGGRESSIVE WITH LATENCY: Assign weights such that the fastest server with the lowest RTT receives almost ALL the traffic (80% to 100%). Do NOT spread weights to slower servers (> 40ms or 2x slower than the fastest server) just to have 'balance'. Slow servers must receive 0% weight. Spreading weights to slow servers directly ruins the average latency of the system. Only spread weights (e.g. 70/30) if the fastest server has packet loss / success rate < 98%.\n" +
+                          "1. Only assign weights to ONLINE and non-quarantined servers. Assign 0 weight to OFFLINE or QUARANTINED (ĐANG CÁCH LY) servers.\n" +
+                          "2. MONITOR QUERY COUNTS & DISTRIBUTE LOAD EVENLY: Monitor the total query count and the queries distributed to each server. You MUST assign weights such that traffic is distributed evenly (equal weights) among the group of lowest-latency servers (having ecsSupported = true). For example, if Google (8.8.8.8) and Quad9 (9.9.9.9) both have stable low latency, assign them equal weights (e.g. 50% each) to split the load. If a server receives too many queries or its latency spikes, reduce its weight slightly to balance the load, or adjust other parameters like dnsRacingDelayMs or minCacheTtlSeconds. Slower or non-ECS servers must receive 0% weight.\n" +
                           "3. Decide whether DNS Racing (querying the second fastest server if the first is slow) should be enabled (\"dnsRacingEnabled\": true/false). Enable it if the primary DNS is unstable or has success rate < 95%, or if RTTs are fluctuating. Disable it to save resources only if all active servers are 100% stable and fast.\n" +
-                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher.\n" +
-                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) to keep queries cached in memory and bypass network latency entirely if the DNS servers are stable and fast, or decrease it (e.g., 300-600s) only if server RTTs are highly unstable or packet loss occurs.\n" +
+                          "4. Suggest the optimal DNS Racing delay in ms (\"dnsRacingDelayMs\": integer, between 5 and 50). Set it lower (e.g., 8-15ms) if the primary server is fast but needs a tight safety net, or higher (e.g., 20-35ms) if RTTs are naturally higher. Look at the client's DNS Racing win rate: if the win rate is high (> 30%), the primary server is struggling, so keep racing enabled and suggest a tight delay (8-12ms).\n" +
+                          "5. Suggest the optimal minimum cache TTL in seconds (\"minCacheTtlSeconds\": integer, between 300 and 43200). Increase it aggressively (e.g., 1800-43200s, up to 12 hours) if the cache hit rate is low and server RTTs are stable, or decrease it only if server latency is fluctuating or packet loss occurs.\n" +
                           "6. Keep the output clean and return a strict JSON response containing \"weights\", \"dnsRacingEnabled\", \"dnsRacingDelayMs\", \"minCacheTtlSeconds\", and \"reason\" (Vietnamese explanation, 10-15 words).\n\n" +
                           "JSON response format:\n" +
                           "{\n" +
                           "  \"weights\": {\n" +
-                          "    \"1.1.1.1\": 90,\n" +
-                          "    \"8.8.8.8\": 10,\n" +
-                          "    \"9.9.9.9\": 0,\n" +
+                          "    \"8.8.8.8\": 50,\n" +
+                          "    \"9.9.9.9\": 50,\n" +
+                          "    \"1.1.1.1\": 0,\n" +
                           "    \"208.67.222.222\": 0\n" +
                           "  },\n" +
                           "  \"dnsRacingEnabled\": true,\n" +
@@ -1784,7 +1994,7 @@ app.get('/dns/groq/test', (req, res) => {
                           "  \"reason\": \"Giải thích lý do điều phối tải và tối ưu DNS bằng tiếng Việt\"\n" +
                           "}";
                           
-    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
+    const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
     
     const postData = JSON.stringify({
         model: "llama-3.1-8b-instant",
@@ -1888,6 +2098,31 @@ app.post('/dns/stats/reset', (req, res) => {
     saveConfig();
     broadcastUpdate();
     res.send("Stats reset");
+});
+
+app.post('/dns/cache/inject', (req, res) => {
+    const domain = req.query.domain;
+    const expiresOffsetMs = parseInt(req.query.expiresOffsetMs, 10) || 0;
+    
+    if (!domain) {
+        return res.status(400).send("Missing domain parameter");
+    }
+    
+    // Build a dummy DNS A record query buffer and then the response
+    const queryBuffer = buildQueryBufferForMeasure(domain);
+    const parsed = parseDNSQuery(queryBuffer);
+    const dummyIps = ["1.2.3.4"];
+    const responseBuffer = buildGslbResponse(queryBuffer, parsed.questionEndOffset, dummyIps);
+    
+    const key = `${domain.toLowerCase()}_1`; // Qtype 1 (A)
+    
+    dnsCache.set(key, {
+        responseBuffer: responseBuffer,
+        createdAt: Date.now(),
+        expiresAt: Date.now() + expiresOffsetMs
+    });
+    
+    res.send(`Injected cache entry for ${domain} with expiresOffsetMs ${expiresOffsetMs}`);
 });
 
 app.post('/dns/toggle', (req, res) => {
