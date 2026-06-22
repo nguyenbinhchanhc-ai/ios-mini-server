@@ -50,7 +50,7 @@ const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Ar
 // AI Load Balancer Brain State
 let aiLoadBalancerTimeout = null;
 let isAILBRunning = false;
-const AI_LB_INTERVAL_MS = 300000; // Run every 5 minutes
+const AI_LB_INTERVAL_MS = 900000; // Run every 15 minutes
 let groqKeyIndex = 0;
 const keyCooldowns = new Map(); // key -> timestamp of cooldown expiration
 
@@ -892,8 +892,7 @@ function runAILoadBalancerBrain() {
     if (!config.aiEnabled || !config.groqApiKeys || config.groqApiKeys.length === 0) {
         isAILBRunning = false;
         broadcastUpdate();
-        // Check again in 10s if it gets enabled
-        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 10000);
+        // Do NOT schedule a retry. We will be triggered when config/keys are updated.
         return;
     }
     
@@ -903,10 +902,22 @@ function runAILoadBalancerBrain() {
     
     const apiKey = getNextGroqKey();
     if (!apiKey) {
-        console.warn("[AI LB Brain] No API keys available (all cooling down or none set). Retrying in 15s.");
+        let nextAvailableTime = Date.now() + AI_LB_INTERVAL_MS;
+        for (const [key, cooldownUntil] of keyCooldowns.entries()) {
+            if (config.groqApiKeys.includes(key)) {
+                if (cooldownUntil < nextAvailableTime) {
+                    nextAvailableTime = cooldownUntil;
+                }
+            }
+        }
+        const delay = Math.max(15000, nextAvailableTime - Date.now());
+        console.warn(`[AI LB Brain] No API keys available. Retrying in ${Math.round(delay/1000)}s.`);
+        
         isAILBRunning = false;
+        config.aiLBReason = `Tất cả API Keys đang tạm khóa. Sẽ tự động thử lại sau ${Math.round(delay/1000)} giây.`;
         broadcastUpdate();
-        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
+        
+        aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, delay);
         return;
     }
     
