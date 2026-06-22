@@ -975,7 +975,7 @@ function runAILoadBalancerBrain() {
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
     
     const postData = JSON.stringify({
-        model: "llama-3.1-8b-instant",
+        model: config.groqModel || "llama-3.1-8b-instant",
         messages: [
             { role: "system", content: systemContent },
             { role: "user", content: userContent }
@@ -1002,15 +1002,20 @@ function runAILoadBalancerBrain() {
             res.on('end', () => {
                 try {
                     if (res.statusCode !== 200) {
+                        let errMsg = `Lỗi Groq API: Status ${res.statusCode}`;
                         if (res.statusCode === 429) {
+                            errMsg = "Lỗi Groq API: Rate limited (429) - Hết hạn mức request.";
                             console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429). Cooling down for 10m.`);
                             keyCooldowns.set(apiKey, Date.now() + 600000);
                         } else if (res.statusCode === 401 || res.statusCode === 403) {
+                            errMsg = `Lỗi Groq API: Key không hợp lệ (${res.statusCode}) - Khóa API không hợp lệ.`;
                             console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized/invalid (${res.statusCode}). Cooling down for 24h.`);
                             keyCooldowns.set(apiKey, Date.now() + 24 * 3600 * 1000);
                         } else {
                             console.warn(`[AI LB Brain] Groq API returned status code ${res.statusCode}`);
                         }
+                        config.aiLBReason = errMsg;
+                        saveConfig();
                         isAILBRunning = false;
                         broadcastUpdate();
                         // Retry shortly with next key
@@ -1087,6 +1092,8 @@ function runAILoadBalancerBrain() {
                     aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, AI_LB_INTERVAL_MS);
                 } catch (e) {
                     console.error("[AI LB Brain] Error parsing response body:", e);
+                    config.aiLBReason = `Lỗi phân tích cú pháp: ${e.message}`;
+                    saveConfig();
                     isAILBRunning = false;
                     broadcastUpdate();
                     aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
@@ -1096,6 +1103,8 @@ function runAILoadBalancerBrain() {
         
         req.on('error', (err) => {
             console.error("[AI LB Brain] HTTP request error:", err);
+            config.aiLBReason = `Lỗi kết nối Groq: ${err.message}`;
+            saveConfig();
             isAILBRunning = false;
             broadcastUpdate();
             aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
@@ -1105,6 +1114,8 @@ function runAILoadBalancerBrain() {
         req.end();
     } catch (e) {
         console.error("[AI LB Brain] Execution error:", e);
+        config.aiLBReason = `Lỗi thực thi: ${e.message}`;
+        saveConfig();
         isAILBRunning = false;
         broadcastUpdate();
         aiLoadBalancerTimeout = setTimeout(runAILoadBalancerBrain, 15000);
@@ -1929,6 +1940,7 @@ app.post('/dns/groq', (req, res) => {
     
     if (enabled) {
         config.lbAlgorithm = "ai-routing";
+        keyCooldowns.clear();
     } else {
         if (config.lbAlgorithm === "ai-routing") {
             config.lbAlgorithm = "least-latency";
@@ -1968,6 +1980,7 @@ app.post('/dns/groq/keys/update', (req, res) => {
         const keys = JSON.parse(req.rawBody.toString('utf8'));
         if (Array.isArray(keys)) {
             config.groqApiKeys = keys.map(k => k.trim()).filter(k => k.length > 0);
+            keyCooldowns.clear();
             saveConfig();
             broadcastUpdate();
             if (config.aiEnabled) setTimeout(runAILoadBalancerBrain, 2000);
@@ -2041,7 +2054,7 @@ app.get('/dns/groq/test', (req, res) => {
     const userContent = `Dưới đây là thông tin trạng thái hiện tại của Upstream DNS Pool:\n\n${poolStatusContext}\n${clientMetricsContext}\nHãy trả về trọng số tối ưu nhất cho từng IP máy chủ dưới dạng JSON.`;
     
     const postData = JSON.stringify({
-        model: "llama-3.1-8b-instant",
+        model: config.groqModel || "llama-3.1-8b-instant",
         messages: [
             { role: "system", content: systemContent },
             { role: "user", content: userContent }
@@ -2068,16 +2081,21 @@ app.get('/dns/groq/test', (req, res) => {
             groqRes.on('end', () => {
                 try {
                     if (groqRes.statusCode !== 200) {
+                        let errMsg = `Lỗi Groq API: Status ${groqRes.statusCode}`;
                         if (groqRes.statusCode === 429) {
+                            errMsg = "Lỗi Groq API: Rate limited (429) - Hết hạn mức request.";
                             console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... rate limited (429) on test. Cooling down for 10m.`);
                             keyCooldowns.set(apiKey, Date.now() + 600000);
                         } else if (groqRes.statusCode === 401 || groqRes.statusCode === 403) {
+                            errMsg = `Lỗi Groq API: Key không hợp lệ (${groqRes.statusCode}) - Khóa API không hợp lệ.`;
                             console.warn(`[AI LB Brain] Key ${apiKey.substring(0, 8)}... unauthorized/invalid (${groqRes.statusCode}) on test. Cooling down for 24h.`);
                             keyCooldowns.set(apiKey, Date.now() + 24 * 3600 * 1000);
                         }
+                        config.aiLBReason = errMsg;
+                        saveConfig();
                         isAILBRunning = false;
                         broadcastUpdate();
-                        return res.status(500).json({ error: `Groq API error status: ${groqRes.statusCode}` });
+                        return res.status(500).json({ error: errMsg });
                     }
                     const resData = JSON.parse(Buffer.concat(body).toString('utf8'));
                     const replyStr = resData.choices?.[0]?.message?.content;
@@ -2124,7 +2142,7 @@ app.get('/dns/groq/test', (req, res) => {
                         rebuildAiRoutingCache();
                         broadcastUpdate();
                         
-                        decision.modelUsed = "llama-3.1-8b-instant";
+                        decision.modelUsed = config.groqModel || "llama-3.1-8b-instant";
                         return res.json(decision);
                     } else {
                         isAILBRunning = false;
@@ -2132,6 +2150,8 @@ app.get('/dns/groq/test', (req, res) => {
                         return res.status(500).json({ error: "Không nhận được phản hồi từ Groq." });
                     }
                 } catch(e) {
+                    config.aiLBReason = `Lỗi test Groq: ${e.message}`;
+                    saveConfig();
                     isAILBRunning = false;
                     broadcastUpdate();
                     return res.status(500).json({ error: e.message });
@@ -2139,6 +2159,8 @@ app.get('/dns/groq/test', (req, res) => {
             });
         });
         groqReq.on('error', (err) => {
+            config.aiLBReason = `Lỗi kết nối test Groq: ${err.message}`;
+            saveConfig();
             isAILBRunning = false;
             broadcastUpdate();
             res.status(500).json({ error: err.message });
@@ -2146,6 +2168,8 @@ app.get('/dns/groq/test', (req, res) => {
         groqReq.write(postData);
         groqReq.end();
     } catch(e) {
+        config.aiLBReason = `Lỗi thực thi test Groq: ${e.message}`;
+        saveConfig();
         isAILBRunning = false;
         broadcastUpdate();
         return res.status(500).json({ error: e.message });
@@ -2158,6 +2182,7 @@ app.post('/dns/stats/reset', (req, res) => {
     config.stats = { total: 0, cacheHits: 0, cacheMisses: 0 };
     totalLatency = 0;
     latencyCount = 0;
+    keyCooldowns.clear();
     saveConfig();
     broadcastUpdate();
     res.send("Stats reset");
