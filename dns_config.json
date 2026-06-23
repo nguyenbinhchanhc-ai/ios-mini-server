@@ -29,109 +29,151 @@
   "stats": {
     "total": 0,
     "cacheHits": 0,
-    "cacheMisses": 0
+    "cacheMisses": 0,
+    "racingWins": 0,
+    "racingTotal": 0
   },
   "aiEnabled": false,
   "upstreamPool": [
     {
       "ip": "1.1.1.1",
       "name": "Cloudflare",
-      "latency": 30,
+      "latency": 29,
       "online": true,
       "queryCount": 0,
-      "history": [],
+      "history": [
+        true
+      ],
       "successRate": 100,
-      "ecsSupported": false
+      "ecsSupported": false,
+      "lastLatency": 30,
+      "consecutiveFailures": 0
     },
     {
       "ip": "8.8.8.8",
       "name": "Google",
-      "latency": 62,
+      "latency": 45,
       "online": true,
       "queryCount": 0,
-      "history": [],
+      "history": [
+        true
+      ],
       "successRate": 100,
-      "ecsSupported": true
+      "ecsSupported": true,
+      "lastLatency": 52,
+      "consecutiveFailures": 0
     },
     {
       "ip": "9.9.9.9",
       "name": "Quad9",
-      "latency": 57,
+      "latency": 50,
       "online": true,
       "queryCount": 0,
-      "history": [],
+      "history": [
+        true
+      ],
       "successRate": 100,
-      "ecsSupported": true
+      "ecsSupported": true,
+      "lastLatency": 49,
+      "consecutiveFailures": 0
     },
     {
       "ip": "208.67.222.222",
       "name": "OpenDNS",
-      "latency": 24,
+      "latency": 33,
       "online": true,
       "queryCount": 0,
-      "history": [],
+      "history": [
+        true
+      ],
       "successRate": 100,
-      "ecsSupported": true
+      "ecsSupported": true,
+      "lastLatency": 25,
+      "consecutiveFailures": 0
     },
     {
       "ip": "1.0.0.1",
       "name": "Cloudflare Secondary",
-      "latency": 0,
+      "latency": 18,
       "online": true,
       "ecsSupported": false,
       "queryCount": 0,
-      "history": [],
-      "successRate": 100
+      "history": [
+        true
+      ],
+      "successRate": 100,
+      "lastLatency": 9,
+      "consecutiveFailures": 0
     },
     {
       "ip": "8.8.4.4",
       "name": "Google Secondary",
-      "latency": 0,
+      "latency": 18,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
-      "history": [],
-      "successRate": 100
+      "history": [
+        true
+      ],
+      "successRate": 100,
+      "lastLatency": 9,
+      "consecutiveFailures": 0
     },
     {
       "ip": "149.112.112.112",
       "name": "Quad9 Secondary",
-      "latency": 0,
+      "latency": 25,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
-      "history": [],
-      "successRate": 100
+      "history": [
+        true
+      ],
+      "successRate": 100,
+      "lastLatency": 9,
+      "consecutiveFailures": 0
     },
     {
       "ip": "208.67.220.220",
       "name": "OpenDNS Secondary",
-      "latency": 0,
+      "latency": 18,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
-      "history": [],
-      "successRate": 100
+      "history": [
+        true
+      ],
+      "successRate": 100,
+      "lastLatency": 9,
+      "consecutiveFailures": 0
     },
     {
       "ip": "94.140.14.14",
       "name": "AdGuard DNS Primary",
-      "latency": 0,
+      "latency": 18,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
-      "history": [],
-      "successRate": 100
+      "history": [
+        true
+      ],
+      "successRate": 100,
+      "lastLatency": 9,
+      "consecutiveFailures": 0
     },
     {
       "ip": "94.140.15.15",
       "name": "AdGuard DNS Secondary",
-      "latency": 0,
+      "latency": 18,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
-      "history": [],
-      "successRate": 100
+      "history": [
+        true
+      ],
+      "successRate": 100,
+      "lastLatency": 9,
+      "consecutiveFailures": 0
     }
   ],
   "lbAlgorithm": "least-latency",
@@ -146,5 +188,7 @@
   "latencyEMAWeight": 0.3,
   "quarantineDurationSeconds": 60,
   "staleCacheWindowSeconds": 86400,
-  "ecsIPv4PrefixLength": 24
+  "ecsIPv4PrefixLength": 24,
+  "llesThresholdMs": 250,
+  "pingIntervalSeconds": 5
 }

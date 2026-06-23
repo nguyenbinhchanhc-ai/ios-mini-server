@@ -466,6 +466,29 @@
                         </div>
                     </div>
                 </div>
+                
+                <div style="margin-top: 1.5rem; border-top: 1px solid var(--card-border); padding-top: 1.5rem;">
+                    <h3>Cấu hình LLES & Realtime Ping</h3>
+                    <p style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.75rem; line-height: 1.4;">
+                        Điều chỉnh dung sai độ trễ định tuyến và tần suất đo UDP RTT chủ động để ping đo lường trạng thái chớp nhoáng theo thời gian thực.
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; justify-content: space-between;">
+                            <span style="font-size: 0.82rem; color: var(--text-muted);">Dung sai trễ LLES (Threshold):</span>
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="number" id="llesThresholdMs" onchange="saveLlesConfig()" min="15" max="1000" style="width: 70px; padding: 0.4rem; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; text-align: center; font-size: 0.85rem; outline: none;">
+                                <span style="font-size: 0.82rem; color: var(--text-muted);">ms</span>
+                            </div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 0.5rem; justify-content: space-between;">
+                            <span style="font-size: 0.82rem; color: var(--text-muted);">Chu kỳ Realtime Ping (Interval):</span>
+                            <div style="display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="number" id="pingIntervalSeconds" onchange="saveLlesConfig()" min="2" max="60" style="width: 70px; padding: 0.4rem; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px solid var(--card-border); color: #fff; text-align: center; font-size: 0.85rem; outline: none;">
+                                <span style="font-size: 0.82rem; color: var(--text-muted);">giây</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="card">
@@ -572,6 +595,14 @@
                                 <strong style="color: var(--text-muted);">Subnet ECS:</strong>
                                 <span id="llesECSPrefix" style="color: #c084fc; margin-left: 0.25rem; font-weight: bold;">-</span>
                             </div>
+                            <div>
+                                <strong style="color: var(--text-muted);">Dung sai LLES:</strong>
+                                <span id="llesThresholdText" style="color: #e879f9; margin-left: 0.25rem; font-weight: bold;">- ms</span>
+                            </div>
+                            <div>
+                                <strong style="color: var(--text-muted);">Chu kỳ Ping:</strong>
+                                <span id="llesPingIntervalText" style="color: #a78bfa; margin-left: 0.25rem; font-weight: bold;">- giây</span>
+                            </div>
                         </div>
                     </div>
 
@@ -649,6 +680,8 @@
             // LLES Settings & Monitoring
             document.getElementById('dnsRacingEnabled').checked = !!dnsConfig.dnsRacingEnabled;
             document.getElementById('dnsRacingDelayMs').value = dnsConfig.dnsRacingDelayMs || 15;
+            document.getElementById('llesThresholdMs').value = dnsConfig.llesThresholdMs || 150;
+            document.getElementById('pingIntervalSeconds').value = dnsConfig.pingIntervalSeconds || 3;
 
             document.getElementById('llesRacingStatus').innerText = dnsConfig.dnsRacingEnabled ? "Kích hoạt" : "Tắt";
             document.getElementById('llesRacingDelay').innerText = (dnsConfig.dnsRacingDelayMs || 15) + " ms";
@@ -656,6 +689,8 @@
             document.getElementById('llesEMAWeight').innerText = dnsConfig.latencyEMAWeight !== undefined ? dnsConfig.latencyEMAWeight : "0.3";
             document.getElementById('llesQuarantineDuration').innerText = (dnsConfig.quarantineDurationSeconds || 60) + " giây";
             document.getElementById('llesECSPrefix').innerText = dnsConfig.ecsIPv4PrefixLength !== undefined ? "/" + dnsConfig.ecsIPv4PrefixLength : "/24";
+            document.getElementById('llesThresholdText').innerText = (dnsConfig.llesThresholdMs || 150) + " ms";
+            document.getElementById('llesPingIntervalText').innerText = (dnsConfig.pingIntervalSeconds || 3) + " giây";
 
             // LLES Weights Progress Bars
             const llesWeightsBars = document.getElementById('llesWeightsBars');
@@ -670,15 +705,31 @@
                     if (s.latency < minLat) minLat = s.latency;
                 });
                 if (minLat === Infinity) minLat = 20;
-                const thresh = Math.max(15, minLat * 0.5);
-                const lowLatCount = onlinePool.filter(s => s.latency <= minLat + thresh).length;
+                const thresh = dnsConfig.llesThresholdMs !== undefined ? dnsConfig.llesThresholdMs : 150;
+                const lowLatPool = onlinePool.filter(s => s.latency <= minLat + thresh);
+                const lowLatCount = lowLatPool.length;
+                const slowCount = onlinePool.length - lowLatCount;
+                const sumWeights = lowLatCount * 1.0 + slowCount * 0.05;
 
                 llesWeightsBars.innerHTML = pool.map(s => {
-                    const online = s.online !== false;
-                    const isLowLat = online && typeof s.latency === 'number' && s.latency > 0 && s.latency <= minLat + thresh;
-                    const share = isLowLat ? (100 / lowLatCount) : 0;
-                    const barColor = isLowLat ? 'linear-gradient(90deg, #10b981, #34d399)' : 'var(--text-muted)';
-                    const statusText = isLowLat ? `Trọng số tải: ${share.toFixed(0)}%` : (online ? 'Trễ cao (0%)' : 'Cách ly (0%)');
+                    const online = s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999;
+                    if (!online) {
+                        return `
+                            <div>
+                                <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 0.25rem;">
+                                    <span>${s.name} (${s.ip})</span>
+                                    <strong>Cách ly (0%)</strong>
+                                </div>
+                                <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
+                                    <div style="width: 0%; height: 100%; background: var(--text-muted); border-radius: 10px; transition: width 0.5s ease;"></div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    const isLowLat = s.latency <= minLat + thresh;
+                    const share = ((isLowLat ? 1.0 : 0.05) / sumWeights) * 100;
+                    const barColor = isLowLat ? 'linear-gradient(90deg, #10b981, #34d399)' : 'linear-gradient(90deg, #f59e0b, #d97706)';
+                    const statusText = isLowLat ? `Trọng số tải: ${share.toFixed(1)}%` : `Trọng số (Trễ cao): ${share.toFixed(1)}%`;
                     return `
                         <div>
                             <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 0.25rem;">
@@ -713,7 +764,7 @@
                     if (srv.latency < minLatForTable) minLatForTable = srv.latency;
                 });
                 if (minLatForTable === Infinity) minLatForTable = 20;
-                const threshForTable = Math.max(15, minLatForTable * 0.5);
+                const threshForTable = dnsConfig.llesThresholdMs !== undefined ? dnsConfig.llesThresholdMs : 150;
                 const lowLatCountForTable = onlinePoolForTable.filter(srv => srv.latency <= minLatForTable + threshForTable).length;
 
                 poolList.innerHTML = `
@@ -750,9 +801,18 @@
                                         ? `<span style="background: linear-gradient(135deg, #34d399, #10b981); color: white; font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 20px; box-shadow: 0 0 10px rgba(16, 185, 129, 0.4); margin-left: 0.5rem; text-transform: uppercase; white-space: nowrap;">Nhanh nhất</span>`
                                         : '';
 
-                                    const isLowLatForTable = online && typeof s.latency === 'number' && s.latency > 0 && s.latency <= minLatForTable + threshForTable;
-                                    const routingShare = isLowLatForTable ? (100 / lowLatCountForTable).toFixed(0) + '%' : (online ? '0% (Trễ cao)' : '0% (Offline)');
-                                    const routingColor = isLowLatForTable ? 'var(--success)' : (online ? '#f59e0b' : 'var(--text-muted)');
+                                     const isOnline = online && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999;
+                                     let routingShare = '0% (Offline)';
+                                     let routingColor = 'var(--text-muted)';
+                                     if (isOnline) {
+                                         const isLowLatForTable = s.latency <= minLatForTable + threshForTable;
+                                         const shareVal = ((isLowLatForTable ? 1.0 : 0.05) / (lowLatCountForTable * 1.0 + (onlinePoolForTable.length - lowLatCountForTable) * 0.05)) * 100;
+                                         routingShare = shareVal.toFixed(1) + '%';
+                                         routingColor = isLowLatForTable ? 'var(--success)' : '#f59e0b';
+                                         if (!isLowLatForTable) {
+                                             routingShare += ' (Trễ cao)';
+                                         }
+                                     }
 
                                     return `
                                         <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255, 255, 255, 0.01)'" onmouseout="this.style.backgroundColor='transparent'">
@@ -947,6 +1007,18 @@
                 .then(res => {
                     if (res.ok) showToast("Đã cập nhật cấu hình DNS Racing");
                     else showToast("Lưu cấu hình thất bại", "error");
+                });
+        }
+
+        function saveLlesConfig() {
+            const threshold = parseInt(document.getElementById('llesThresholdMs').value, 10) || 150;
+            const pingInterval = parseInt(document.getElementById('pingIntervalSeconds').value, 10) || 3;
+            fetch(`/dns/lles/config?threshold=${threshold}&pingInterval=${pingInterval}`, { method: 'POST' })
+                .then(res => {
+                    if (res.ok) {
+                        showToast("Đã cập nhật cấu hình LLES & Ping");
+                        fetchConfig();
+                    } else showToast("Lưu cấu hình LLES thất bại", "error");
                 });
         }
 

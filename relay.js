@@ -161,7 +161,9 @@ function getWSUpdatePayload() {
         lbAlgorithm: config.lbAlgorithm || "least-latency",
         gslbRecords: config.gslbRecords || {},
         dnsRacingEnabled: !!config.dnsRacingEnabled,
-        dnsRacingDelayMs: config.dnsRacingDelayMs || 15
+        dnsRacingDelayMs: config.dnsRacingDelayMs || 15,
+        llesThresholdMs: config.llesThresholdMs || 150,
+        pingIntervalSeconds: config.pingIntervalSeconds || 3
     };
 }
 
@@ -853,27 +855,34 @@ function selectWeightedDNS(activePool) {
     if (minLatency === Infinity) minLatency = 20;
     
     // Identify low-latency servers: latency <= minLatency + threshold
-    // Threshold is 50% of minLatency, but at least 15ms absolute
-    const threshold = Math.max(15, minLatency * 0.5);
-    const lowLatencyServers = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999 && (s.latency <= minLatency + threshold));
+    const threshold = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
     
-    if (lowLatencyServers.length === 0) {
-        // Fallback to the absolute fastest server if the filter results in empty pool
-        let fastest = activePool[0];
-        let bestLat = Infinity;
-        for (let i = 0; i < activePool.length; i++) {
-            const s = activePool[i];
-            if (s.online !== false && (s.latency || 9999) < bestLat) {
-                bestLat = s.latency || 9999;
-                fastest = s;
-            }
-        }
-        return fastest ? fastest.ip : activePool[0].ip;
+    // Filter activePool to online and non-quarantined servers
+    const onlinePool = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
+    
+    if (onlinePool.length === 0) {
+        return activePool[0].ip;
     }
     
-    // Divide traffic evenly among low-latency servers
-    const idx = Math.floor(Math.random() * lowLatencyServers.length);
-    return lowLatencyServers[idx].ip;
+    // Assign routing weights: low latency servers get weight 1.0, other online servers get weight 0.05
+    const weights = onlinePool.map(s => {
+        const isLowLat = s.latency <= minLatency + threshold;
+        return {
+            server: s,
+            weight: isLowLat ? 1.0 : 0.05
+        };
+    });
+    
+    const totalWeight = weights.reduce((sum, item) => sum + item.weight, 0);
+    let r = Math.random() * totalWeight;
+    for (let i = 0; i < weights.length; i++) {
+        r -= weights[i].weight;
+        if (r <= 0) {
+            return weights[i].server.ip;
+        }
+    }
+    
+    return onlinePool[0].ip;
 }
 
 // Load Balancer DNS Selector
@@ -1070,6 +1079,8 @@ function loadConfig() {
     config.quarantineDurationSeconds = config.quarantineDurationSeconds !== undefined ? config.quarantineDurationSeconds : 60;
     config.staleCacheWindowSeconds = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 86400;
     config.ecsIPv4PrefixLength = config.ecsIPv4PrefixLength !== undefined ? config.ecsIPv4PrefixLength : 24;
+    config.llesThresholdMs = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
+    config.pingIntervalSeconds = config.pingIntervalSeconds !== undefined ? config.pingIntervalSeconds : 3;
 }
 
 function saveConfig() {
@@ -1101,6 +1112,13 @@ function buildQueryBufferForMeasure(domain) {
 }
 
 function measureUpstreamLatency(ip) {
+    // Prevent duplicate active background pings for the same IP
+    for (const [txId, req] of pendingRequests.entries()) {
+        if (req.targetIP === ip && !req.isClientQuery) {
+            return;
+        }
+    }
+    
     const domain = "google.com";
     const queryBuffer = buildQueryBufferForMeasure(domain);
     queryUpstream(queryBuffer, ip, (response) => {
@@ -1120,8 +1138,14 @@ function measureUpstreamPool() {
 loadConfig();
 
 // Periodic Latency Checking
-setInterval(measureUpstreamPool, 30000);
-setTimeout(measureUpstreamPool, 3000); // Check shortly after start
+let pingIntervalId = null;
+function startPingInterval() {
+    if (pingIntervalId) clearInterval(pingIntervalId);
+    const intervalMs = (config.pingIntervalSeconds || 3) * 1000;
+    pingIntervalId = setInterval(measureUpstreamPool, intervalMs);
+}
+startPingInterval();
+setTimeout(measureUpstreamPool, 1000); // Check shortly after start
 setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
 setInterval(runPopularKeepAlive, 60000); // Always-Hot Cache prefetch and decay
 
@@ -1454,7 +1478,9 @@ app.get('/dns/config', (req, res) => {
         lbAlgorithm: config.lbAlgorithm || "least-latency",
         gslbRecords: config.gslbRecords || {},
         dnsRacingEnabled: !!config.dnsRacingEnabled,
-        dnsRacingDelayMs: config.dnsRacingDelayMs || 15
+        dnsRacingDelayMs: config.dnsRacingDelayMs || 15,
+        llesThresholdMs: config.llesThresholdMs || 150,
+        pingIntervalSeconds: config.pingIntervalSeconds || 3
     });
 });
 
@@ -1562,6 +1588,24 @@ app.post('/dns/racing', (req, res) => {
     saveConfig();
     broadcastUpdate();
     res.send("DNS Racing configuration updated");
+});
+
+app.post('/dns/lles/config', (req, res) => {
+    const threshold = parseInt(req.query.threshold, 10);
+    const pingInterval = parseInt(req.query.pingInterval, 10);
+    
+    if (!isNaN(threshold) && threshold >= 15 && threshold <= 1000) {
+        config.llesThresholdMs = threshold;
+    }
+    if (!isNaN(pingInterval) && pingInterval >= 2 && pingInterval <= 300) {
+        config.pingIntervalSeconds = pingInterval;
+        if (typeof startPingInterval === 'function') {
+            startPingInterval();
+        }
+    }
+    saveConfig();
+    broadcastUpdate();
+    res.send("LLES config updated");
 });
 
 
