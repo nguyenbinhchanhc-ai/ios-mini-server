@@ -726,6 +726,21 @@
                             </div>
                         `;
                     }
+                    
+                    if (s.stabilizing) {
+                        return `
+                            <div>
+                                <div style="display: flex; justify-content: space-between; font-size: 0.75rem; margin-bottom: 0.25rem;">
+                                    <span>${s.name} (${s.ip})</span>
+                                    <strong style="color: #f59e0b;">Chờ ổn định (${s.consecutiveStablePings || 0}/3)</strong>
+                                </div>
+                                <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.05); border-radius: 10px; overflow: hidden;">
+                                    <div style="width: 0%; height: 100%; background: #f59e0b; border-radius: 10px; transition: width 0.5s ease;"></div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    
                     const isLowLat = s.latency <= minLat + thresh;
                     const share = ((isLowLat ? 1.0 : 0.05) / sumWeights) * 100;
                     const barColor = isLowLat ? 'linear-gradient(90deg, #10b981, #34d399)' : 'linear-gradient(90deg, #f59e0b, #d97706)';
@@ -794,7 +809,9 @@
                                     else if (latency > 150) color = 'yellow';
                                     
                                     const statusBadge = online 
-                                        ? `<span style="background: rgba(16, 185, 129, 0.1); color: var(--success); padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: 500; font-size: 0.75rem;">Online</span>`
+                                        ? (s.stabilizing 
+                                            ? `<span style="background: rgba(245, 158, 11, 0.1); color: #f59e0b; padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: 500; font-size: 0.75rem;">Ổn định...</span>`
+                                            : `<span style="background: rgba(16, 185, 129, 0.1); color: var(--success); padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: 500; font-size: 0.75rem;">Online</span>`)
                                         : `<span style="background: rgba(239, 68, 68, 0.1); color: var(--danger); padding: 0.2rem 0.5rem; border-radius: 6px; font-weight: 500; font-size: 0.75rem;">Offline</span>`;
                                         
                                     const fastestBadge = isFastest 
@@ -805,12 +822,17 @@
                                      let routingShare = '0% (Offline)';
                                      let routingColor = 'var(--text-muted)';
                                      if (isOnline) {
-                                         const isLowLatForTable = s.latency <= minLatForTable + threshForTable;
-                                         const shareVal = ((isLowLatForTable ? 1.0 : 0.05) / (lowLatCountForTable * 1.0 + (onlinePoolForTable.length - lowLatCountForTable) * 0.05)) * 100;
-                                         routingShare = shareVal.toFixed(1) + '%';
-                                         routingColor = isLowLatForTable ? 'var(--success)' : '#f59e0b';
-                                         if (!isLowLatForTable) {
-                                             routingShare += ' (Trễ cao)';
+                                         if (s.stabilizing) {
+                                             routingShare = `0% (Chờ ổn định ${s.consecutiveStablePings || 0}/3)`;
+                                             routingColor = '#f59e0b';
+                                         } else {
+                                             const isLowLatForTable = s.latency <= minLatForTable + threshForTable;
+                                             const shareVal = ((isLowLatForTable ? 1.0 : 0.05) / (lowLatCountForTable * 1.0 + (onlinePoolForTable.length - lowLatCountForTable) * 0.05)) * 100;
+                                             routingShare = shareVal.toFixed(1) + '%';
+                                             routingColor = isLowLatForTable ? 'var(--success)' : '#f59e0b';
+                                             if (!isLowLatForTable) {
+                                                 routingShare += ' (Trễ cao)';
+                                             }
                                          }
                                      }
 

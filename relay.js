@@ -69,10 +69,14 @@ let precalculatedLlesTotalWeight = 0;
 
 function rebuildLlesRoutingPool() {
     const pool = config.upstreamPool || [];
-    const onlinePool = pool.filter(s => s.online !== false && !s.quarantined && (s.latency || 0) < 9999);
+    // Only include servers that are online, not quarantined, and NOT stabilizing
+    const onlinePool = pool.filter(s => s.online !== false && !s.quarantined && !s.stabilizing && (s.latency || 0) < 9999);
     
     if (onlinePool.length === 0) {
-        precalculatedLlesPool = pool.map(s => ({ ip: s.ip, weight: 1.0 }));
+        // Fallback to any online, non-quarantined servers (including stabilizing ones) to avoid complete outage
+        const fallbackPool = pool.filter(s => s.online !== false && !s.quarantined);
+        const finalPool = fallbackPool.length > 0 ? fallbackPool : pool;
+        precalculatedLlesPool = finalPool.map(s => ({ ip: s.ip, weight: 1.0 }));
         precalculatedLlesTotalWeight = precalculatedLlesPool.length;
         return;
     }
@@ -109,8 +113,10 @@ function checkExpiredQuarantines() {
         if (s.quarantined && now > (s.quarantineUntil || 0)) {
             s.quarantined = false;
             s.consecutiveFailures = 0;
+            s.stabilizing = true;
+            s.consecutiveStablePings = 0;
             changed = true;
-            console.log(`[Upstream Autopilot] Quarantine expired. Server ${s.name} (${s.ip}) returned to active pool.`);
+            console.log(`[Upstream Autopilot] Quarantine expired for ${s.name} (${s.ip}). Entering stabilizing phase.`);
         }
     });
     if (changed) {
@@ -597,26 +603,55 @@ function initUpstreamSocketPool() {
                     // Reset consecutive failures on success
                     server.consecutiveFailures = 0;
                     
-                    // Quarantine only on extremely high latency (> 800ms) which indicates severe network congestion or server issues
+                    // Real-time latency measurement spike / quarantine logic
+                    const maxAllowedLatency = config.llesThresholdMs !== undefined ? (config.llesThresholdMs + 100) : 250;
+                    
+                    // Smart Spike Detection:
+                    // 1. Absolute threshold check: raw elapsed latency is greater than maxAllowedLatency
+                    // 2. Relative spike check: raw elapsed latency is more than 2.5x the server's previous average latency (oldLatency), and elapsed is > 50ms
+                    const isSpike = (elapsed > maxAllowedLatency) || (oldLatency > 0 && elapsed > oldLatency * 2.5 && elapsed > 50);
+                    
+                    if (isSpike && !server.quarantined) {
+                        if (!server.stabilizing) {
+                            server.stabilizing = true;
+                            server.consecutiveStablePings = 0;
+                            console.warn(`[Upstream Autopilot] Server ${server.name} (${server.ip}) latency spiked to ${elapsed}ms (previous avg: ${oldLatency}ms). Downgraded to stabilizing pool.`);
+                        } else {
+                            server.consecutiveStablePings = 0; // Reset count on new spike
+                        }
+                    }
+
+                    // Stabilization logic: must record 3 consecutive stable pings before returning to pool
+                    if (server.stabilizing && !server.quarantined && !isSpike) {
+                        const isStable = (elapsed <= maxAllowedLatency) && (elapsed <= Math.max(50, oldLatency * 1.3));
+                        if (isStable) {
+                            server.consecutiveStablePings = (server.consecutiveStablePings || 0) + 1;
+                            console.log(`[Upstream Autopilot] Server ${server.name} (${server.ip}) recorded stable ping: ${elapsed}ms (${server.consecutiveStablePings}/3)`);
+                            if (server.consecutiveStablePings >= 3) {
+                                server.stabilizing = false;
+                                console.log(`[Upstream Autopilot] Server ${server.name} (${server.ip}) has stabilized. Returning to client routing pool.`);
+                            }
+                        } else {
+                            server.consecutiveStablePings = 0; // Reset on any unstable ping
+                        }
+                    }
+
                     if (elapsed > 800 && !server.quarantined) {
                         const qDuration = (config.quarantineDurationSeconds || 60) * 1000;
                         server.quarantined = true;
                         server.quarantineUntil = Date.now() + Math.round(qDuration / 2); // Half duration for latency spikes
+                        server.stabilizing = true;
+                        server.consecutiveStablePings = 0;
                         console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 2000)}s due to extremely high latency (${elapsed}ms).`);
                     } else if (server.quarantined && Date.now() > (server.quarantineUntil || 0)) {
-                        // Lift quarantine if we get a successful response and time expired
                         server.quarantined = false;
-                        console.log(`[Upstream Autopilot] Lifted quarantine for ${server.name} (${server.ip}) on successful response.`);
+                        server.stabilizing = true;
+                        server.consecutiveStablePings = 0;
+                        console.log(`[Upstream Autopilot] Lifted quarantine for ${server.name} (${server.ip}). Entering stabilizing phase.`);
                     }
 
                     if (req.isClientQuery) {
                         server.queryCount = (server.queryCount || 0) + 1;
-                    }
-                    
-                    const onlineChanged = (oldOnline === false);
-                    
-                    if (onlineChanged) {
-                        rebuildAiRoutingCache();
                     }
                     
                     rebuildLlesRoutingPool();
@@ -671,9 +706,13 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
             const server = config.upstreamPool.find(s => s.ip === upstreamIP);
             if (server) {
                 const oldOnline = server.online;
-                server.latency = 9999;
-                server.online = false;
-                recordServerHealth(server, false);
+                 server.latency = 9999;
+                 server.online = false;
+                 recordServerHealth(server, false);
+                 
+                 // Immediately downgrade to stabilizing
+                 server.stabilizing = true;
+                 server.consecutiveStablePings = 0;
                 
                 // Autopilot quarantine: increment consecutive failures
                 server.consecutiveFailures = (server.consecutiveFailures || 0) + 1;
@@ -682,10 +721,6 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     server.quarantined = true;
                     server.quarantineUntil = Date.now() + qDuration;
                     console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 1000)}s due to 3 consecutive timeouts.`);
-                }
-                
-                if (oldOnline !== false) {
-                    rebuildAiRoutingCache();
                 }
                 
                 rebuildLlesRoutingPool();
@@ -718,6 +753,10 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     server.online = false;
                     recordServerHealth(server, false);
                     
+                    // Immediately downgrade to stabilizing
+                    server.stabilizing = true;
+                    server.consecutiveStablePings = 0;
+                    
                     // Autopilot quarantine: increment consecutive failures
                     server.consecutiveFailures = (server.consecutiveFailures || 0) + 1;
                     if (server.consecutiveFailures >= 3 && !server.quarantined) {
@@ -725,10 +764,6 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                         server.quarantined = true;
                         server.quarantineUntil = Date.now() + qDuration;
                         console.warn(`[Upstream Autopilot] Quarantined server ${server.name} (${server.ip}) for ${Math.round(qDuration / 1000)}s due to consecutive send errors.`);
-                    }
-                    
-                    if (oldOnline !== false) {
-                        rebuildAiRoutingCache();
                     }
                     
                     rebuildLlesRoutingPool();
@@ -768,7 +803,8 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     activeUpstreamQueries.set(key, [{ callback, originalIDBytes, isSecondary: false }]);
     
     const pool = config.upstreamPool || [];
-    let onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
+    let onlinePool = pool.filter(s => s.online !== false && !s.quarantined && !s.stabilizing);
+    if (onlinePool.length === 0) onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
     if (onlinePool.length === 0) onlinePool = pool.filter(s => s.online !== false);
     if (onlinePool.length === 0) onlinePool = pool;
     
@@ -924,7 +960,10 @@ function selectUpstreamDNS(domain, hasECS = false) {
     const pool = config.upstreamPool || [];
     if (pool.length === 0) return "1.1.1.1";
     
-    let onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
+    let onlinePool = pool.filter(s => s.online !== false && !s.quarantined && !s.stabilizing);
+    if (onlinePool.length === 0) {
+        onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
+    }
     if (onlinePool.length === 0) {
         onlinePool = pool.filter(s => s.online !== false);
     }
