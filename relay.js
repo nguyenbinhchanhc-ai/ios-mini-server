@@ -63,6 +63,63 @@ const IGNORED_DOMAINS = new Set([
 let totalLatency = 0;
 let latencyCount = 0;
 
+// Precalculated LLES routing pool to optimize selection performance to O(1)
+let precalculatedLlesPool = [];
+let precalculatedLlesTotalWeight = 0;
+
+function rebuildLlesRoutingPool() {
+    const pool = config.upstreamPool || [];
+    const onlinePool = pool.filter(s => s.online !== false && !s.quarantined && (s.latency || 0) < 9999);
+    
+    if (onlinePool.length === 0) {
+        precalculatedLlesPool = pool.map(s => ({ ip: s.ip, weight: 1.0 }));
+        precalculatedLlesTotalWeight = precalculatedLlesPool.length;
+        return;
+    }
+    
+    let minLatency = Infinity;
+    for (let i = 0; i < onlinePool.length; i++) {
+        const s = onlinePool[i];
+        if (typeof s.latency === 'number' && s.latency < minLatency && s.latency > 0) {
+            minLatency = s.latency;
+        }
+    }
+    if (minLatency === Infinity) minLatency = 20;
+    
+    const threshold = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
+    
+    precalculatedLlesPool = onlinePool.map(s => {
+        const isLowLat = s.latency <= minLatency + threshold;
+        return {
+            ip: s.ip,
+            weight: isLowLat ? 1.0 : 0.05
+        };
+    });
+    
+    precalculatedLlesTotalWeight = precalculatedLlesPool.reduce((sum, item) => sum + item.weight, 0);
+}
+
+// Background timer to check and expire quarantined servers every 5 seconds,
+// completely offloading it from the hot query path.
+function checkExpiredQuarantines() {
+    const pool = config.upstreamPool || [];
+    const now = Date.now();
+    let changed = false;
+    pool.forEach(s => {
+        if (s.quarantined && now > (s.quarantineUntil || 0)) {
+            s.quarantined = false;
+            s.consecutiveFailures = 0;
+            changed = true;
+            console.log(`[Upstream Autopilot] Quarantine expired. Server ${s.name} (${s.ip}) returned to active pool.`);
+        }
+    });
+    if (changed) {
+        rebuildLlesRoutingPool();
+        throttledBroadcastUpdate();
+    }
+}
+setInterval(checkExpiredQuarantines, 5000);
+
 // WebSocket connection handler
 wss.on('connection', (ws) => {
     wsClients.add(ws);
@@ -188,7 +245,7 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
                     console.log(`[Cache Prefetch] Triggering background prefetch for: ${domain} (remaining TTL: ${Math.round(remainingTTL)}s / ${Math.round(totalTTL)}s)`);
                     
                     const targetDNS = selectUpstreamDNS(domain, hasECS);
-                    const prefetchQueryBuffer = queryData ? Buffer.from(queryData) : buildQueryBufferForMeasure(domain);
+                    const prefetchQueryBuffer = hasECS ? addECS(queryData || buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1") : (queryData ? Buffer.from(queryData) : buildQueryBufferForMeasure(domain));
                     
                     fetchFromUpstreamDeduplicated(prefetchQueryBuffer, domain, qtype, targetDNS, (response) => {
                         activeUpstreamQueries.delete(prefetchKey);
@@ -214,7 +271,7 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
                     console.log(`[Cache SWR] Serving stale cache for: ${domain} (expired ${Math.round((now - cached.expiresAt) / 1000)}s ago). Triggering background revalidate...`);
                     
                     const targetDNS = selectUpstreamDNS(domain, hasECS);
-                    const revalidateQueryBuffer = Buffer.from(queryData);
+                    const revalidateQueryBuffer = hasECS ? addECS(queryData, lastSeenClientIP || "115.79.0.1") : Buffer.from(queryData);
                     
                     fetchFromUpstreamDeduplicated(revalidateQueryBuffer, domain, qtype, targetDNS, (response) => {
                         activeUpstreamQueries.delete(revalidateKey);
@@ -562,6 +619,7 @@ function initUpstreamSocketPool() {
                         rebuildAiRoutingCache();
                     }
                     
+                    rebuildLlesRoutingPool();
                     throttledBroadcastUpdate();
                 }
                 
@@ -630,6 +688,7 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     rebuildAiRoutingCache();
                 }
                 
+                rebuildLlesRoutingPool();
                 throttledBroadcastUpdate();
             }
             callback(null);
@@ -672,6 +731,7 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                         rebuildAiRoutingCache();
                     }
                     
+                    rebuildLlesRoutingPool();
                     throttledBroadcastUpdate();
                 }
                 callback(null);
@@ -833,70 +893,37 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
 
 
 // Low-Latency Equal Share (LLES) Load Balancer DNS Selector
-function selectWeightedDNS(activePool) {
-    if (activePool.length === 0) return "1.1.1.1";
-    if (activePool.length === 1) return activePool[0].ip;
-    
-    // Find the minimum latency among online, non-quarantined servers
-    let minLatency = Infinity;
-    for (let i = 0; i < activePool.length; i++) {
-        const s = activePool[i];
-        if (s.online !== false && typeof s.latency === 'number' && s.latency < minLatency && s.latency > 0) {
-            minLatency = s.latency;
-        }
+function selectWeightedDNS() {
+    if (precalculatedLlesPool.length === 0) {
+        rebuildLlesRoutingPool();
+    }
+    if (precalculatedLlesPool.length === 1) {
+        return precalculatedLlesPool[0].ip;
     }
     
-    // Fallback if no latency measured yet
-    if (minLatency === Infinity) minLatency = 20;
-    
-    // Identify low-latency servers: latency <= minLatency + threshold
-    const threshold = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
-    
-    // Filter activePool to online and non-quarantined servers
-    const onlinePool = activePool.filter(s => s.online !== false && (s.latency || 0) < 9999);
-    
-    if (onlinePool.length === 0) {
-        return activePool[0].ip;
-    }
-    
-    // Assign routing weights: low latency servers get weight 1.0, other online servers get weight 0.05
-    const weights = onlinePool.map(s => {
-        const isLowLat = s.latency <= minLatency + threshold;
-        return {
-            server: s,
-            weight: isLowLat ? 1.0 : 0.05
-        };
-    });
-    
-    const totalWeight = weights.reduce((sum, item) => sum + item.weight, 0);
-    let r = Math.random() * totalWeight;
-    for (let i = 0; i < weights.length; i++) {
-        r -= weights[i].weight;
+    let r = Math.random() * precalculatedLlesTotalWeight;
+    for (let i = 0; i < precalculatedLlesPool.length; i++) {
+        r -= precalculatedLlesPool[i].weight;
         if (r <= 0) {
-            return weights[i].server.ip;
+            return precalculatedLlesPool[i].ip;
         }
     }
     
-    return onlinePool[0].ip;
+    return precalculatedLlesPool[0] ? precalculatedLlesPool[0].ip : "1.1.1.1";
 }
 
 // Load Balancer DNS Selector
 function selectUpstreamDNS(domain, hasECS = false) {
+    const algo = config.lbAlgorithm || "least-latency";
+    
+    // Fast path: Least Latency is default and directly uses precalculated LLES pool
+    if (algo === "least-latency") {
+        return selectWeightedDNS();
+    }
+    
     const pool = config.upstreamPool || [];
     if (pool.length === 0) return "1.1.1.1";
     
-    const now = Date.now();
-    
-    // Clear expired quarantines
-    pool.forEach(s => {
-        if (s.quarantined && now > (s.quarantineUntil || 0)) {
-            s.quarantined = false;
-            s.consecutiveFailures = 0;
-            console.log(`[Upstream Autopilot] Quarantine expired. Server ${s.name} (${s.ip}) returned to active pool.`);
-        }
-    });
-    
-    // Filter out quarantined servers unless they are all quarantined
     let onlinePool = pool.filter(s => s.online !== false && !s.quarantined);
     if (onlinePool.length === 0) {
         onlinePool = pool.filter(s => s.online !== false);
@@ -906,10 +933,6 @@ function selectUpstreamDNS(domain, hasECS = false) {
     }
     
     let activePool = onlinePool;
-    
-    // Note: We no longer exclude non-ECS servers from the active pool to ensure all stable DNS (like Cloudflare) receive load.
-    
-    const algo = config.lbAlgorithm || "least-latency";
     
     if (algo === "round-robin") {
         if (selectUpstreamDNS.index === undefined) selectUpstreamDNS.index = 0;
@@ -954,10 +977,7 @@ function selectUpstreamDNS(domain, hasECS = false) {
         return activePool[idx].ip;
     }
     
-
-    
-    // Default fallback (least-latency)
-    return selectWeightedDNS(activePool);
+    return selectWeightedDNS();
 }
 
 // Logs and Stats
@@ -1070,6 +1090,7 @@ function loadConfig() {
     config.ecsIPv4PrefixLength = config.ecsIPv4PrefixLength !== undefined ? config.ecsIPv4PrefixLength : 24;
     config.llesThresholdMs = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
     config.pingIntervalSeconds = config.pingIntervalSeconds !== undefined ? config.pingIntervalSeconds : 3;
+    rebuildLlesRoutingPool();
 }
 
 function saveConfig() {
@@ -1203,18 +1224,11 @@ app.use((req, res, next) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
+// MARK: - DNS-over-HTTPS (DoH) Route Handler
 function handleDoH(queryData, clientIP, hostHeader, callback) {
     const startTime = Date.now();
     
-    // Inject EDNS Client Subnet (ECS) to preserve local GeoDNS routing for the client
-    let queryWithEcs = queryData;
-    const hasECS = !!(clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1");
-    if (hasECS) {
-        queryWithEcs = addECS(queryData, clientIP);
-        lastSeenClientIP = clientIP; // Update last seen client IP for background queries
-    }
-    
-    const parsed = parseDNSQuery(queryWithEcs);
+    const parsed = parseDNSQuery(queryData);
     if (!parsed) {
         callback(Buffer.alloc(0));
         return;
@@ -1241,9 +1255,9 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         }
     }
     
-    const targetDNS = selectUpstreamDNS(domain, hasECS);
+    const hasECS = !!(clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1");
     
-    const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "", sourceOverride = "") => {
+    const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "", sourceOverride = "", targetDNS = "") => {
         const latency = Date.now() - startTime;
         totalLatency += latency;
         latencyCount++;
@@ -1280,7 +1294,7 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
             rotated.push(first);
             config.gslbRecords[domain] = rotated;
             
-            const gslbResponse = buildGslbResponse(queryWithEcs, parsed.questionEndOffset, rotated);
+            const gslbResponse = buildGslbResponse(queryData, parsed.questionEndOffset, rotated);
             completeQuery(gslbResponse, false, true, rotated.join(', '));
             return;
         }
@@ -1289,21 +1303,29 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
     // Increment query popularity weight
     domainQueryWeights.set(originalDomain, (domainQueryWeights.get(originalDomain) || 0) + 1);
 
-    // 1. Check local cache
-    const cachedResponseObj = checkCache(originalDomain, qtype, queryWithEcs, hasECS);
+    // 1. Check local cache (using raw queryData first, avoiding addECS overhead for hits)
+    const cachedResponseObj = checkCache(originalDomain, qtype, queryData, hasECS);
     if (cachedResponseObj) {
         config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
         const clientResponse = Buffer.from(cachedResponseObj.responseBuffer);
-        clientResponse[0] = queryWithEcs[0];
-        clientResponse[1] = queryWithEcs[1];
+        clientResponse[0] = queryData[0];
+        clientResponse[1] = queryData[1];
         completeQuery(clientResponse, true, false, "", cachedResponseObj.fromStale ? "stale" : "cache");
     } else {
-        // 2. Fetch from chosen upstream DNS
+        // 2. Fetch from chosen upstream DNS (lazy-inject ECS on cache miss)
+        let queryWithEcs = queryData;
+        if (hasECS) {
+            queryWithEcs = addECS(queryData, clientIP);
+            lastSeenClientIP = clientIP; // Update last seen client IP for background queries
+        }
+        
+        const targetDNS = selectUpstreamDNS(domain, hasECS);
+        
         fetchFromUpstreamDeduplicated(queryWithEcs, originalDomain, qtype, targetDNS, (response, isSecondary) => {
             if (response) {
                 if (isSecondary) {
                     config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
-                    completeQuery(response, true, false, "", "cache");
+                    completeQuery(response, true, false, "", "cache", targetDNS);
                 } else {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
                     
@@ -1316,22 +1338,21 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
                     }
                     
                     setCache(originalDomain, qtype, response, ttl);
-                    completeQuery(response, false, false);
+                    completeQuery(response, false, false, "", "", targetDNS);
                 }
             } else {
                 if (!isSecondary) {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
                     
                     // RFC 8767 Last-Resort Stale Cache Fallback:
-                    // Look for ANY cache entry for this domain and qtype, even if expired.
                     const key = `${originalDomain.toLowerCase()}_${qtype}`;
                     const cached = dnsCache.get(key);
                     if (cached) {
                         const clientResponse = Buffer.from(cached.responseBuffer);
-                        clientResponse[0] = queryWithEcs[0];
-                        clientResponse[1] = queryWithEcs[1];
+                        clientResponse[0] = queryData[0];
+                        clientResponse[1] = queryData[1];
                         console.warn(`[Cache RFC8767] All upstreams failed/timed out for ${originalDomain}. Serving expired stale cache as last-resort fallback.`);
-                        completeQuery(clientResponse, true, false, "", "stale");
+                        completeQuery(clientResponse, true, false, "", "stale", targetDNS);
                         return;
                     }
                     
@@ -1341,7 +1362,7 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
                         setCache(originalDomain, qtype, servfailRes, 10);
                     }
                 }
-                completeQuery(Buffer.alloc(0), false, false);
+                completeQuery(Buffer.alloc(0), false, false, "", "", targetDNS);
             }
         }, hasECS);
     }
@@ -1493,6 +1514,7 @@ app.post('/dns/upstream/pool/add', (req, res) => {
     
     config.upstreamPool.push({ ip, name, latency: 0, online: true, ecsSupported });
     saveConfig();
+    rebuildLlesRoutingPool();
     measureUpstreamLatency(ip);
     broadcastUpdate();
     res.send(`Added ${ip} to pool`);
@@ -1504,6 +1526,7 @@ app.post('/dns/upstream/pool/remove', (req, res) => {
     
     config.upstreamPool = (config.upstreamPool || []).filter(s => s.ip !== ip);
     saveConfig();
+    rebuildLlesRoutingPool();
     broadcastUpdate();
     res.send(`Removed ${ip} from pool`);
 });
@@ -1516,6 +1539,7 @@ app.post('/dns/lb/algorithm', (req, res) => {
     }
     config.lbAlgorithm = algo;
     saveConfig();
+    rebuildLlesRoutingPool();
     broadcastUpdate();
     res.send(`Updated LB algorithm to ${algo}`);
 });
@@ -1593,6 +1617,7 @@ app.post('/dns/lles/config', (req, res) => {
         }
     }
     saveConfig();
+    rebuildLlesRoutingPool();
     broadcastUpdate();
     res.send("LLES config updated");
 });
