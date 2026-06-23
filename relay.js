@@ -712,12 +712,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     if (onlinePool.length === 0) onlinePool = pool.filter(s => s.online !== false);
     if (onlinePool.length === 0) onlinePool = pool;
     
-    if (hasECS) {
-        const ecsPool = onlinePool.filter(s => s.ecsSupported !== false);
-        if (ecsPool.length > 0) {
-            onlinePool = ecsPool;
-        }
-    }
+    // Note: We no longer exclude non-ECS servers from the online pool to ensure all stable DNS (like Cloudflare) receive load.
     
     // CUSTOM PATH: All-Racing algorithm queries all online servers concurrently
     if (config.lbAlgorithm === "all-racing" && onlinePool.length > 1) {
@@ -912,13 +907,7 @@ function selectUpstreamDNS(domain, hasECS = false) {
     
     let activePool = onlinePool;
     
-    // ECS-aware filtering: if hasECS is true, prefer servers that support ECS
-    if (hasECS) {
-        const ecsPool = activePool.filter(s => s.ecsSupported !== false);
-        if (ecsPool.length > 0) {
-            activePool = ecsPool;
-        }
-    }
+    // Note: We no longer exclude non-ECS servers from the active pool to ensure all stable DNS (like Cloudflare) receive load.
     
     const algo = config.lbAlgorithm || "least-latency";
     

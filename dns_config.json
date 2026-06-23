@@ -38,7 +38,7 @@
     {
       "ip": "1.1.1.1",
       "name": "Cloudflare",
-      "latency": 29,
+      "latency": 32,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -46,13 +46,13 @@
       ],
       "successRate": 100,
       "ecsSupported": false,
-      "lastLatency": 30,
+      "lastLatency": 29,
       "consecutiveFailures": 0
     },
     {
       "ip": "8.8.8.8",
       "name": "Google",
-      "latency": 45,
+      "latency": 43,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -60,13 +60,13 @@
       ],
       "successRate": 100,
       "ecsSupported": true,
-      "lastLatency": 52,
+      "lastLatency": 45,
       "consecutiveFailures": 0
     },
     {
       "ip": "9.9.9.9",
       "name": "Quad9",
-      "latency": 50,
+      "latency": 46,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -74,13 +74,13 @@
       ],
       "successRate": 100,
       "ecsSupported": true,
-      "lastLatency": 49,
+      "lastLatency": 50,
       "consecutiveFailures": 0
     },
     {
       "ip": "208.67.222.222",
       "name": "OpenDNS",
-      "latency": 33,
+      "latency": 35,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -88,13 +88,13 @@
       ],
       "successRate": 100,
       "ecsSupported": true,
-      "lastLatency": 25,
+      "lastLatency": 33,
       "consecutiveFailures": 0
     },
     {
       "ip": "1.0.0.1",
       "name": "Cloudflare Secondary",
-      "latency": 18,
+      "latency": 24,
       "online": true,
       "ecsSupported": false,
       "queryCount": 0,
@@ -102,13 +102,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 9,
+      "lastLatency": 18,
       "consecutiveFailures": 0
     },
     {
       "ip": "8.8.4.4",
       "name": "Google Secondary",
-      "latency": 18,
+      "latency": 29,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -116,13 +116,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 9,
+      "lastLatency": 18,
       "consecutiveFailures": 0
     },
     {
       "ip": "149.112.112.112",
       "name": "Quad9 Secondary",
-      "latency": 25,
+      "latency": 29,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -130,13 +130,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 9,
+      "lastLatency": 25,
       "consecutiveFailures": 0
     },
     {
       "ip": "208.67.220.220",
       "name": "OpenDNS Secondary",
-      "latency": 18,
+      "latency": 24,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -144,13 +144,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 9,
+      "lastLatency": 18,
       "consecutiveFailures": 0
     },
     {
       "ip": "94.140.14.14",
       "name": "AdGuard DNS Primary",
-      "latency": 18,
+      "latency": 32,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -158,13 +158,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 9,
+      "lastLatency": 18,
       "consecutiveFailures": 0
     },
     {
       "ip": "94.140.15.15",
       "name": "AdGuard DNS Secondary",
-      "latency": 18,
+      "latency": 24,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -172,7 +172,7 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 9,
+      "lastLatency": 18,
       "consecutiveFailures": 0
     }
   ],
@@ -189,6 +189,6 @@
   "quarantineDurationSeconds": 60,
   "staleCacheWindowSeconds": 86400,
   "ecsIPv4PrefixLength": 24,
-  "llesThresholdMs": 250,
-  "pingIntervalSeconds": 5
+  "llesThresholdMs": 150,
+  "pingIntervalSeconds": 3
 }
