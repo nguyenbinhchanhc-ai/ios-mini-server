@@ -48,6 +48,41 @@ function measureEventLoopLag() {
 }
 setInterval(measureEventLoopLag, 1000);
 
+// Pre-warmed Vietnamese & Global domains list to build always-hot memory cache
+const POPULAR_DOMAINS = [
+    "google.com", "www.google.com", "google.com.vn",
+    "facebook.com", "www.facebook.com", "m.facebook.com",
+    "youtube.com", "www.youtube.com", "youtu.be",
+    "vnexpress.net", "zingnews.vn", "zalo.me", "zaloapp.com",
+    "tiktok.com", "www.tiktok.com", "vt.tiktok.com",
+    "shopee.vn", "lazada.vn", "tiki.vn",
+    "netflix.com", "github.com", "wikipedia.org",
+    "speedtest.net", "fast.com",
+    "cloudflare.com", "dns.google", "one.one.one.one"
+];
+
+function prewarmCache() {
+    console.log(`[Always-Hot Cache] Pre-warming memory cache with ${POPULAR_DOMAINS.length} popular domains...`);
+    POPULAR_DOMAINS.forEach(domain => {
+        [1, 28].forEach(qtype => {
+            const key = `${domain}_${qtype}`;
+            if (!dnsCache.has(key)) {
+                // Populate query weights to mark them as popular on startup
+                domainQueryWeights.set(domain, 3);
+                
+                const targetDNS = selectUpstreamDNS(domain, true);
+                const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
+                fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                    if (response) {
+                        const newTtl = extractTTL(response);
+                        setCache(domain, qtype, response, newTtl);
+                    }
+                }, true);
+            }
+        });
+    });
+}
+
 function recordServerHealth(server, isSuccess) {
     if (!server) return;
     if (!server.history) server.history = [];
@@ -633,9 +668,24 @@ function setCache(domain, qtype, responseBuffer, ttl) {
     if (dnsCache.has(key)) {
         dnsCache.delete(key);
     } else if (dnsCache.size >= MAX_CACHE_SIZE) {
-        const oldestKey = dnsCache.keys().next().value;
-        if (oldestKey) {
-            dnsCache.delete(oldestKey);
+        // Smart Eviction: Avoid evicting popular domains if possible
+        let evicted = false;
+        const cacheKeys = dnsCache.keys();
+        for (let i = 0; i < 50; i++) { // scan up to 50 oldest entries
+            const candidateKey = cacheKeys.next().value;
+            if (!candidateKey) break;
+            const candidateDomain = candidateKey.split('_')[0];
+            const weight = domainQueryWeights.get(candidateDomain) || 0;
+            if (weight < 2) { // not popular
+                dnsCache.delete(candidateKey);
+                evicted = true;
+                break;
+            }
+        }
+        if (!evicted) {
+            // Fallback to basic FIFO if all sampled are popular
+            const oldestKey = dnsCache.keys().next().value;
+            if (oldestKey) dnsCache.delete(oldestKey);
         }
     }
     dnsCache.set(key, {
@@ -1271,8 +1321,9 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
             racingDelay = 2; // parallel query immediately with a 2ms gap
         }
         
-        if (isHighPerformanceDomain(domain) && !congested) {
-            racingDelay = 0; // Force immediate parallel query for speedtest/CDN domains!
+        const isPopular = POPULAR_DOMAINS.includes(domain.toLowerCase()) || (domainQueryWeights.get(domain.toLowerCase()) || 0) >= 2;
+        if ((isHighPerformanceDomain(domain) || isPopular) && !congested) {
+            racingDelay = 0; // Force immediate parallel query for speedtest/CDN/popular domains!
             console.log(`[DNS Racing] Ultra-low latency mode activated for: ${domain}. Racing delay set to 0ms.`);
         } else if (primaryServer && !congested && !bypassRacingDelay) {
             const jitter = Math.abs((primaryServer.latency || 0) - (primaryServer.lastLatency || 0));
@@ -1614,8 +1665,9 @@ function startPingInterval() {
 }
 startPingInterval();
 setTimeout(measureUpstreamPool, 1000); // Check shortly after start
+setTimeout(prewarmCache, 2000); // Pre-warm RAM cache shortly after start
 setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
-setInterval(runPopularKeepAlive, 60000); // Always-Hot Cache prefetch and decay
+setInterval(runPopularKeepAlive, 20000); // Always-Hot Cache prefetch and decay (every 20s)
 
 function runCacheGC() {
     const now = Date.now();
@@ -1633,7 +1685,7 @@ function runCacheGC() {
 }
 
 function runPopularKeepAlive() {
-    const minPopularThreshold = 5;
+    const minPopularThreshold = 2;
     for (const [domain, count] of domainQueryWeights.entries()) {
         if (count >= minPopularThreshold) {
             [1, 28].forEach(qtype => {
