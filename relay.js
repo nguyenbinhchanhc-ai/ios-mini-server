@@ -519,6 +519,7 @@ function queryUpstreamDoH(dnsQueryBuffer, provider, callback) {
         path: path,
         method: 'POST',
         agent: dohAgent,
+        family: 4,
         headers: {
             'Accept': 'application/dns-message',
             'Content-Type': 'application/dns-message',
