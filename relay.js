@@ -118,7 +118,9 @@ function recordClientQuery(ip, userAgent, elapsed, domain, reqSize = 0, resSize 
             bytesReceived: 0,
             bytesSent: 0,
             upstreams: {},
-            timestamps: []
+            timestamps: [],
+            upstreamStats: {},
+            clientToServerRTT: null
         };
         clientRegistry.set(ip, client);
     }
@@ -147,6 +149,18 @@ function recordClientQuery(ip, userAgent, elapsed, domain, reqSize = 0, resSize 
     
     if (targetDNS) {
         client.upstreams[targetDNS] = (client.upstreams[targetDNS] || 0) + 1;
+        
+        // Record client-specific upstream latency stats
+        if (targetDNS !== "Local Cache" && targetDNS !== "GSLB Load Balancer") {
+            if (!client.upstreamStats) client.upstreamStats = {};
+            if (!client.upstreamStats[targetDNS]) {
+                client.upstreamStats[targetDNS] = { totalLatency: 0, count: 0, avg: 0 };
+            }
+            const stats = client.upstreamStats[targetDNS];
+            stats.totalLatency += elapsed;
+            stats.count++;
+            stats.avg = Math.round(stats.totalLatency / stats.count * 10) / 10;
+        }
     }
     
     client.timestamps.push(now);
@@ -196,6 +210,18 @@ function getClientsList() {
             ? Math.round(c.successCount / (c.successCount + c.errorCount) * 100)
             : 100;
             
+        let healthScore = 100;
+        if (c.queryCount > 0) {
+            const errorRate = c.errorCount / c.queryCount;
+            healthScore -= errorRate * 50;
+            const latPenalty = Math.min(30, (avgLat / 150) * 30);
+            healthScore -= latPenalty;
+            const jitter = (c.maxLatency || 0) - (c.minLatency || 0);
+            const jitterPenalty = Math.min(20, (jitter / 200) * 20);
+            healthScore -= jitterPenalty;
+            healthScore = Math.max(10, Math.round(healthScore));
+        }
+        
         return {
             ip: maskIP(c.ip),
             queryCount: c.queryCount,
@@ -212,7 +238,9 @@ function getClientsList() {
             bytesReceived: c.bytesReceived || 0,
             bytesSent: c.bytesSent || 0,
             qps: qps,
-            prefUpstream: prefUpstream
+            prefUpstream: prefUpstream,
+            healthScore: healthScore,
+            clientToServerRTT: c.clientToServerRTT !== undefined ? c.clientToServerRTT : null
         };
     }).sort((a, b) => b.queryCount - a.queryCount).slice(0, 50);
 }
@@ -297,7 +325,9 @@ function checkExpiredQuarantines() {
 setInterval(checkExpiredQuarantines, 5000);
 
 // WebSocket connection handler
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+    const clientIP = req ? (req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress) : null;
+    ws._socketIP = clientIP;
     wsClients.add(ws);
     
     // Send initial configuration and stats
@@ -307,6 +337,22 @@ wss.on('connection', (ws) => {
     } catch (e) {
         console.error("Error sending initial WS state:", e);
     }
+
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            if (data.type === 'ping') {
+                ws.send(JSON.stringify({ type: 'pong', id: data.id }));
+            } else if (data.type === 'client-rtt') {
+                if (ws._socketIP && clientRegistry.has(ws._socketIP)) {
+                    const client = clientRegistry.get(ws._socketIP);
+                    client.clientToServerRTT = data.rtt;
+                }
+            }
+        } catch (e) {
+            // Ignore parse errors
+        }
+    });
 
     ws.on('close', () => {
         wsClients.delete(ws);
@@ -995,7 +1041,7 @@ function isHighPerformanceDomain(domain) {
            d.includes("google");
 }
 
-function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, callback, hasECS = false) {
+function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, callback, hasECS = false, clientIP = "") {
     const key = `${domain.toLowerCase()}_${qtype}`;
     const originalIDBytes = Buffer.from([queryData[0], queryData[1]]);
     
@@ -1104,6 +1150,29 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     if (config.dnsRacingEnabled && secondUpstreamDNS) {
         queriesActive++;
         
+        // Evaluate client health score for dynamic racing optimization
+        let bypassRacingDelay = false;
+        if (clientIP && clientRegistry.has(clientIP)) {
+            const client = clientRegistry.get(clientIP);
+            let healthScore = 100;
+            if (client.queryCount > 0) {
+                const errorRate = client.errorCount / client.queryCount;
+                healthScore -= errorRate * 50;
+                const avgLat = client.totalLatency / client.queryCount;
+                const latPenalty = Math.min(30, (avgLat / 150) * 30);
+                healthScore -= latPenalty;
+                const jitter = (client.maxLatency || 0) - (client.minLatency || 0);
+                const jitterPenalty = Math.min(20, (jitter / 200) * 20);
+                healthScore -= jitterPenalty;
+                const clientHealth = Math.max(10, Math.round(healthScore));
+                
+                // Optimize: If client health is poor (< 80%), reduce racing delay to 2ms
+                if (clientHealth < 80) {
+                    bypassRacingDelay = true;
+                }
+            }
+        }
+        
         // Calculate Adaptive Racing Delay based on jitter of primary server
         const primaryServer = config.upstreamPool.find(s => s.ip === upstreamDNS);
         let racingDelay = config.dnsRacingDelayMs || 15;
@@ -1115,10 +1184,14 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
             racingDelay = Math.max(racingDelay * 4, 150);
         }
         
+        if (bypassRacingDelay && !congested) {
+            racingDelay = 2; // parallel query immediately with a 2ms gap
+        }
+        
         if (isHighPerformanceDomain(domain) && !congested) {
             racingDelay = 0; // Force immediate parallel query for speedtest/CDN domains!
             console.log(`[DNS Racing] Ultra-low latency mode activated for: ${domain}. Racing delay set to 0ms.`);
-        } else if (primaryServer && !congested) {
+        } else if (primaryServer && !congested && !bypassRacingDelay) {
             const jitter = Math.abs((primaryServer.latency || 0) - (primaryServer.lastLatency || 0));
             const primaryLatency = primaryServer.latency || 15;
             // Adaptive delay: shrink delay if latency is unstable
@@ -1140,32 +1213,84 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
 
 
 // Low-Latency Equal Share (LLES) Load Balancer DNS Selector
-function selectWeightedDNS() {
+function selectWeightedDNS(clientIP = "") {
     if (precalculatedLlesPool.length === 0) {
         rebuildLlesRoutingPool();
     }
-    if (precalculatedLlesPool.length === 1) {
-        return precalculatedLlesPool[0].ip;
-    }
     
-    let r = Math.random() * precalculatedLlesTotalWeight;
-    for (let i = 0; i < precalculatedLlesPool.length; i++) {
-        r -= precalculatedLlesPool[i].weight;
-        if (r <= 0) {
-            return precalculatedLlesPool[i].ip;
+    let pool = precalculatedLlesPool;
+    let totalWeight = precalculatedLlesTotalWeight;
+    
+    // Client-specific routing optimization
+    if (clientIP && clientRegistry.has(clientIP)) {
+        const client = clientRegistry.get(clientIP);
+        const upStats = client.upstreamStats;
+        
+        // Only optimize if client has gathered stats for at least 2 servers
+        const hasStats = upStats && Object.keys(upStats).length >= 2;
+        if (hasStats) {
+            let minClientLat = Infinity;
+            const globalPool = config.upstreamPool || [];
+            const activeServers = globalPool.filter(s => s.online !== false && !s.quarantined && !s.stabilizing);
+            
+            activeServers.forEach(s => {
+                const stats = upStats[s.ip];
+                if (stats && stats.avg > 0 && stats.avg < minClientLat) {
+                    minClientLat = stats.avg;
+                }
+            });
+            
+            if (minClientLat !== Infinity) {
+                const threshold = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
+                let clientWeights = [];
+                let clientTotalWeight = 0;
+                
+                activeServers.forEach(s => {
+                    const stats = upStats[s.ip];
+                    let isLowLat = false;
+                    
+                    if (stats && stats.avg > 0) {
+                        isLowLat = stats.avg <= minClientLat + threshold;
+                    } else {
+                        // Fallback to global server latency
+                        const minGlobalLat = Math.min(...activeServers.map(srv => srv.latency || 20));
+                        isLowLat = (s.latency || 20) <= minGlobalLat + threshold;
+                    }
+                    
+                    const weight = isLowLat ? 1.0 : 0.05;
+                    clientWeights.push({ ip: s.ip, weight });
+                    clientTotalWeight += weight;
+                });
+                
+                if (clientWeights.length > 0) {
+                    pool = clientWeights;
+                    totalWeight = clientTotalWeight;
+                }
+            }
         }
     }
     
-    return precalculatedLlesPool[0] ? precalculatedLlesPool[0].ip : "1.1.1.1";
+    if (pool.length === 0) return "1.1.1.1";
+    if (pool.length === 1) return pool[0].ip;
+    
+    let r = Math.random() * totalWeight;
+    for (let i = 0; i < pool.length; i++) {
+        r -= pool[i].weight;
+        if (r <= 0) {
+            return pool[i].ip;
+        }
+    }
+    
+    return pool[0] ? pool[0].ip : "1.1.1.1";
 }
 
 // Load Balancer DNS Selector
-function selectUpstreamDNS(domain, hasECS = false) {
+function selectUpstreamDNS(domain, hasECS = false, clientIP = "") {
     const algo = config.lbAlgorithm || "least-latency";
     
     // Fast path: Least Latency is default and directly uses precalculated LLES pool
     if (algo === "least-latency") {
-        return selectWeightedDNS();
+        return selectWeightedDNS(clientIP);
     }
     
     const pool = config.upstreamPool || [];
@@ -1601,7 +1726,7 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
             lastSeenClientIP = clientIP; // Update last seen client IP for background queries
         }
         
-        const targetDNS = selectUpstreamDNS(domain, hasECS);
+        const targetDNS = selectUpstreamDNS(domain, hasECS, clientIP);
         
         fetchFromUpstreamDeduplicated(queryWithEcs, originalDomain, qtype, targetDNS, (response, isSecondary) => {
             if (response) {
@@ -1646,7 +1771,7 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
                 }
                 completeQuery(Buffer.alloc(0), false, false, "", "", targetDNS);
             }
-        }, hasECS);
+        }, hasECS, clientIP);
     }
 }
 

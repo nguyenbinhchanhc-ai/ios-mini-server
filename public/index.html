@@ -381,9 +381,14 @@
                 </h1>
                 <p>Cân bằng tải DNS & Định hướng lưu lượng thông minh</p>
             </div>
-            <div class="status-badge">
-                <div class="status-dot"></div>
-                <span>Hoạt động</span>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <div class="status-badge" id="clientServerRttBadge" style="background: rgba(96, 165, 250, 0.1); color: #60a5fa; font-weight: 600; font-family: monospace; border: 1px solid rgba(96, 165, 250, 0.15); display: none; font-size: 0.75rem;">
+                    RTT: - ms
+                </div>
+                <div class="status-badge">
+                    <div class="status-dot"></div>
+                    <span>Hoạt động</span>
+                </div>
             </div>
         </header>
 
@@ -534,6 +539,7 @@
                                 <tr>
                                     <th style="padding-left: 0.75rem; width: 180px;">Thiết bị / IP</th>
                                     <th style="text-align: center; width: 80px;">Trạng thái</th>
+                                    <th style="text-align: center; width: 100px;">Sức khỏe mạng</th>
                                     <th style="text-align: center; width: 100px;">Lượt truy vấn</th>
                                     <th style="text-align: center; width: 120px;">Tỷ lệ Cache Hit</th>
                                     <th style="text-align: center; width: 150px;">Độ trễ (Min/Avg/Max)</th>
@@ -544,7 +550,7 @@
                                 </tr>
                             </thead>
                             <tbody id="dnsDevicesList">
-                                <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Đang tải danh sách thiết bị...</td></tr>
+                                <tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Đang tải danh sách thiết bị...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -1006,7 +1012,7 @@
             const devicesList = document.getElementById('dnsDevicesList');
             const clientsList = dnsConfig.clientsList || [];
             if (clientsList.length === 0) {
-                devicesList.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Chưa có thiết bị kết nối nào được ghi nhận</td></tr>';
+                devicesList.innerHTML = '<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Chưa có thiết bị kết nối nào được ghi nhận</td></tr>';
             } else {
                 devicesList.innerHTML = clientsList.map(c => {
                     let lastSeenText = "Vừa xong";
@@ -1025,15 +1031,33 @@
                         statusBadge = `<span style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; font-size: 0.7rem;">Idle</span>`;
                     }
                     
+                    let rttElement = '';
+                    if (c.clientToServerRTT !== null && c.clientToServerRTT !== undefined) {
+                        rttElement = `<span style="font-size: 0.7rem; color: #60a5fa; font-family: monospace; margin-top: 0.15rem;">⚡ RTT: ${c.clientToServerRTT}ms (Dashboard)</span>`;
+                    }
+                    
+                    let healthColor = 'var(--success)';
+                    let healthText = 'Tốt';
+                    if (c.healthScore < 70) {
+                        healthColor = 'var(--danger)';
+                        healthText = 'Kém / Nghẽn';
+                    } else if (c.healthScore < 90) {
+                        healthColor = '#f59e0b';
+                        healthText = 'Ổn định';
+                    }
+                    const healthBadge = `<span style="background: rgba(0,0,0,0.2); border: 1px solid ${healthColor}40; color: ${healthColor}; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; font-size: 0.7rem; display: inline-block;">${c.healthScore}% (${healthText})</span>`;
+                    
                     return `
                         <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255, 255, 255, 0.01)'" onmouseout="this.style.backgroundColor='transparent'">
                             <td style="padding: 0.6rem 0.5rem 0.6rem 0.75rem;">
                                 <div style="display: flex; flex-direction: column;">
                                     <strong>${c.ip}</strong>
                                     <span style="font-size: 0.72rem; color: var(--text-muted);">${c.userAgent}</span>
+                                    ${rttElement}
                                 </div>
                             </td>
                             <td style="text-align: center; vertical-align: middle;">${statusBadge}</td>
+                            <td style="text-align: center; vertical-align: middle;">${healthBadge}</td>
                             <td style="text-align: center;">
                                 <div style="display: flex; flex-direction: column; align-items: center;">
                                     <span style="font-weight: bold; color: var(--text-main);">${c.queryCount.toLocaleString()}</span>
@@ -1178,17 +1202,59 @@
 
         // Websocket connection with auto-reconnect
         let ws;
+        const pendingPings = new Map(); // Key: pingId, Value: startTime
+        let pingIntervalId = null;
+
+        function handlePongReceived(pingId) {
+            const startTime = pendingPings.get(pingId);
+            if (startTime !== undefined) {
+                pendingPings.delete(pingId);
+                const rtt = Math.round(performance.now() - startTime);
+                
+                // Report RTT back to server so it registers under our IP
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'client-rtt', rtt: rtt }));
+                }
+                
+                // Display RTT in the header next to status dot
+                const rttBadge = document.getElementById('clientServerRttBadge');
+                if (rttBadge) {
+                    rttBadge.innerText = `RTT: ${rtt} ms`;
+                    rttBadge.style.display = 'inline-block';
+                }
+            }
+        }
+
         function connectWebSocket() {
+            if (pingIntervalId) {
+                clearInterval(pingIntervalId);
+                pingIntervalId = null;
+            }
+
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const wsUrl = `${protocol}://${window.location.host}`;
             ws = new WebSocket(wsUrl);
             
+            ws.onopen = () => {
+                console.log("WebSocket connected.");
+                // Periodically ping server to measure client-to-server RTT
+                pingIntervalId = setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        const pingId = Math.random().toString();
+                        pendingPings.set(pingId, performance.now());
+                        ws.send(JSON.stringify({ type: 'ping', id: pingId }));
+                    }
+                }, 5000);
+            };
+
             ws.onmessage = (event) => {
                 try {
                     const payload = JSON.parse(event.data);
                     if (payload.type === 'update') {
                         dnsConfig = payload;
                         updateUI();
+                    } else if (payload.type === 'pong') {
+                        handlePongReceived(payload.id);
                     }
                 } catch (e) {
                     console.error("WS parse error:", e);
@@ -1197,6 +1263,14 @@
             
             ws.onclose = () => {
                 console.log("WebSocket connection closed. Reconnecting in 3 seconds...");
+                if (pingIntervalId) {
+                    clearInterval(pingIntervalId);
+                    pingIntervalId = null;
+                }
+                const rttBadge = document.getElementById('clientServerRttBadge');
+                if (rttBadge) {
+                    rttBadge.style.display = 'none';
+                }
                 setTimeout(connectWebSocket, 3000);
             };
             
