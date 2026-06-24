@@ -27,6 +27,7 @@ let config = {};
 let logs = [];
 const domainQueryWeights = new Map();
 let lastSeenClientIP = "115.79.0.1"; // Track client IP for background queries
+const clientRegistry = new Map(); // Key: clientIP, Value: { ip, firstSeen, lastSeen, queryCount, totalLatency, userAgent, lastDomain }
 
 // WebSocket client registry
 const wsClients = new Set();
@@ -45,6 +46,175 @@ function recordServerHealth(server, isSuccess) {
     }
     const successes = server.history.filter(h => h === true).length;
     server.successRate = Math.round((successes / server.history.length) * 100);
+}
+
+function parseUserAgent(ua) {
+    if (!ua) return "Không xác định";
+    const lowercase = ua.toLowerCase();
+    
+    // Command line tools or APIs
+    if (lowercase.includes("curl") || lowercase.includes("wget")) {
+        return "⚙️ CLI Client (curl/wget)";
+    }
+    if (lowercase.includes("go-http-client") || lowercase.includes("okhttp") || lowercase.includes("python-requests") || lowercase.includes("node-fetch") || lowercase.includes("axios")) {
+        return "☕ API/Library Client";
+    }
+    
+    // Main OS
+    if (lowercase.includes("iphone") || lowercase.includes("ipad") || lowercase.includes("ipod") || lowercase.includes("cfnetwork") || lowercase.includes("darwin")) {
+        return "📱 iOS / Apple Device";
+    }
+    if (lowercase.includes("android")) {
+        return "🤖 Android Device";
+    }
+    if (lowercase.includes("windows")) {
+        return "💻 Windows PC";
+    }
+    if (lowercase.includes("macintosh") || lowercase.includes("mac os")) {
+        return "🖥️ macOS Device";
+    }
+    if (lowercase.includes("linux")) {
+        return "🐧 Linux Client";
+    }
+    return "🌐 Web/HTTP Client";
+}
+
+function maskIP(ip) {
+    if (!ip) return "Unknown";
+    if (ip.includes(':')) {
+        const parts = ip.split(':');
+        return parts.slice(0, 3).join(':') + '::xxxx';
+    } else {
+        const parts = ip.split('.');
+        if (parts.length === 4) {
+            return `${parts[0]}.${parts[1]}.${parts[2]}.xxx`;
+        }
+        return ip;
+    }
+}
+
+function recordClientQuery(ip, userAgent, elapsed, domain, reqSize = 0, resSize = 0, fromCache = false, isError = false, targetDNS = "") {
+    if (!ip || ip === "127.0.0.1" || ip === "::1" || ip.startsWith("10.0.0.")) return;
+    const now = Date.now();
+    const parsedUA = parseUserAgent(userAgent);
+    
+    let client = clientRegistry.get(ip);
+    if (!client) {
+        client = {
+            ip: ip,
+            firstSeen: now,
+            lastSeen: now,
+            queryCount: 0,
+            totalLatency: 0,
+            minLatency: elapsed,
+            maxLatency: elapsed,
+            userAgent: parsedUA,
+            rawUA: userAgent,
+            lastDomain: domain,
+            cacheHits: 0,
+            cacheMisses: 0,
+            successCount: 0,
+            errorCount: 0,
+            bytesReceived: 0,
+            bytesSent: 0,
+            upstreams: {},
+            timestamps: []
+        };
+        clientRegistry.set(ip, client);
+    }
+    
+    client.queryCount++;
+    client.totalLatency += elapsed;
+    client.minLatency = Math.min(client.minLatency, elapsed);
+    client.maxLatency = Math.max(client.maxLatency, elapsed);
+    client.lastSeen = now;
+    client.lastDomain = domain;
+    
+    if (fromCache) {
+        client.cacheHits++;
+    } else {
+        client.cacheMisses++;
+    }
+    
+    if (isError) {
+        client.errorCount++;
+    } else {
+        client.successCount++;
+    }
+    
+    client.bytesReceived += reqSize;
+    client.bytesSent += resSize;
+    
+    if (targetDNS) {
+        client.upstreams[targetDNS] = (client.upstreams[targetDNS] || 0) + 1;
+    }
+    
+    client.timestamps.push(now);
+    if (client.timestamps.length > 20) {
+        client.timestamps.shift();
+    }
+    
+    // Auto-prune old clients if the registry grows too large
+    if (clientRegistry.size > 1000) {
+        const pruneThreshold = now - 24 * 3600 * 1000;
+        for (const [key, value] of clientRegistry.entries()) {
+            if (value.lastSeen < pruneThreshold) {
+                clientRegistry.delete(key);
+            }
+        }
+    }
+}
+
+function getClientsList() {
+    return Array.from(clientRegistry.values()).map(c => {
+        const avgLat = c.queryCount > 0 ? Math.round(c.totalLatency / c.queryCount * 10) / 10 : 0;
+        
+        let qps = 0;
+        if (c.timestamps && c.timestamps.length > 1) {
+            const timeDiff = (c.timestamps[c.timestamps.length - 1] - c.timestamps[0]) / 1000;
+            if (timeDiff > 0.5) {
+                qps = Math.round((c.timestamps.length - 1) / timeDiff * 10) / 10;
+            }
+        }
+        
+        let prefUpstream = "-";
+        let maxCount = 0;
+        if (c.upstreams) {
+            for (const [up, count] of Object.entries(c.upstreams)) {
+                if (count > maxCount) {
+                    maxCount = count;
+                    prefUpstream = up;
+                }
+            }
+        }
+        
+        const cacheHitRate = (c.cacheHits + c.cacheMisses) > 0 
+            ? Math.round(c.cacheHits / (c.cacheHits + c.cacheMisses) * 100) 
+            : 0;
+            
+        const successRate = (c.successCount + c.errorCount) > 0
+            ? Math.round(c.successCount / (c.successCount + c.errorCount) * 100)
+            : 100;
+            
+        return {
+            ip: maskIP(c.ip),
+            queryCount: c.queryCount,
+            avgLatency: avgLat,
+            minLatency: c.minLatency !== undefined ? Math.round(c.minLatency * 10) / 10 : avgLat,
+            maxLatency: c.maxLatency !== undefined ? Math.round(c.maxLatency * 10) / 10 : avgLat,
+            userAgent: c.userAgent,
+            lastDomain: c.lastDomain,
+            lastSeenAgoSeconds: Math.round((Date.now() - c.lastSeen) / 1000),
+            cacheHits: c.cacheHits || 0,
+            cacheMisses: c.cacheMisses || 0,
+            cacheHitRate: cacheHitRate,
+            successRate: successRate,
+            bytesReceived: c.bytesReceived || 0,
+            bytesSent: c.bytesSent || 0,
+            qps: qps,
+            prefUpstream: prefUpstream
+        };
+    }).sort((a, b) => b.queryCount - a.queryCount).slice(0, 50);
 }
 
 // Upstream UDP Client Sockets Pool
@@ -202,13 +372,21 @@ function getServerStatus() {
     };
 }
 
-function isNetworkCongested() {
+function getCongestionLevel() {
     const memUsage = process.memoryUsage().heapUsed; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
     const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    const cpuLoad = os.loadavg()[0];
     
-    // Congested if average latency is over 200ms, or RAM > 350MB, or CPU load avg > 2.0
-    return avgLat > 200 || memUsageMb > 350 || os.loadavg()[0] > 2.0;
+    const latCont = Math.min(100, (avgLat / 200) * 100);
+    const ramCont = Math.min(100, (memUsageMb / 380) * 100);
+    const cpuCont = Math.min(100, (cpuLoad / 2.5) * 100);
+    
+    return Math.round(Math.max(latCont, ramCont, cpuCont));
+}
+
+function isNetworkCongested() {
+    return getCongestionLevel() > 70;
 }
 
 function getWSUpdatePayload() {
@@ -217,6 +395,9 @@ function getWSUpdatePayload() {
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
         avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
+    
+    const clientsList = getClientsList();
+
     return {
         type: 'update',
         running: true,
@@ -224,6 +405,9 @@ function getWSUpdatePayload() {
         stats: stats,
         serverStatus: getServerStatus(),
         minCacheTtlSeconds: config.minCacheTtlSeconds || 300,
+        activeDevicesCount: clientRegistry.size,
+        clientsList: clientsList,
+        congestionLevel: getCongestionLevel(),
         
         // Load Balancer fields
         upstreamPool: (config.upstreamPool || []).map(s => {
@@ -1290,8 +1474,7 @@ app.use((req, res, next) => {
 app.use(express.static(path.join(__dirname, 'public')));
 
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
-// MARK: - DNS-over-HTTPS (DoH) Route Handler
-function handleDoH(queryData, clientIP, hostHeader, callback) {
+function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
     const startTime = Date.now();
     
     const parsed = parseDNSQuery(queryData);
@@ -1327,6 +1510,39 @@ function handleDoH(queryData, clientIP, hostHeader, callback) {
         const latency = Date.now() - startTime;
         totalLatency += latency;
         latencyCount++;
+        
+        let isError = false;
+        if (responseBuffer && responseBuffer.length >= 4) {
+            const rcode = responseBuffer[3] & 0x0F;
+            if (rcode !== 0) {
+                isError = true;
+            }
+        } else {
+            isError = true;
+        }
+
+        let destLabel = targetDNS;
+        if (isGslb) {
+            destLabel = "GSLB Load Balancer";
+        } else if (fromCache || sourceOverride === "stale" || sourceOverride === "cache") {
+            destLabel = "Local Cache";
+        }
+        if (!destLabel) {
+            destLabel = "Unknown Upstream";
+        }
+
+        // Record client query metrics
+        recordClientQuery(
+            clientIP, 
+            userAgent, 
+            latency, 
+            domain, 
+            queryData ? queryData.length : 0, 
+            responseBuffer ? responseBuffer.length : 0, 
+            fromCache || sourceOverride === "stale" || sourceOverride === "cache", 
+            isError, 
+            destLabel
+        );
         
         const logDomain = (domain !== originalDomain) ? `${domain} (${originalDomain})` : domain;
         let source = isGslb ? "gslb" : (fromCache ? "cache" : "upstream");
@@ -1442,7 +1658,7 @@ app.post('/dns-query', (req, res) => {
         res.status(400).send("Bad Request: Empty binary payload");
         return;
     }
-    handleDoH(queryData, clientIP, req.headers.host, (responseData) => {
+    handleDoH(queryData, clientIP, req.headers.host, req.headers['user-agent'] || '', (responseData) => {
         res.setHeader('Content-Type', 'application/dns-message');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(responseData);
@@ -1461,7 +1677,7 @@ app.get('/dns-query', (req, res) => {
     const mod = base64.length % 4;
     if (mod > 0) base64 += "=".repeat(4 - mod);
     const queryData = Buffer.from(base64, 'base64');
-    handleDoH(queryData, clientIP, req.headers.host, (responseData) => {
+    handleDoH(queryData, clientIP, req.headers.host, req.headers['user-agent'] || '', (responseData) => {
         res.setHeader('Content-Type', 'application/dns-message');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.send(responseData);
@@ -1529,6 +1745,9 @@ app.get('/dns/config', (req, res) => {
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
         avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
     };
+    
+    const clientsList = getClientsList();
+
     res.json({
         running: true,
         logs: logs,
@@ -1540,6 +1759,9 @@ app.get('/dns/config', (req, res) => {
         groqModel: "",
         serverStatus: getServerStatus(),
         minCacheTtlSeconds: config.minCacheTtlSeconds || 300,
+        activeDevicesCount: clientRegistry.size,
+        clientsList: clientsList,
+        congestionLevel: getCongestionLevel(),
         
         // AI Load Balancer Brain fields
         isAILBRunning: false,

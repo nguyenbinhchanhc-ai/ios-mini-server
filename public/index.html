@@ -413,7 +413,14 @@
                 <div class="stat-card-title">Trạng thái Server</div>
                 <div class="stat-card-val" id="dnsStatServerStatus" style="font-weight: bold; color: #10b981;">Ổn định</div>
             </div>
-
+            <div class="stat-card">
+                <div class="stat-card-title">Thiết bị kết nối</div>
+                <div class="stat-card-val purple-val" id="dnsStatActiveDevices">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-title">Giảm nghẽn mạng</div>
+                <div class="stat-card-val" id="dnsStatCongestion" style="font-weight: bold; color: #10b981;">An toàn (0%)</div>
+            </div>
         </div>
 
         <div class="grid">
@@ -498,6 +505,7 @@
                     <div class="tab" id="tab-upstream" onclick="switchTab('upstream')">Điều phối DNS</div>
                     <div class="tab" id="tab-gslb" onclick="switchTab('gslb')">Cân bằng tải GSLB</div>
                     <div class="tab" id="tab-lles" onclick="switchTab('lles')">Giám sát LLES</div>
+                    <div class="tab" id="tab-devices" onclick="switchTab('devices')">Giám sát Thiết bị</div>
                 </div>
                 
                 <!-- Logs subtab -->
@@ -513,6 +521,30 @@
                             </thead>
                             <tbody id="dnsLogsList">
                                 <!-- Query rows -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- Connected Devices subtab -->
+                <div id="panel-devices" class="subtab-content">
+                    <div style="height: 380px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; border: 1px solid var(--card-border);">
+                        <table class="dns-log-table">
+                            <thead>
+                                <tr>
+                                    <th style="padding-left: 0.75rem; width: 180px;">Thiết bị / IP</th>
+                                    <th style="text-align: center; width: 80px;">Trạng thái</th>
+                                    <th style="text-align: center; width: 100px;">Lượt truy vấn</th>
+                                    <th style="text-align: center; width: 120px;">Tỷ lệ Cache Hit</th>
+                                    <th style="text-align: center; width: 150px;">Độ trễ (Min/Avg/Max)</th>
+                                    <th style="text-align: center; width: 130px;">Băng thông (Gửi/Nhận)</th>
+                                    <th style="text-align: center; width: 120px;">DNS Ưa Thích</th>
+                                    <th>Tên miền cuối</th>
+                                    <th style="text-align: right; padding-right: 0.75rem; width: 120px;">Hoạt động cuối</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dnsDevicesList">
+                                <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Đang tải danh sách thiết bị...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -623,6 +655,14 @@
         const toastContainer = document.getElementById('toastContainer');
         let dnsConfig = {};
 
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+        }
+
         function showToast(message, type = 'success') {
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
@@ -676,6 +716,23 @@
             const statusEl = document.getElementById('dnsStatServerStatus');
             statusEl.innerText = server.status || 'Ổn định';
             statusEl.style.color = server.statusClass === 'stable' ? '#10b981' : (server.statusClass === 'warning' ? '#f59e0b' : '#ef4444');
+            
+            // Active Devices Count Card
+            document.getElementById('dnsStatActiveDevices').innerText = dnsConfig.activeDevicesCount || 0;
+
+            // Network Congestion Card
+            const congestionPercent = dnsConfig.congestionLevel !== undefined ? dnsConfig.congestionLevel : 0;
+            const congestionEl = document.getElementById('dnsStatCongestion');
+            if (congestionPercent > 75) {
+                congestionEl.innerText = `Nghẽn cao (${congestionPercent}%)`;
+                congestionEl.style.color = '#ef4444'; // Red
+            } else if (congestionPercent > 40) {
+                congestionEl.innerText = `Cảnh báo (${congestionPercent}%)`;
+                congestionEl.style.color = '#f59e0b'; // Orange
+            } else {
+                congestionEl.innerText = `An toàn (${congestionPercent}%)`;
+                congestionEl.style.color = '#10b981'; // Green
+            }
             
             // LLES Settings & Monitoring
             document.getElementById('dnsRacingEnabled').checked = !!dnsConfig.dnsRacingEnabled;
@@ -943,6 +1000,71 @@
                     }
                     return `<tr><td colspan="3" style="padding-left: 0.75rem; color: var(--text-muted);">${line}</td></tr>`;
                 }).reverse().join('');
+            }
+
+            // Devices
+            const devicesList = document.getElementById('dnsDevicesList');
+            const clientsList = dnsConfig.clientsList || [];
+            if (clientsList.length === 0) {
+                devicesList.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Chưa có thiết bị kết nối nào được ghi nhận</td></tr>';
+            } else {
+                devicesList.innerHTML = clientsList.map(c => {
+                    let lastSeenText = "Vừa xong";
+                    if (c.lastSeenAgoSeconds > 0) {
+                        if (c.lastSeenAgoSeconds < 60) lastSeenText = `${c.lastSeenAgoSeconds} giây trước`;
+                        else {
+                            const mins = Math.floor(c.lastSeenAgoSeconds / 60);
+                            lastSeenText = `${mins} phút trước`;
+                        }
+                    }
+                    
+                    let statusBadge = `<span style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; font-size: 0.7rem;">Offline</span>`;
+                    if (c.lastSeenAgoSeconds < 60) {
+                        statusBadge = `<span style="background: rgba(16, 185, 129, 0.15); color: var(--success); padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; font-size: 0.7rem;">Active</span>`;
+                    } else if (c.lastSeenAgoSeconds < 900) {
+                        statusBadge = `<span style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; font-size: 0.7rem;">Idle</span>`;
+                    }
+                    
+                    return `
+                        <tr style="border-bottom: 1px solid rgba(255, 255, 255, 0.03); transition: background 0.2s;" onmouseover="this.style.backgroundColor='rgba(255, 255, 255, 0.01)'" onmouseout="this.style.backgroundColor='transparent'">
+                            <td style="padding: 0.6rem 0.5rem 0.6rem 0.75rem;">
+                                <div style="display: flex; flex-direction: column;">
+                                    <strong>${c.ip}</strong>
+                                    <span style="font-size: 0.72rem; color: var(--text-muted);">${c.userAgent}</span>
+                                </div>
+                            </td>
+                            <td style="text-align: center; vertical-align: middle;">${statusBadge}</td>
+                            <td style="text-align: center;">
+                                <div style="display: flex; flex-direction: column; align-items: center;">
+                                    <span style="font-weight: bold; color: var(--text-main);">${c.queryCount.toLocaleString()}</span>
+                                    <span style="font-size: 0.7rem; color: var(--text-muted);">${c.qps.toFixed(1)} QPS</span>
+                                </div>
+                            </td>
+                            <td style="text-align: center;">
+                                <div style="display: flex; flex-direction: column; align-items: center;">
+                                    <span style="font-weight: bold; color: var(--success);">${c.cacheHitRate}%</span>
+                                    <span style="font-size: 0.7rem; color: var(--text-muted);">${c.cacheHits} / ${c.cacheMisses}</span>
+                                </div>
+                            </td>
+                            <td style="text-align: center; font-family: monospace;">
+                                <span style="color: var(--success);">${c.minLatency.toFixed(1)}</span> /
+                                <strong style="color: #60a5fa;">${c.avgLatency.toFixed(1)}</strong> /
+                                <span style="color: var(--danger);">${c.maxLatency.toFixed(1)}</span> ms
+                            </td>
+                            <td style="text-align: center; font-family: monospace; font-size: 0.75rem;">
+                                <div>⬇️ ${formatBytes(c.bytesReceived)}</div>
+                                <div style="color: var(--text-muted);">⬆️ ${formatBytes(c.bytesSent)}</div>
+                            </td>
+                            <td style="text-align: center; font-size: 0.75rem;">
+                                <span style="background: rgba(59, 130, 246, 0.1); color: #60a5fa; padding: 0.15rem 0.4rem; border-radius: 4px; border: 1px solid rgba(59, 130, 246, 0.15); display: inline-block;">
+                                    ${c.prefUpstream}
+                                </span>
+                            </td>
+                            <td style="font-family: monospace; color: var(--text-muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${c.lastDomain || '-'}</td>
+                            <td style="text-align: right; padding-right: 0.75rem; color: var(--text-muted); font-size: 0.75rem;">${lastSeenText}</td>
+                        </tr>
+                    `;
+                }).join('');
             }
         }
 
