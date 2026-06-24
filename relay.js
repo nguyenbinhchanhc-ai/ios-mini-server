@@ -435,6 +435,7 @@ const IGNORED_DOMAINS = new Set([
 
 let totalLatency = 0;
 let latencyCount = 0;
+let averageLatencyEMA = 30; // Global real-time moving average latency (default 30ms)
 
 // Precalculated LLES routing pool to optimize selection performance to O(1)
 let precalculatedLlesPool = [];
@@ -442,11 +443,11 @@ let precalculatedLlesTotalWeight = 0;
 
 function rebuildLlesRoutingPool() {
     const pool = config.upstreamPool || [];
-    // Only include servers that are online, not quarantined, and NOT stabilizing
-    const onlinePool = pool.filter(s => s.online !== false && !s.quarantined && !s.stabilizing && (s.latency || 0) < 9999);
+    // Include online, non-quarantined servers. Stabilizing servers are kept but will receive a weight penalty.
+    const onlinePool = pool.filter(s => s.online !== false && !s.quarantined && (s.latency || 0) < 9999);
     
     if (onlinePool.length === 0) {
-        // Fallback to any online, non-quarantined servers (including stabilizing ones) to avoid complete outage
+        // Fallback to any online, non-quarantined servers to avoid complete outage
         const fallbackPool = pool.filter(s => s.online !== false && !s.quarantined);
         const finalPool = fallbackPool.length > 0 ? fallbackPool : pool;
         precalculatedLlesPool = finalPool.map(s => ({ ip: s.ip, weight: 1.0 }));
@@ -467,9 +468,13 @@ function rebuildLlesRoutingPool() {
     
     precalculatedLlesPool = onlinePool.map(s => {
         const isLowLat = s.latency <= minLatency + threshold;
+        let weight = isLowLat ? 1.0 : 0.05;
+        if (s.stabilizing) {
+            weight *= 0.2; // 80% penalty for stabilizing servers
+        }
         return {
             ip: s.ip,
-            weight: isLowLat ? 1.0 : 0.05
+            weight: weight
         };
     });
     
@@ -591,7 +596,7 @@ function throttledBroadcastUpdate() {
 function getServerStatus() {
     const memUsage = process.memoryUsage().rss; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
-    const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    const avgLat = averageLatencyEMA;
     
     let status = "Ổn định";
     let statusClass = "stable"; // stable, warning, overloaded
@@ -619,7 +624,7 @@ function getServerStatus() {
 function getCongestionLevel() {
     const memUsage = process.memoryUsage().rss; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
-    const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    const avgLat = averageLatencyEMA;
     
     const latCont = Math.min(100, (avgLat / 200) * 100);
     const ramCont = Math.min(100, (memUsageMb / 380) * 100);
@@ -661,7 +666,7 @@ function getWSUpdatePayload() {
     }
     const avgClientRtt = rttCount > 0 ? Math.round(sumRtt / rttCount) : 50;
 
-    const baseAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    const baseAvgLatency = averageLatencyEMA;
     const stats = {
         total: config.stats.total,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
@@ -1105,10 +1110,7 @@ function initUpstreamSocketPool() {
                     const poolMinLatency = activeOnlinePool.length > 0 ? Math.min(...activeOnlinePool.map(s => s.latency || 15)) : 15;
                     const maxAllowedLatency = Math.max(250, poolMinLatency + (config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150));
                     
-                    // Smart Spike Detection:
-                    // 1. Absolute threshold check: raw elapsed latency is greater than maxAllowedLatency
-                    // 2. Relative spike check: raw elapsed latency is more than 2.5x the server's previous average latency (oldLatency), and elapsed is > 50ms
-                    const isSpike = (elapsed > maxAllowedLatency) || (oldLatency > 0 && elapsed > oldLatency * 2.5 && elapsed > 50);
+                    const isSpike = (elapsed > maxAllowedLatency);
                     
                     if (isSpike && !server.quarantined) {
                         if (!server.stabilizing) {
@@ -1396,7 +1398,10 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
     
     queryUpstream(queryData, upstreamDNS, (res) => onResponse(res, upstreamDNS), false);
     
-    if (config.dnsRacingEnabled && secondUpstreamDNS) {
+    const primaryServer = config.upstreamPool.find(s => s.ip === upstreamDNS);
+    const primaryIsSlowOrUnstable = !primaryServer || primaryServer.stabilizing || primaryServer.quarantined || (primaryServer.latency || 0) > 80;
+    
+    if (config.dnsRacingEnabled && secondUpstreamDNS && (primaryIsSlowOrUnstable || isNetworkCongested())) {
         queriesActive++;
         
         // Evaluate client health score for dynamic racing optimization
@@ -1423,7 +1428,6 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         }
         
         // Calculate Adaptive Racing Delay based on jitter of primary server
-        const primaryServer = config.upstreamPool.find(s => s.ip === upstreamDNS);
         let racingDelay = config.dnsRacingDelayMs || 15;
         
         const congested = isNetworkCongested();
@@ -2081,6 +2085,9 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
         totalLatency += latency;
         latencyCount++;
         
+        // Exponential Moving Average (EMA) to show real-time average latency
+        averageLatencyEMA = Math.round((averageLatencyEMA * 0.95 + latency * 0.05) * 10) / 10;
+        
         let isError = false;
         if (responseBuffer && responseBuffer.length >= 4) {
             const rcode = responseBuffer[3] & 0x0F;
@@ -2341,7 +2348,7 @@ app.get('/dns/config', (req, res) => {
     }
     const avgClientRtt = rttCount > 0 ? Math.round(sumRtt / rttCount) : 50;
 
-    const baseAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    const baseAvgLatency = averageLatencyEMA;
     const stats = {
         total: config.stats.total,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
