@@ -496,7 +496,7 @@ function getClientsList() {
 }
 
 // Upstream UDP Client Sockets Pool
-let SOCKET_POOL_SIZE = 100;
+let SOCKET_POOL_SIZE = 16;
 const upstreamSocketPool = [];
 let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
@@ -2165,9 +2165,9 @@ function runRAMCacheOptimizer() {
             config.staleCacheWindowSeconds = 2592000; // 30 days
             console.log(`[RAM Optimizer] Extended SWR stale window to 30 days.`);
         }
-        if (SOCKET_POOL_SIZE < 300) {
-            resizeUpstreamSocketPool(300);
-            console.log(`[RAM Optimizer] Upgraded SOCKET_POOL_SIZE to 300 sockets.`);
+        if (SOCKET_POOL_SIZE < 32) {
+            resizeUpstreamSocketPool(32);
+            console.log(`[RAM Optimizer] Upgraded SOCKET_POOL_SIZE to 32 sockets.`);
         }
         if (dynamicPrewarmLevel < 2) {
             dynamicPrewarmLevel = 2;
@@ -2193,8 +2193,8 @@ function runRAMCacheOptimizer() {
         MAX_CACHE_SIZE = 50000;
         config.staleCacheWindowSeconds = 3600; // 1 hour
         pruneCacheToSize(50000);
-        if (SOCKET_POOL_SIZE > 50) {
-            resizeUpstreamSocketPool(50);
+        if (SOCKET_POOL_SIZE > 16) {
+            resizeUpstreamSocketPool(16);
         }
         if (global.gc) {
             try {
