@@ -34,7 +34,7 @@ const wsClients = new Set();
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
-const MAX_CACHE_SIZE = 250000;
+let MAX_CACHE_SIZE = 250000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
 
 // Event Loop Lag Monitor (Precise Process CPU Load Tracking)
@@ -421,7 +421,7 @@ function getClientsList() {
 }
 
 // Upstream UDP Client Sockets Pool
-const SOCKET_POOL_SIZE = 100;
+let SOCKET_POOL_SIZE = 100;
 const upstreamSocketPool = [];
 let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
@@ -589,7 +589,7 @@ function throttledBroadcastUpdate() {
 }
 
 function getServerStatus() {
-    const memUsage = process.memoryUsage().heapUsed; // bytes
+    const memUsage = process.memoryUsage().rss; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
     const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
     
@@ -617,7 +617,7 @@ function getServerStatus() {
 }
 
 function getCongestionLevel() {
-    const memUsage = process.memoryUsage().heapUsed; // bytes
+    const memUsage = process.memoryUsage().rss; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
     const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
     
@@ -1784,6 +1784,8 @@ setTimeout(measureUpstreamPool, 1000); // Check shortly after start
 setTimeout(prewarmCache, 2000); // Pre-warm RAM cache shortly after start
 setInterval(runCacheGC, 60000); // Cache Garbage Collector every 60s
 setInterval(runPopularKeepAlive, 20000); // Always-Hot Cache prefetch and decay (every 20s)
+let dynamicPrewarmLevel = 1;
+setInterval(runRAMCacheOptimizer, 30000); // Dynamic RAM cache optimizer (every 30s)
 
 function runCacheGC() {
     const now = Date.now();
@@ -1841,6 +1843,190 @@ function runPopularKeepAlive() {
             domainQueryWeights.delete(domain);
         } else {
             domainQueryWeights.set(domain, Math.floor(count * 0.5));
+        }
+    }
+}
+
+function resizeUpstreamSocketPool(newSize) {
+    if (newSize > SOCKET_POOL_SIZE) {
+        SOCKET_POOL_SIZE = newSize;
+        initUpstreamSocketPool();
+    } else if (newSize < SOCKET_POOL_SIZE) {
+        // Close and clean up excess sockets
+        for (let i = newSize; i < SOCKET_POOL_SIZE; i++) {
+            if (upstreamSocketPool[i]) {
+                try {
+                    upstreamSocketPool[i].close();
+                } catch (e) {}
+                upstreamSocketPool[i] = null;
+            }
+        }
+        upstreamSocketPool.length = newSize;
+        SOCKET_POOL_SIZE = newSize;
+    }
+}
+
+function pruneCacheToSize(targetSize) {
+    if (dnsCache.size <= targetSize) return;
+    const toDelete = dnsCache.size - targetSize;
+    let deleted = 0;
+    const cacheKeys = dnsCache.keys();
+    
+    // Evict cold/old entries first
+    for (const key of cacheKeys) {
+        if (deleted >= toDelete) break;
+        const domain = key.split('_')[0];
+        const weight = domainQueryWeights.get(domain) || 0;
+        if (weight < 2) {
+            dnsCache.delete(key);
+            deleted++;
+        }
+    }
+    
+    // If still need to delete, evict FIFO
+    if (deleted < toDelete) {
+        for (const key of dnsCache.keys()) {
+            if (deleted >= toDelete) break;
+            dnsCache.delete(key);
+            deleted++;
+        }
+    }
+    console.log(`[RAM Optimizer] Pruned ${deleted} entries to reach target size ${targetSize}. Current size: ${dnsCache.size}`);
+}
+
+function triggerExtendedPrewarm() {
+    console.log(`[Always-Hot Cache] RAM is abundant. Dynamic pre-warming activated. Launching Extended Tier (Tier 2) pre-warming...`);
+    
+    const EXTENDED_POPULAR_DOMAINS = [
+        "cloudfront.net", "fastly.net", "akamaihd.net", "edgecastcdn.net",
+        "doubleclick.net", "google-analytics.com", "googletagmanager.com",
+        "facebook.net", "adnxs.com", "rubiconproject.com", "pubmatic.com",
+        "openx.net", "appnexus.com", "outbrain.com", "taboola.com",
+        "criteo.com", "hotjar.com", "amplitude.com", "mixpanel.com",
+        "segment.io", "optimizely.com", "sentry.io", "bugsnag.com",
+        "vng.com.vn", "vinagame.com.vn", "admicro.vn", "eclick.vn",
+        "novaon.vn", "cleverads.vn", "mgid.com", "popads.net",
+        "shopee.co.th", "shopee.sg", "shopee.my", "shopee.id",
+        "githubusercontent.com", "npmjs.com", "yarnpkg.com",
+        "stackoverflow.com", "medium.com", "reddit.com", "imgur.com",
+        "vimeo.com", "dailymotion.com", "zoom.us", "slack.com",
+        "discord.com", "discord.gg", "spotify.com", "pinterest.com"
+    ];
+
+    const EXTENDED_SUBDOMAINS = [
+        "graph", "connect", "creative", "ads", "analytics", "pixel",
+        "tracker", "log", "telemetry", "events", "metrics", "stats",
+        "static-xx", "scontent", "scontent.xx", "video.xx",
+        "s1", "s2", "s3", "s4", "s5", "vnecdn", "zadn",
+        "znews-photo", "znews-static", "wpa", "zalocdn"
+    ];
+
+    const extDomains = [];
+    EXTENDED_POPULAR_DOMAINS.forEach(domain => {
+        extDomains.push(domain);
+        EXTENDED_SUBDOMAINS.forEach(sub => {
+            extDomains.push(`${sub}.${domain}`);
+        });
+    });
+
+    console.log(`[Always-Hot Cache] Generated ${extDomains.length} Extended Tier domains to warm up in RAM.`);
+
+    let index = 0;
+    const batchSize = 100;
+    const intervalMs = 800;
+
+    function processExtBatch() {
+        const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+        if (rssMb >= 250) {
+            console.log(`[Always-Hot Cache] RAM usage reached ${rssMb}MB. Halting Extended Tier pre-warming.`);
+            return;
+        }
+
+        const batch = extDomains.slice(index, index + batchSize);
+        if (batch.length === 0) {
+            console.log(`[Always-Hot Cache] Extended Tier pre-warming fully completed. Current cache size: ${dnsCache.size}`);
+            return;
+        }
+
+        batch.forEach(domain => {
+            [1, 28].forEach(qtype => {
+                const subnet = getClientSubnetPrefix(lastSeenClientIP || "115.79.0.1");
+                const cacheKey = `${domain}_${qtype}_${subnet}`;
+                if (!dnsCache.has(cacheKey)) {
+                    domainQueryWeights.set(domain, 3);
+                    const targetDNS = selectUpstreamDNS(domain, true);
+                    const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
+                    fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                        if (response) {
+                            const newTtl = extractTTL(response);
+                            setCache(domain, qtype, response, newTtl, lastSeenClientIP || "115.79.0.1");
+                        }
+                    }, true);
+                }
+            });
+        });
+
+        index += batchSize;
+        setTimeout(processExtBatch, intervalMs);
+    }
+
+    processExtBatch();
+}
+
+function runRAMCacheOptimizer() {
+    const mem = process.memoryUsage();
+    const rssMb = Math.round(mem.rss / 1024 / 1024);
+    const heapUsedMb = Math.round(mem.heapUsed / 1024 / 1024);
+    
+    console.log(`[RAM Optimizer] Current RSS: ${rssMb}MB, Heap Used: ${heapUsedMb}MB, Cache Size: ${dnsCache.size}`);
+    
+    if (rssMb < 150) {
+        if (MAX_CACHE_SIZE < 1000000) {
+            MAX_CACHE_SIZE = 1000000;
+            console.log(`[RAM Optimizer] RSS is low (${rssMb}MB). Upgraded MAX_CACHE_SIZE to 1,000,000.`);
+        }
+        if (!config.staleCacheWindowSeconds || config.staleCacheWindowSeconds < 2592000) {
+            config.staleCacheWindowSeconds = 2592000; // 30 days
+            console.log(`[RAM Optimizer] Extended SWR stale window to 30 days.`);
+        }
+        if (SOCKET_POOL_SIZE < 300) {
+            resizeUpstreamSocketPool(300);
+            console.log(`[RAM Optimizer] Upgraded SOCKET_POOL_SIZE to 300 sockets.`);
+        }
+        if (dynamicPrewarmLevel < 2) {
+            dynamicPrewarmLevel = 2;
+            triggerExtendedPrewarm();
+        }
+    } else if (rssMb < 300) {
+        if (MAX_CACHE_SIZE !== 500000) {
+            MAX_CACHE_SIZE = 500000;
+            console.log(`[RAM Optimizer] RSS is moderate (${rssMb}MB). Adjusted MAX_CACHE_SIZE to 500,000.`);
+        }
+    } else if (rssMb >= 300 && rssMb < 400) {
+        if (MAX_CACHE_SIZE > 200000) {
+            MAX_CACHE_SIZE = 200000;
+            console.log(`[RAM Optimizer] RSS is high (${rssMb}MB). Reduced MAX_CACHE_SIZE to 200,000.`);
+            pruneCacheToSize(200000);
+        }
+        if (config.staleCacheWindowSeconds > 86400) {
+            config.staleCacheWindowSeconds = 86400; // 24 hours
+            console.log(`[RAM Optimizer] Reduced SWR stale window to 24 hours.`);
+        }
+    } else {
+        console.warn(`[RAM Optimizer] CRITICAL RSS limit hit (${rssMb}MB)! Reclaiming RAM immediately...`);
+        MAX_CACHE_SIZE = 50000;
+        config.staleCacheWindowSeconds = 3600; // 1 hour
+        pruneCacheToSize(50000);
+        if (SOCKET_POOL_SIZE > 50) {
+            resizeUpstreamSocketPool(50);
+        }
+        if (global.gc) {
+            try {
+                global.gc();
+                console.log(`[RAM Optimizer] Executed V8 global GC.`);
+            } catch (e) {
+                console.error(`[RAM Optimizer] GC failed:`, e);
+            }
         }
     }
 }
