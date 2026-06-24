@@ -699,7 +699,7 @@
                 llesWeightsBars.innerHTML = '<div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 1rem;">Chưa có cấu hình máy chủ DNS nào.</div>';
             } else {
                 // Find min latency of online servers
-                const onlinePool = pool.filter(s => s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999);
+                const onlinePool = pool.filter(s => s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999 && !s.stabilizing);
                 let minLat = Infinity;
                 onlinePool.forEach(s => {
                     if (s.latency < minLat) minLat = s.latency;
@@ -773,7 +773,7 @@
                 }
 
                 // Find min latency of online servers for table LLES indicators
-                const onlinePoolForTable = pool.filter(s => s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999);
+                const onlinePoolForTable = pool.filter(s => s.online !== false && typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999 && !s.stabilizing);
                 let minLatForTable = Infinity;
                 onlinePoolForTable.forEach(srv => {
                     if (srv.latency < minLatForTable) minLatForTable = srv.latency;

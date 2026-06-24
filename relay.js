@@ -202,6 +202,15 @@ function getServerStatus() {
     };
 }
 
+function isNetworkCongested() {
+    const memUsage = process.memoryUsage().heapUsed; // bytes
+    const memUsageMb = Math.round(memUsage / 1024 / 1024);
+    const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
+    
+    // Congested if average latency is over 200ms, or RAM > 350MB, or CPU load avg > 2.0
+    return avgLat > 200 || memUsageMb > 350 || os.loadavg()[0] > 2.0;
+}
+
 function getWSUpdatePayload() {
     const stats = {
         total: config.stats.total,
@@ -247,6 +256,10 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
             if (totalTTL > 10 && remainingTTL < (totalTTL * 0.2)) {
                 const prefetchKey = `prefetch_${key}`;
                 if (!activeUpstreamQueries.has(prefetchKey)) {
+                    if (isNetworkCongested()) {
+                        // Skip prefetching to mitigate network/CPU congestion
+                        return { responseBuffer: cached.responseBuffer, fromStale: false };
+                    }
                     activeUpstreamQueries.set(prefetchKey, true);
                     console.log(`[Cache Prefetch] Triggering background prefetch for: ${domain} (remaining TTL: ${Math.round(remainingTTL)}s / ${Math.round(totalTTL)}s)`);
                     
@@ -273,6 +286,10 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
             if (queryData && (now - cached.expiresAt < staleTtlLimitMs)) {
                 const revalidateKey = `revalidate_${key}`;
                 if (!activeUpstreamQueries.has(revalidateKey)) {
+                    if (isNetworkCongested()) {
+                        // Serve stale directly without revalidating to reduce network queries
+                        return { responseBuffer: cached.responseBuffer, fromStale: true };
+                    }
                     activeUpstreamQueries.set(revalidateKey, true);
                     console.log(`[Cache SWR] Serving stale cache for: ${domain} (expired ${Math.round((now - cached.expiresAt) / 1000)}s ago). Triggering background revalidate...`);
                     
@@ -604,7 +621,10 @@ function initUpstreamSocketPool() {
                     server.consecutiveFailures = 0;
                     
                     // Real-time latency measurement spike / quarantine logic
-                    const maxAllowedLatency = config.llesThresholdMs !== undefined ? (config.llesThresholdMs + 100) : 250;
+                    // Dynamic spike threshold: slide the threshold up if the network is globally slow
+                    const activeOnlinePool = config.upstreamPool.filter(s => s.online && !s.quarantined && (s.latency || 0) < 9999);
+                    const poolMinLatency = activeOnlinePool.length > 0 ? Math.min(...activeOnlinePool.map(s => s.latency || 15)) : 15;
+                    const maxAllowedLatency = Math.max(250, poolMinLatency + (config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150));
                     
                     // Smart Spike Detection:
                     // 1. Absolute threshold check: raw elapsed latency is greater than maxAllowedLatency
@@ -904,10 +924,17 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         const primaryServer = config.upstreamPool.find(s => s.ip === upstreamDNS);
         let racingDelay = config.dnsRacingDelayMs || 15;
         
-        if (isHighPerformanceDomain(domain)) {
+        const congested = isNetworkCongested();
+        
+        if (congested) {
+            // Under network congestion, increase racing delay to 150ms to prevent packet overhead
+            racingDelay = Math.max(racingDelay * 4, 150);
+        }
+        
+        if (isHighPerformanceDomain(domain) && !congested) {
             racingDelay = 0; // Force immediate parallel query for speedtest/CDN domains!
             console.log(`[DNS Racing] Ultra-low latency mode activated for: ${domain}. Racing delay set to 0ms.`);
-        } else if (primaryServer) {
+        } else if (primaryServer && !congested) {
             const jitter = Math.abs((primaryServer.latency || 0) - (primaryServer.lastLatency || 0));
             const primaryLatency = primaryServer.latency || 15;
             // Adaptive delay: shrink delay if latency is unstable

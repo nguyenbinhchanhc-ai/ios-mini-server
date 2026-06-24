@@ -38,7 +38,7 @@
     {
       "ip": "1.1.1.1",
       "name": "Cloudflare",
-      "latency": 36,
+      "latency": 34,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -46,13 +46,13 @@
       ],
       "successRate": 100,
       "ecsSupported": false,
-      "lastLatency": 39,
+      "lastLatency": 36,
       "consecutiveFailures": 0
     },
     {
       "ip": "8.8.8.8",
       "name": "Google",
-      "latency": 34,
+      "latency": 41,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -60,13 +60,13 @@
       ],
       "successRate": 100,
       "ecsSupported": true,
-      "lastLatency": 36,
+      "lastLatency": 34,
       "consecutiveFailures": 0
     },
     {
       "ip": "9.9.9.9",
       "name": "Quad9",
-      "latency": 34,
+      "latency": 32,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -74,13 +74,13 @@
       ],
       "successRate": 100,
       "ecsSupported": true,
-      "lastLatency": 37,
+      "lastLatency": 34,
       "consecutiveFailures": 0
     },
     {
       "ip": "208.67.222.222",
       "name": "OpenDNS",
-      "latency": 39,
+      "latency": 36,
       "online": true,
       "queryCount": 0,
       "history": [
@@ -88,7 +88,7 @@
       ],
       "successRate": 100,
       "ecsSupported": true,
-      "lastLatency": 43,
+      "lastLatency": 39,
       "consecutiveFailures": 0
     },
     {
@@ -102,13 +102,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 26,
+      "lastLatency": 27,
       "consecutiveFailures": 0
     },
     {
       "ip": "8.8.4.4",
       "name": "Google Secondary",
-      "latency": 30,
+      "latency": 39,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -122,7 +122,7 @@
     {
       "ip": "149.112.112.112",
       "name": "Quad9 Secondary",
-      "latency": 31,
+      "latency": 30,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -150,7 +150,7 @@
     {
       "ip": "94.140.14.14",
       "name": "AdGuard DNS Primary",
-      "latency": 45,
+      "latency": 48,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
@@ -158,13 +158,13 @@
         true
       ],
       "successRate": 100,
-      "lastLatency": 33,
+      "lastLatency": 45,
       "consecutiveFailures": 0
     },
     {
       "ip": "94.140.15.15",
       "name": "AdGuard DNS Secondary",
-      "latency": 29,
+      "latency": 30,
       "online": true,
       "ecsSupported": true,
       "queryCount": 0,
