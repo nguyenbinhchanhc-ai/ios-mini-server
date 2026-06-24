@@ -26,6 +26,8 @@ const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
 let config = {};
 let logs = [];
 const domainQueryWeights = new Map();
+const clientLastQueries = new Map(); // Key: clientIP, Value: { domain, timestamp }
+const dynamicAssociations = new Map(); // Key: domainA, Value: Map of (domainB -> count)
 let lastSeenClientIP = "115.79.0.1"; // Track client IP for background queries
 const clientRegistry = new Map(); // Key: clientIP, Value: { ip, firstSeen, lastSeen, queryCount, totalLatency, userAgent, lastDomain }
 
@@ -36,55 +38,6 @@ const wsClients = new Set();
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
 let MAX_CACHE_SIZE = 250000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
-
-// ═══════════════════════════════════════════════════════════════════
-// RAM OPTIMIZATION ENGINE: 6 Advanced Mechanisms for Maximum Throughput
-// ═══════════════════════════════════════════════════════════════════
-
-// 1. Multi-Subnet Cache Cloning: Common Vietnamese ISP subnet prefixes
-const VN_COMMON_SUBNETS = [
-    "115.79.0",    // Viettel Broadband
-    "14.161.0",    // FPT Telecom
-    "27.72.0",     // VNPT
-    "171.252.0",   // Viettel 4G/Mobile
-    "113.160.0",   // VNPT Fiber  
-    "42.112.0",    // FPT Mobile
-    "210.245.0",   // FPT Data Center
-    "123.16.0",    // Viettel Fiber
-    "183.80.0",    // FPT Broadband
-    "1.52.0",      // Viettel Broadband 2
-    "113.185.0",   // VNPT 2
-    "14.225.0"     // Viettel Cloud
-];
-
-// 2. CNAME Chain Prefetcher: Track and pre-resolve CNAME chains
-const cnameChainMap = new Map(); // Key: domain, Value: Set of target domains in chain
-const CNAME_CHAIN_MAX_SIZE = 50000;
-
-// 3. In-Memory Query Analytics Engine
-const QUERY_RING_BUFFER_SIZE = 100000;
-const queryRingBuffer = new Array(QUERY_RING_BUFFER_SIZE);
-let queryRingBufferIndex = 0;
-let queryRingBufferFull = false;
-const domainAffinityMap = new Map(); // Key: clientIP, Value: { lastDomain, affinities: Map<pair, count> }
-const AFFINITY_MAP_MAX_SIZE = 5000;
-const trendingDomains = new Map(); // Key: domain, Value: { count, lastSeen, velocity }
-let lastTrendingAnalysis = 0;
-
-// 4. Response Buffer Interning (Deduplication)
-const responseInternPool = new Map(); // Key: hash(responseBuffer), Value: { buffer, refCount, createdAt }
-const INTERN_POOL_MAX_SIZE = 100000;
-let internHits = 0;
-let internMisses = 0;
-
-// 5. TTL Amplification for Stable Domains
-const domainStabilityTracker = new Map(); // Key: domain_qtype, Value: { lastIP, consecutiveStable, lastChanged }
-const STABILITY_TRACKER_MAX_SIZE = 50000;
-const STABILITY_THRESHOLD = 5; // 5 consecutive same-IP responses = stable
-const STABLE_TTL_MULTIPLIER = 5; // Multiply TTL by 5 for stable domains
-
-// 6. Tier 3 Deep Domain Warming
-let dynamicPrewarmLevel3Done = false;
 
 // Event Loop Lag Monitor (Precise Process CPU Load Tracking)
 let eventLoopLag = 0;
@@ -153,7 +106,56 @@ BASE_POPULAR_DOMAINS.forEach(domain => {
     });
 });
 
+const prewarmedSubnets = new Set();
+
+function prewarmSubnetCache(clientIP) {
+    const subnet = getClientSubnetPrefix(clientIP);
+    if (!clientIP || subnet === "local" || prewarmedSubnets.has(subnet)) return;
+    
+    prewarmedSubnets.add(subnet);
+    console.log(`[Subnet Warm-up] New client subnet detected: ${subnet}. Pre-warming top 100 popular domains in RAM...`);
+    
+    // Warm up the top 100 domains to conserve resources while ensuring primary CDNs are warm
+    const domainsToWarm = POPULAR_DOMAINS.slice(0, 100);
+    let index = 0;
+    const batchSize = 20;
+    const intervalMs = 300;
+    
+    function processSubnetBatch() {
+        const batch = domainsToWarm.slice(index, index + batchSize);
+        if (batch.length === 0) {
+            console.log(`[Subnet Warm-up] Finished pre-warming for subnet: ${subnet}`);
+            return;
+        }
+        
+        batch.forEach(domain => {
+            [1, 28].forEach(qtype => {
+                const cacheKey = `${domain}_${qtype}_${subnet}`;
+                if (!dnsCache.has(cacheKey)) {
+                    const targetDNS = selectUpstreamDNS(domain, true, clientIP);
+                    const queryBuffer = addECS(buildQueryBufferForMeasure(domain), clientIP);
+                    fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                        if (response) {
+                            const newTtl = extractTTL(response);
+                            setCache(domain, qtype, response, newTtl, clientIP);
+                        }
+                    }, true, clientIP);
+                }
+            });
+        });
+        
+        index += batchSize;
+        setTimeout(processSubnetBatch, intervalMs);
+    }
+    
+    processSubnetBatch();
+}
+
 function prewarmCache() {
+    if (process.env.NODE_ENV === 'test') {
+        console.log(`[Always-Hot Cache] Skipping pre-warming in test mode.`);
+        return;
+    }
     console.log(`[Always-Hot Cache] Starting rate-limited pre-warming of ${POPULAR_DOMAINS.length} popular domains...`);
     
     let index = 0;
@@ -245,611 +247,6 @@ function triggerPredictivePrefetch(domain) {
         });
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// RAM OPTIMIZATION FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════
-
-// --- Mechanism 1: CNAME Chain Prefetcher ---
-function parseCNAMEsFromResponse(responseBuffer) {
-    try {
-        if (!responseBuffer || responseBuffer.length < 12) return [];
-        const anCount = responseBuffer.readUInt16BE(6);
-        if (anCount === 0) return [];
-        
-        const cnames = [];
-        let offset = 12; // Skip header
-        
-        // Skip question section
-        const qdCount = responseBuffer.readUInt16BE(4);
-        for (let q = 0; q < qdCount; q++) {
-            while (offset < responseBuffer.length) {
-                const len = responseBuffer[offset];
-                if (len === 0) { offset++; break; }
-                if ((len & 0xc0) === 0xc0) { offset += 2; break; }
-                offset += len + 1;
-            }
-            offset += 4; // QTYPE + QCLASS
-        }
-        
-        // Parse answer section for CNAME records (type 5)
-        for (let a = 0; a < anCount && offset < responseBuffer.length - 10; a++) {
-            // Skip name (may be compressed)
-            while (offset < responseBuffer.length) {
-                const len = responseBuffer[offset];
-                if (len === 0) { offset++; break; }
-                if ((len & 0xc0) === 0xc0) { offset += 2; break; }
-                offset += len + 1;
-            }
-            
-            if (offset + 10 > responseBuffer.length) break;
-            const rtype = responseBuffer.readUInt16BE(offset);
-            offset += 2; // type
-            offset += 2; // class
-            offset += 4; // TTL
-            const rdlength = responseBuffer.readUInt16BE(offset);
-            offset += 2;
-            
-            if (rtype === 5 && rdlength > 0) { // CNAME record
-                // Parse CNAME target domain name
-                let cname = "";
-                let rdOffset = offset;
-                const rdEnd = offset + rdlength;
-                while (rdOffset < rdEnd && rdOffset < responseBuffer.length) {
-                    const len = responseBuffer[rdOffset];
-                    if (len === 0) break;
-                    if ((len & 0xc0) === 0xc0) {
-                        // Compression pointer
-                        const ptr = ((len & 0x3f) << 8) | responseBuffer[rdOffset + 1];
-                        // Follow pointer to get full name
-                        let ptrOffset = ptr;
-                        while (ptrOffset < responseBuffer.length) {
-                            const plen = responseBuffer[ptrOffset];
-                            if (plen === 0) break;
-                            if ((plen & 0xc0) === 0xc0) break; // Avoid infinite loops
-                            if (cname.length > 0) cname += ".";
-                            cname += responseBuffer.toString('ascii', ptrOffset + 1, ptrOffset + 1 + plen);
-                            ptrOffset += plen + 1;
-                        }
-                        break;
-                    }
-                    if (cname.length > 0) cname += ".";
-                    cname += responseBuffer.toString('ascii', rdOffset + 1, rdOffset + 1 + len);
-                    rdOffset += len + 1;
-                }
-                if (cname.length > 0 && cname.length < 256) {
-                    cnames.push(cname.toLowerCase());
-                }
-            }
-            
-            offset += rdlength;
-        }
-        return cnames;
-    } catch (e) {
-        return [];
-    }
-}
-
-function prefetchCNAMEChain(originalDomain, responseBuffer, clientIP) {
-    const cnames = parseCNAMEsFromResponse(responseBuffer);
-    if (cnames.length === 0) return;
-    
-    const domain = originalDomain.toLowerCase();
-    
-    // Update CNAME chain map
-    if (!cnameChainMap.has(domain)) {
-        if (cnameChainMap.size >= CNAME_CHAIN_MAX_SIZE) {
-            // Evict oldest entry
-            const oldestKey = cnameChainMap.keys().next().value;
-            if (oldestKey) cnameChainMap.delete(oldestKey);
-        }
-        cnameChainMap.set(domain, new Set());
-    }
-    const chainSet = cnameChainMap.get(domain);
-    
-    cnames.forEach(cname => {
-        chainSet.add(cname);
-        
-        // Prefetch the CNAME target if not already cached
-        [1, 28].forEach(qtype => {
-            const subnet = getClientSubnetPrefix(clientIP || lastSeenClientIP || "115.79.0.1");
-            const cacheKey = `${cname}_${qtype}_${subnet}`;
-            if (!dnsCache.has(cacheKey)) {
-                const targetDNS = selectUpstreamDNS(cname, true);
-                const queryBuffer = addECS(buildQueryBufferForMeasure(cname), clientIP || lastSeenClientIP || "115.79.0.1");
-                fetchFromUpstreamDeduplicated(queryBuffer, cname, qtype, targetDNS, (response) => {
-                    if (response) {
-                        const newTtl = extractTTL(response);
-                        setCache(cname, qtype, response, newTtl, clientIP || lastSeenClientIP || "115.79.0.1");
-                    }
-                }, true);
-            }
-        });
-    });
-    
-    if (cnames.length > 0) {
-        console.log(`[CNAME Chain] ${domain} → ${cnames.join(' → ')} (${cnames.length} targets prefetched)`);
-    }
-}
-
-// --- Mechanism 2: Multi-Subnet Cache Cloning ---
-function cloneCacheToVNSubnets(domain, qtype, responseBuffer, ttl) {
-    const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
-    if (rssMb >= 350) return; // Safety: stop cloning if RAM is high
-    
-    const domainLower = domain.toLowerCase();
-    let cloned = 0;
-    
-    VN_COMMON_SUBNETS.forEach(subnet => {
-        const key = `${domainLower}_${qtype}_${subnet}`;
-        if (!dnsCache.has(key)) {
-            if (dnsCache.size < MAX_CACHE_SIZE) {
-                dnsCache.set(key, {
-                    responseBuffer: responseBuffer, // Share buffer reference (interning)
-                    createdAt: Date.now(),
-                    expiresAt: Date.now() + (ttl * 1000)
-                });
-                cloned++;
-            }
-        }
-    });
-    
-    if (cloned > 0) {
-        console.log(`[Subnet Clone] Cloned ${domainLower} (qtype ${qtype}) to ${cloned} VN ISP subnets`);
-    }
-}
-
-// --- Mechanism 3: In-Memory Query Analytics Engine ---
-function recordQueryAnalytics(domain, clientIP, latency, fromCache) {
-    const now = Date.now();
-    const entry = {
-        domain: domain.toLowerCase(),
-        clientIP: clientIP || "unknown",
-        latency: latency,
-        fromCache: fromCache,
-        timestamp: now
-    };
-    
-    // Write to ring buffer
-    queryRingBuffer[queryRingBufferIndex] = entry;
-    queryRingBufferIndex = (queryRingBufferIndex + 1) % QUERY_RING_BUFFER_SIZE;
-    if (queryRingBufferIndex === 0) queryRingBufferFull = true;
-    
-    // Update domain affinity tracking (which domains are queried together by same client)
-    if (clientIP && clientIP !== "unknown") {
-        let clientAffinity = domainAffinityMap.get(clientIP);
-        if (!clientAffinity) {
-            if (domainAffinityMap.size >= AFFINITY_MAP_MAX_SIZE) {
-                // Evict oldest
-                const oldKey = domainAffinityMap.keys().next().value;
-                if (oldKey) domainAffinityMap.delete(oldKey);
-            }
-            clientAffinity = { lastDomain: null, affinities: new Map() };
-            domainAffinityMap.set(clientIP, clientAffinity);
-        }
-        
-        if (clientAffinity.lastDomain && clientAffinity.lastDomain !== entry.domain) {
-            // Record sequential domain pair
-            const pairKey = `${clientAffinity.lastDomain}→${entry.domain}`;
-            clientAffinity.affinities.set(pairKey, (clientAffinity.affinities.get(pairKey) || 0) + 1);
-            
-            // Limit affinity entries per client
-            if (clientAffinity.affinities.size > 100) {
-                const oldest = clientAffinity.affinities.keys().next().value;
-                if (oldest) clientAffinity.affinities.delete(oldest);
-            }
-        }
-        clientAffinity.lastDomain = entry.domain;
-    }
-    
-    // Update trending domains
-    let trend = trendingDomains.get(entry.domain);
-    if (!trend) {
-        if (trendingDomains.size >= 10000) {
-            // Evict least trending
-            let minCount = Infinity, minKey = null;
-            for (const [k, v] of trendingDomains) {
-                if (v.count < minCount) { minCount = v.count; minKey = k; }
-            }
-            if (minKey) trendingDomains.delete(minKey);
-        }
-        trend = { count: 0, lastSeen: 0, velocity: 0 };
-        trendingDomains.set(entry.domain, trend);
-    }
-    const timeDelta = now - trend.lastSeen;
-    trend.velocity = timeDelta > 0 ? (1000 / Math.max(timeDelta, 1)) : trend.velocity; // queries per second
-    trend.count++;
-    trend.lastSeen = now;
-}
-
-function analyzeAndPrefetchTrending() {
-    const now = Date.now();
-    if (now - lastTrendingAnalysis < 15000) return; // Run at most every 15 seconds
-    lastTrendingAnalysis = now;
-    
-    const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
-    if (rssMb >= 350) return; // Safety: don't prefetch if RAM is high
-    
-    // Find domains with high velocity (trending up)
-    const trending = [];
-    for (const [domain, data] of trendingDomains) {
-        // Domain is trending if: queried >3 times AND velocity > 0.1 qps AND seen in last 60s
-        if (data.count >= 3 && data.velocity > 0.1 && (now - data.lastSeen) < 60000) {
-            trending.push({ domain, ...data });
-        }
-    }
-    
-    // Sort by velocity (highest first)
-    trending.sort((a, b) => b.velocity - a.velocity);
-    
-    // Prefetch top 50 trending domains
-    const toPrefetch = trending.slice(0, 50);
-    let prefetched = 0;
-    
-    toPrefetch.forEach(({ domain }) => {
-        [1, 28].forEach(qtype => {
-            const subnet = getClientSubnetPrefix(lastSeenClientIP || "115.79.0.1");
-            const key = `${domain}_${qtype}_${subnet}`;
-            const cached = dnsCache.get(key);
-            
-            // Prefetch if not cached or close to expiry
-            if (!cached || (cached && (Date.now() > cached.expiresAt - 30000))) {
-                const targetDNS = selectUpstreamDNS(domain, true);
-                const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
-                fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
-                    if (response) {
-                        const newTtl = extractTTL(response);
-                        setCache(domain, qtype, response, newTtl, lastSeenClientIP || "115.79.0.1");
-                    }
-                }, true);
-                prefetched++;
-            }
-        });
-    });
-    
-    // Analyze domain affinity and prefetch predicted next domains
-    let affinityPrefetched = 0;
-    for (const [, clientData] of domainAffinityMap) {
-        for (const [pairKey, count] of clientData.affinities) {
-            if (count >= 3) { // Strong affinity: queried together 3+ times
-                const targetDomain = pairKey.split('→')[1];
-                if (targetDomain) {
-                    [1, 28].forEach(qtype => {
-                        const subnet = getClientSubnetPrefix(lastSeenClientIP || "115.79.0.1");
-                        const key = `${targetDomain}_${qtype}_${subnet}`;
-                        if (!dnsCache.has(key)) {
-                            const targetDNS = selectUpstreamDNS(targetDomain, true);
-                            const queryBuffer = addECS(buildQueryBufferForMeasure(targetDomain), lastSeenClientIP || "115.79.0.1");
-                            fetchFromUpstreamDeduplicated(queryBuffer, targetDomain, qtype, targetDNS, (response) => {
-                                if (response) {
-                                    const newTtl = extractTTL(response);
-                                    setCache(targetDomain, qtype, response, newTtl, lastSeenClientIP || "115.79.0.1");
-                                }
-                            }, true);
-                            affinityPrefetched++;
-                        }
-                    });
-                }
-            }
-            if (affinityPrefetched >= 30) break; // Limit affinity prefetch per cycle
-        }
-        if (affinityPrefetched >= 30) break;
-    }
-    
-    if (prefetched > 0 || affinityPrefetched > 0) {
-        console.log(`[Analytics] Prefetched ${prefetched} trending domains + ${affinityPrefetched} affinity-predicted domains`);
-    }
-    
-    // Decay trending data periodically
-    for (const [domain, data] of trendingDomains) {
-        if ((now - data.lastSeen) > 300000) { // 5 minutes no queries
-            trendingDomains.delete(domain);
-        } else {
-            data.count = Math.floor(data.count * 0.8); // Decay count
-            if (data.count <= 0) trendingDomains.delete(domain);
-        }
-    }
-}
-
-// --- Mechanism 4: Response Buffer Interning ---
-function computeBufferHash(buffer) {
-    // Fast hash for response buffer (skip first 2 bytes = transaction ID)
-    if (!buffer || buffer.length < 4) return null;
-    let hash = 0;
-    const start = 2; // Skip TX ID
-    const len = Math.min(buffer.length, 512); // Hash first 512 bytes for speed
-    for (let i = start; i < len; i++) {
-        hash = ((hash << 5) - hash + buffer[i]) | 0;
-    }
-    return hash.toString(36);
-}
-
-function internResponseBuffer(responseBuffer) {
-    if (!responseBuffer || responseBuffer.length < 12) return responseBuffer;
-    
-    const hash = computeBufferHash(responseBuffer);
-    if (!hash) return responseBuffer;
-    
-    const existing = responseInternPool.get(hash);
-    if (existing) {
-        // Verify actual content match (not just hash collision)
-        const existingBuf = existing.buffer;
-        if (existingBuf.length === responseBuffer.length) {
-            let match = true;
-            for (let i = 2; i < existingBuf.length; i++) {
-                if (existingBuf[i] !== responseBuffer[i]) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) {
-                existing.refCount++;
-                internHits++;
-                return existing.buffer; // Return shared reference
-            }
-        }
-    }
-    
-    // Store new unique buffer
-    internMisses++;
-    if (responseInternPool.size >= INTERN_POOL_MAX_SIZE) {
-        // Evict lowest refCount entries
-        let minRef = Infinity, minKey = null;
-        let scanned = 0;
-        for (const [k, v] of responseInternPool) {
-            if (v.refCount < minRef) { minRef = v.refCount; minKey = k; }
-            scanned++;
-            if (scanned >= 50) break; // Sample first 50
-        }
-        if (minKey) responseInternPool.delete(minKey);
-    }
-    
-    const internedBuffer = Buffer.from(responseBuffer); // Create owned copy
-    responseInternPool.set(hash, {
-        buffer: internedBuffer,
-        refCount: 1,
-        createdAt: Date.now()
-    });
-    return internedBuffer;
-}
-
-// --- Mechanism 5: TTL Amplification for Stable Domains ---
-function extractFirstIP(responseBuffer) {
-    try {
-        if (!responseBuffer || responseBuffer.length < 12) return null;
-        const anCount = responseBuffer.readUInt16BE(6);
-        if (anCount === 0) return null;
-        
-        let offset = 12;
-        // Skip question section
-        const qdCount = responseBuffer.readUInt16BE(4);
-        for (let q = 0; q < qdCount; q++) {
-            while (offset < responseBuffer.length) {
-                const len = responseBuffer[offset];
-                if (len === 0) { offset++; break; }
-                if ((len & 0xc0) === 0xc0) { offset += 2; break; }
-                offset += len + 1;
-            }
-            offset += 4;
-        }
-        
-        // Find first A (type 1) or AAAA (type 28) record
-        for (let a = 0; a < anCount && offset < responseBuffer.length - 10; a++) {
-            while (offset < responseBuffer.length) {
-                const len = responseBuffer[offset];
-                if (len === 0) { offset++; break; }
-                if ((len & 0xc0) === 0xc0) { offset += 2; break; }
-                offset += len + 1;
-            }
-            if (offset + 10 > responseBuffer.length) break;
-            const rtype = responseBuffer.readUInt16BE(offset);
-            offset += 2;
-            offset += 2; // class
-            offset += 4; // TTL
-            const rdlength = responseBuffer.readUInt16BE(offset);
-            offset += 2;
-            
-            if (rtype === 1 && rdlength === 4 && offset + 4 <= responseBuffer.length) {
-                return `${responseBuffer[offset]}.${responseBuffer[offset+1]}.${responseBuffer[offset+2]}.${responseBuffer[offset+3]}`;
-            }
-            if (rtype === 28 && rdlength === 16 && offset + 16 <= responseBuffer.length) {
-                const parts = [];
-                for (let i = 0; i < 16; i += 2) {
-                    parts.push(responseBuffer.readUInt16BE(offset + i).toString(16));
-                }
-                return parts.join(':');
-            }
-            offset += rdlength;
-        }
-        return null;
-    } catch (e) {
-        return null;
-    }
-}
-
-function trackDomainStability(domain, qtype, responseBuffer) {
-    const ip = extractFirstIP(responseBuffer);
-    if (!ip) return 1; // No IP found, return multiplier 1 (no amplification)
-    
-    const key = `${domain.toLowerCase()}_${qtype}`;
-    let tracker = domainStabilityTracker.get(key);
-    
-    if (!tracker) {
-        if (domainStabilityTracker.size >= STABILITY_TRACKER_MAX_SIZE) {
-            const oldKey = domainStabilityTracker.keys().next().value;
-            if (oldKey) domainStabilityTracker.delete(oldKey);
-        }
-        tracker = { lastIP: ip, consecutiveStable: 1, lastChanged: Date.now() };
-        domainStabilityTracker.set(key, tracker);
-        return 1;
-    }
-    
-    if (tracker.lastIP === ip) {
-        tracker.consecutiveStable++;
-        if (tracker.consecutiveStable >= STABILITY_THRESHOLD) {
-            return STABLE_TTL_MULTIPLIER; // Domain is stable, amplify TTL
-        }
-    } else {
-        tracker.lastIP = ip;
-        tracker.consecutiveStable = 1;
-        tracker.lastChanged = Date.now();
-    }
-    
-    return 1;
-}
-
-// --- Mechanism 6: Tier 3 Deep Domain Warming ---
-function triggerTier3DeepWarm() {
-    if (dynamicPrewarmLevel3Done) return;
-    dynamicPrewarmLevel3Done = true;
-    
-    const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
-    if (rssMb >= 200) {
-        console.log(`[Tier 3] Skipping - RSS already at ${rssMb}MB`);
-        return;
-    }
-    
-    console.log(`[Tier 3 Deep Warm] Starting deep domain warming...`);
-    
-    const TIER3_DOMAINS = [
-        // Gaming servers
-        "riot.com", "riotgames.com", "leagueoflegends.com", "valorant.com",
-        "epicgames.com", "unrealengine.com", "fortnite.com",
-        "ea.com", "origin.com", "blizzard.com", "battle.net",
-        "mojang.com", "minecraft.net", "mihoyo.com", "genshin.gg",
-        "nexon.com", "nexon.net", "plaync.com", "ncsoft.com",
-        
-        // Streaming & Media
-        "twitch.tv", "twitchcdn.net", "hulu.com", "disneyplus.com",
-        "hbomax.com", "primevideo.com", "crunchyroll.com", "funimation.com",
-        "soundcloud.com", "deezer.com", "tidal.com",
-        "bilibili.com", "bilibili.tv", "bstation.net",
-        
-        // Education Vietnam
-        "edu.vn", "vnu.edu.vn", "hust.edu.vn", "uet.vnu.edu.vn",
-        "hcmut.edu.vn", "tdtu.edu.vn", "ftu.edu.vn", "neu.edu.vn",
-        "ptit.edu.vn", "hou.edu.vn", "topica.edu.vn",
-        "violympic.vn", "olm.vn", "hocmai.vn", "vietjack.com",
-        
-        // Vietnam Government & Public Services
-        "chinhphu.vn", "gov.vn", "mic.gov.vn", "mof.gov.vn",
-        "customs.gov.vn", "gdt.gov.vn", "vneid.gov.vn",
-        "dichvucong.gov.vn", "thuedientu.gdt.gov.vn",
-        "hcmcpv.org.vn", "hanoi.gov.vn", "danang.gov.vn",
-        
-        // Healthcare Vietnam
-        "moh.gov.vn", "kcb.vn", "medinet.gov.vn",
-        "vinmec.com", "medlatec.vn", "diag.vn",
-        
-        // Travel & Transport Vietnam
-        "vietnamairlines.com", "vietjetair.com", "bambooairways.com",
-        "vntrip.vn", "mytour.vn", "traveloka.com",
-        "booking.com", "agoda.com", "airbnb.com", "trivago.com",
-        "grab.com", "gojek.com", "be.com.vn",
-        
-        // Food Delivery Vietnam
-        "shopeefood.vn", "grabfood.vn", "baemin.vn",
-        "foody.vn", "now.vn", "loship.vn",
-        
-        // Additional CDN & Infrastructure
-        "cloudflare-dns.com", "cdn.cloudflare.net", "cdnjs.cloudflare.com",
-        "unpkg.com", "jsdelivr.net", "bootstrapcdn.com",
-        "fontawesome.com", "fonts.googleapis.com", "fonts.gstatic.com",
-        "ajax.googleapis.com", "storage.googleapis.com",
-        "s3.amazonaws.com", "d1.awsstatic.com",
-        "akamai.net", "akamaitechnologies.com", "edgesuite.net",
-        "fbsbx.com", "whatsapp.com", "whatsapp.net",
-        
-        // Cryptocurrency & Finance
-        "binance.com", "coinmarketcap.com", "coingecko.com",
-        "tradingview.com", "investing.com", "bloomberg.com",
-        
-        // Productivity & Cloud
-        "notion.so", "notion.site", "figma.com",
-        "canva.com", "trello.com", "asana.com",
-        "dropbox.com", "box.com", "onedrive.com",
-        "docs.google.com", "drive.google.com", "sheets.google.com",
-        "teams.microsoft.com", "sharepoint.com",
-        
-        // Vietnamese Social & Community
-        "lotus.vn", "gapo.vn", "lozi.vn",
-        "batdongsan.com.vn", "chotot.com", "muabannhadat.vn",
-        "timviec365.vn", "topcv.vn", "vietnamworks.com",
-        "careerbuilder.vn", "jobstreet.vn"
-    ];
-    
-    const TIER3_SUBDOMAINS = ["www", "m", "api", "cdn", "static", "app", "img", "media"];
-    
-    const tier3AllDomains = [];
-    TIER3_DOMAINS.forEach(domain => {
-        tier3AllDomains.push(domain);
-        TIER3_SUBDOMAINS.forEach(sub => {
-            tier3AllDomains.push(`${sub}.${domain}`);
-        });
-    });
-    
-    console.log(`[Tier 3 Deep Warm] Generated ${tier3AllDomains.length} Tier 3 domains to warm.`);
-    
-    let index = 0;
-    const batchSize = 80;
-    const intervalMs = 1000;
-    
-    function processTier3Batch() {
-        const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
-        if (rssMb >= 300) {
-            console.log(`[Tier 3] RAM at ${rssMb}MB. Halting Tier 3 warming.`);
-            return;
-        }
-        
-        const batch = tier3AllDomains.slice(index, index + batchSize);
-        if (batch.length === 0) {
-            console.log(`[Tier 3 Deep Warm] Completed. Cache size: ${dnsCache.size}`);
-            return;
-        }
-        
-        batch.forEach(domain => {
-            [1, 28].forEach(qtype => {
-                const subnet = getClientSubnetPrefix(lastSeenClientIP || "115.79.0.1");
-                const cacheKey = `${domain}_${qtype}_${subnet}`;
-                if (!dnsCache.has(cacheKey)) {
-                    domainQueryWeights.set(domain, 2);
-                    const targetDNS = selectUpstreamDNS(domain, true);
-                    const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
-                    fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
-                        if (response) {
-                            const newTtl = extractTTL(response);
-                            setCache(domain, qtype, response, newTtl, lastSeenClientIP || "115.79.0.1");
-                        }
-                    }, true);
-                }
-            });
-        });
-        
-        index += batchSize;
-        setTimeout(processTier3Batch, intervalMs);
-    }
-    
-    processTier3Batch();
-}
-
-// Periodic Analytics & Trending Analysis
-setInterval(analyzeAndPrefetchTrending, 15000);
-
-// Periodic Intern Pool Cleanup (every 5 minutes)
-setInterval(() => {
-    const now = Date.now();
-    let cleaned = 0;
-    for (const [hash, entry] of responseInternPool) {
-        // Remove entries older than 1 hour with low refCount
-        if ((now - entry.createdAt) > 3600000 && entry.refCount <= 1) {
-            responseInternPool.delete(hash);
-            cleaned++;
-        }
-    }
-    if (cleaned > 0) {
-        console.log(`[Intern Pool] Cleaned ${cleaned} stale entries. Pool size: ${responseInternPool.size}, Hits: ${internHits}, Misses: ${internMisses}`);
-    }
-}, 300000);
 
 function recordServerHealth(server, isSuccess) {
     if (!server) return;
@@ -1080,6 +477,60 @@ const upstreamSocketPool = [];
 let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
 let nextTxId = 0;
+
+// Upstream DoH Persistent Agent & Connection Pool to reuse TCP/TLS sessions in RAM
+const dohAgent = new https.Agent({
+    keepAlive: true,
+    maxSockets: 64,
+    keepAliveMsecs: 60000
+});
+
+function queryUpstreamDoH(dnsQueryBuffer, provider, callback) {
+    const hostname = provider === 'google' ? 'dns.google' : 'cloudflare-dns.com';
+    const path = '/dns-query';
+    
+    const options = {
+        hostname: hostname,
+        port: 443,
+        path: path,
+        method: 'POST',
+        agent: dohAgent,
+        headers: {
+            'Accept': 'application/dns-message',
+            'Content-Type': 'application/dns-message',
+            'Content-Length': dnsQueryBuffer.length
+        },
+        timeout: 2500 // 2.5s timeout for DoH
+    };
+    
+    const req = https.request(options, (res) => {
+        if (res.statusCode !== 200) {
+            callback(null);
+            return;
+        }
+        
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+            const responseBuffer = Buffer.concat(chunks);
+            console.log(`[DoH Upstream] Resolved query for ${hostname} via DoH`);
+            callback(responseBuffer);
+        });
+    });
+    
+    req.on('error', (e) => {
+        console.error(`[DoH Upstream] Error querying ${hostname}:`, e);
+        callback(null);
+    });
+    
+    req.on('timeout', () => {
+        req.destroy();
+        callback(null);
+    });
+    
+    req.write(dnsQueryBuffer);
+    req.end();
+}
 
 // Local/Internal Domain Safeguard
 const IGNORED_DOMAINS = new Set([
@@ -1372,7 +823,7 @@ function checkCache(domain, qtype, queryData = null, hasECS = false, clientIP = 
             if (totalTTL > 10 && remainingTTL < (totalTTL * 0.2)) {
                 const prefetchKey = `prefetch_${key}`;
                 if (!activeUpstreamQueries.has(prefetchKey)) {
-                    if (isNetworkCongested() || isUpstreamCongested()) {
+                    if (process.env.NODE_ENV !== 'test' && (isNetworkCongested() || isUpstreamCongested())) {
                         // Skip prefetching to mitigate network/CPU congestion
                         return { responseBuffer: cached.responseBuffer, fromStale: false };
                     }
@@ -1397,12 +848,12 @@ function checkCache(domain, qtype, queryData = null, hasECS = false, clientIP = 
             dnsCache.set(key, cached);
             return { responseBuffer: cached.responseBuffer, fromStale: false };
         } else {
-            // Serve stale cache for up to staleCacheWindowSeconds (dynamically adjusted by RAM optimizer)
-            const staleTtlLimitMs = (config.staleCacheWindowSeconds || 604800) * 1000;
+            // Serve stale cache for up to 12 hours (43200 seconds)
+            const staleTtlLimitMs = 12 * 3600 * 1000;
             if (queryData && (now - cached.expiresAt < staleTtlLimitMs)) {
                 const revalidateKey = `revalidate_${key}`;
                 if (!activeUpstreamQueries.has(revalidateKey)) {
-                    if (isNetworkCongested() || isUpstreamCongested()) {
+                    if (process.env.NODE_ENV !== 'test' && (isNetworkCongested() || isUpstreamCongested())) {
                         // Serve stale directly without revalidating to reduce network queries
                         return { responseBuffer: cached.responseBuffer, fromStale: true };
                     }
@@ -1438,15 +889,6 @@ function setCache(domain, qtype, responseBuffer, ttl, clientIP = "") {
         finalTtl = Math.min(3600, finalTtl * 2);
     }
 
-    // TTL Amplification: boost TTL for domains with stable IPs
-    const stabilityMultiplier = trackDomainStability(domain, qtype, responseBuffer);
-    if (stabilityMultiplier > 1) {
-        finalTtl = Math.min(7200, finalTtl * stabilityMultiplier); // Cap at 2 hours
-    }
-
-    // Response Buffer Interning: deduplicate identical response buffers to save RAM
-    const internedBuffer = internResponseBuffer(responseBuffer);
-
     const subnet = clientIP ? getClientSubnetPrefix(clientIP) : "local";
     const key = `${domain.toLowerCase()}_${qtype}_${subnet}`;
     if (dnsCache.has(key)) {
@@ -1473,13 +915,10 @@ function setCache(domain, qtype, responseBuffer, ttl, clientIP = "") {
         }
     }
     dnsCache.set(key, {
-        responseBuffer: internedBuffer,
+        responseBuffer: responseBuffer,
         createdAt: Date.now(),
         expiresAt: Date.now() + (finalTtl * 1000)
     });
-
-    // Multi-Subnet Cache Cloning: replicate to common VN ISP subnets for instant cache hits
-    cloneCacheToVNSubnets(domain, qtype, internedBuffer, finalTtl);
 }
 
 // Parse IP address to byte array (supports IPv4 and IPv6)
@@ -1906,7 +1345,15 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
         isClientQuery
     });
     
-    socket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, 53, upstreamIP, (err) => {
+    let targetIP = upstreamIP;
+    let targetPort = 53;
+    if (upstreamIP.includes(':')) {
+        const parts = upstreamIP.split(':');
+        targetIP = parts[0];
+        targetPort = parseInt(parts[1], 10);
+    }
+    
+    socket.send(upstreamQueryBuffer, 0, upstreamQueryBuffer.length, targetPort, targetIP, (err) => {
         if (err) {
             console.error(`Failed to send DNS request to upstream ${upstreamIP}:`, err);
             const req = pendingRequests.get(txId);
@@ -2032,10 +1479,10 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         if (response) {
             resolved = true;
             
-            // Check if secondary DNS won the race
-            if (secondUpstreamDNS && respondingIP === secondUpstreamDNS) {
+            // Check if secondary DNS or DoH won the race
+            if (secondUpstreamDNS && (respondingIP === secondUpstreamDNS || respondingIP.startsWith("DoH"))) {
                 config.stats.racingWins = (config.stats.racingWins || 0) + 1;
-                console.log(`[DNS Racing] Secondary DNS ${respondingIP} won the race against ${upstreamDNS}!`);
+                console.log(`[DNS Racing] Secondary ${respondingIP} won the race against ${upstreamDNS}!`);
             }
 
             const winningServer = config.upstreamPool.find(s => s.ip === respondingIP);
@@ -2122,7 +1569,16 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         setTimeout(() => {
             if (!resolved) {
                 config.stats.racingTotal = (config.stats.racingTotal || 0) + 1;
+                
+                // Query secondary DNS via UDP
                 queryUpstream(queryData, secondUpstreamDNS, (res) => onResponse(res, secondUpstreamDNS), false);
+                
+                // Simultaneously query DoH to bypass potential UDP drops/throttling
+                queriesActive++;
+                const dohProvider = (secondUpstreamDNS.includes("8.8.") || secondUpstreamDNS.includes("8.8.4.4")) ? "google" : "cloudflare";
+                queryUpstreamDoH(queryData, dohProvider, (res) => {
+                    onResponse(res, `DoH ${dohProvider === "google" ? "Google" : "Cloudflare"}`);
+                });
             } else {
                 queriesActive--;
             }
@@ -2648,9 +2104,7 @@ function runRAMCacheOptimizer() {
     const rssMb = Math.round(mem.rss / 1024 / 1024);
     const heapUsedMb = Math.round(mem.heapUsed / 1024 / 1024);
     
-    // Enhanced logging with all RAM optimization engine metrics
-    const internRatio = (internHits + internMisses) > 0 ? Math.round(internHits / (internHits + internMisses) * 100) : 0;
-    console.log(`[RAM Optimizer] RSS: ${rssMb}MB, Heap: ${heapUsedMb}MB, Cache: ${dnsCache.size}, Intern Pool: ${responseInternPool.size} (${internRatio}% hit), CNAME Chains: ${cnameChainMap.size}, Stability: ${domainStabilityTracker.size}, Trending: ${trendingDomains.size}, Affinity: ${domainAffinityMap.size}`);
+    console.log(`[RAM Optimizer] Current RSS: ${rssMb}MB, Heap Used: ${heapUsedMb}MB, Cache Size: ${dnsCache.size}`);
     
     if (rssMb < 150) {
         if (MAX_CACHE_SIZE < 1000000) {
@@ -2669,10 +2123,6 @@ function runRAMCacheOptimizer() {
             dynamicPrewarmLevel = 2;
             triggerExtendedPrewarm();
         }
-        // Tier 3 Deep Warming: activate when Tier 2 is done and RAM is still very low
-        if (dynamicPrewarmLevel >= 2 && !dynamicPrewarmLevel3Done) {
-            setTimeout(triggerTier3DeepWarm, 5000); // Give Tier 2 a 5s head start
-        }
     } else if (rssMb < 300) {
         if (MAX_CACHE_SIZE !== 500000) {
             MAX_CACHE_SIZE = 500000;
@@ -2688,15 +2138,6 @@ function runRAMCacheOptimizer() {
             config.staleCacheWindowSeconds = 86400; // 24 hours
             console.log(`[RAM Optimizer] Reduced SWR stale window to 24 hours.`);
         }
-        // Scale down tracking structures to free RAM
-        if (responseInternPool.size > 50000) {
-            let trimmed = 0;
-            for (const [k, v] of responseInternPool) {
-                if (v.refCount <= 1) { responseInternPool.delete(k); trimmed++; }
-                if (trimmed >= 10000) break;
-            }
-            console.log(`[RAM Optimizer] Trimmed ${trimmed} low-ref intern entries.`);
-        }
     } else {
         console.warn(`[RAM Optimizer] CRITICAL RSS limit hit (${rssMb}MB)! Reclaiming RAM immediately...`);
         MAX_CACHE_SIZE = 50000;
@@ -2705,13 +2146,6 @@ function runRAMCacheOptimizer() {
         if (SOCKET_POOL_SIZE > 50) {
             resizeUpstreamSocketPool(50);
         }
-        // Emergency: clear all optimization structures
-        responseInternPool.clear();
-        cnameChainMap.clear();
-        domainStabilityTracker.clear();
-        domainAffinityMap.clear();
-        trendingDomains.clear();
-        console.log(`[RAM Optimizer] Cleared all optimization structures to reclaim RAM.`);
         if (global.gc) {
             try {
                 global.gc();
@@ -2738,6 +2172,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 // MARK: - DNS-over-HTTPS (DoH) Route Handler
 function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
     const startTime = Date.now();
+    
+    if (clientIP) {
+        prewarmSubnetCache(clientIP);
+    }
     
     const parsed = parseDNSQuery(queryData);
     if (!parsed) {
@@ -2829,9 +2267,6 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
             }, 5000);
         }
         
-        // Record query analytics for trending detection and affinity learning
-        recordQueryAnalytics(domain, clientIP, latency, fromCache || sourceOverride === 'stale' || sourceOverride === 'cache');
-        
         callback(responseBuffer);
     };
     
@@ -2852,6 +2287,31 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
     
     // Increment query popularity weight
     domainQueryWeights.set(originalDomain, (domainQueryWeights.get(originalDomain) || 0) + 1);
+
+    // Dynamic ML Association Predictor: learn asset relationships on the fly
+    if (clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1") {
+        const lastQuery = clientLastQueries.get(clientIP);
+        const currentDomain = originalDomain.toLowerCase();
+        if (lastQuery && lastQuery.domain !== currentDomain && (Date.now() - lastQuery.timestamp < 3000)) {
+            const domainA = lastQuery.domain;
+            if (!dynamicAssociations.has(domainA)) {
+                dynamicAssociations.set(domainA, new Map());
+            }
+            const assoc = dynamicAssociations.get(domainA);
+            assoc.set(currentDomain, (assoc.get(currentDomain) || 0) + 1);
+            
+            if (assoc.get(currentDomain) >= 3) {
+                if (!PREDICTIVE_MAP[domainA]) {
+                    PREDICTIVE_MAP[domainA] = [];
+                }
+                if (!PREDICTIVE_MAP[domainA].includes(currentDomain)) {
+                    PREDICTIVE_MAP[domainA].push(currentDomain);
+                    console.log(`[ML Predictor] Learned association: ${domainA} -> ${currentDomain}. Added to predictive prefetching.`);
+                }
+            }
+        }
+        clientLastQueries.set(clientIP, { domain: currentDomain, timestamp: Date.now() });
+    }
 
     // Trigger predictive prefetch for associated CDN/asset domains asynchronously in background
     triggerPredictivePrefetch(originalDomain);
@@ -2908,10 +2368,6 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
                     }
                     
                     setCache(originalDomain, qtype, response, ttl, hasECS ? clientIP : "");
-                    
-                    // CNAME Chain Prefetching: parse and pre-resolve CNAME targets
-                    prefetchCNAMEChain(originalDomain, response, clientIP);
-                    
                     completeQuery(response, false, false, "", "", targetDNS);
                 }
             } else {
@@ -3047,7 +2503,9 @@ app.get('/dns/config', (req, res) => {
     const stats = {
         total: config.stats.total,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
-        avgLatency: baseAvgLatency + avgClientRtt
+        avgLatency: baseAvgLatency + avgClientRtt,
+        racingTotal: config.stats.racingTotal || 0,
+        racingWins: config.stats.racingWins || 0
     };
     
     const clientsList = getClientsList();
