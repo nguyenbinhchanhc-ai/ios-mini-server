@@ -34,7 +34,7 @@ const wsClients = new Set();
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
-const MAX_CACHE_SIZE = 50000;
+const MAX_CACHE_SIZE = 250000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
 
 // Event Loop Lag Monitor (Precise Process CPU Load Tracking)
@@ -49,38 +49,99 @@ function measureEventLoopLag() {
 setInterval(measureEventLoopLag, 1000);
 
 // Pre-warmed Vietnamese & Global domains list to build always-hot memory cache
-const POPULAR_DOMAINS = [
-    "google.com", "www.google.com", "google.com.vn",
-    "facebook.com", "www.facebook.com", "m.facebook.com",
-    "youtube.com", "www.youtube.com", "youtu.be",
-    "vnexpress.net", "zingnews.vn", "zalo.me", "zaloapp.com",
-    "tiktok.com", "www.tiktok.com", "vt.tiktok.com",
-    "shopee.vn", "lazada.vn", "tiki.vn",
-    "netflix.com", "github.com", "wikipedia.org",
-    "speedtest.net", "fast.com",
-    "cloudflare.com", "dns.google", "one.one.one.one"
+const BASE_POPULAR_DOMAINS = [
+    // Global Tech & Search
+    "google.com", "google.com.vn", "google.ad", "google.ae", "google.com.sg", "google.co.jp",
+    "dns.google", "googleapis.com", "gstatic.com", "googleusercontent.com",
+    "microsoft.com", "office.com", "office365.com", "live.com", "outlook.com", "bing.com",
+    "apple.com", "icloud.com", "itunes.com", "mzstatic.com", "apple-dns.net",
+    "amazon.com", "aws.amazon.com", "amazonaws.com", "cloudflare.com", "one.one.one.one",
+
+    // Social Media & Video
+    "facebook.com", "facebook.net", "fbcdn.net", "instagram.com", "cdninstagram.com",
+    "youtube.com", "youtu.be", "ggpht.com", "ytimg.com",
+    "tiktok.com", "tiktokv.com", "ibyteimg.com", "byteoversea.com",
+    "twitter.com", "twimg.com", "t.co",
+    "netflix.com", "nflxvideo.net", "nflxext.com",
+    "twitch.tv", "github.com", "wikipedia.org",
+
+    // Vietnamese News & Media
+    "vnexpress.net", "zingnews.vn", "zing.vn", "tuoitre.vn", "thanhnien.vn", "dantri.com.vn",
+    "kenh14.vn", "vietnamnet.vn", "tinhte.vn", "vtv.vn", "vov.vn", "sggp.org.vn",
+    "zalo.me", "zaloapp.com", "zalocdn.com", "nhaccuatui.com", "mp3.zing.vn",
+
+    // Vietnamese E-commerce & Logistics
+    "shopee.vn", "shopeemobile.com", "shopeepay.vn", "lazada.vn", "tiki.vn", "sendo.vn",
+    "ghn.vn", "ghtk.vn", "viettelpost.com.vn", "vnpost.vn", "grab.com", "be.com.vn",
+
+    // Vietnamese Banking & Finance
+    "vietcombank.com.vn", "bidv.com.vn", "vietinbank.co", "vietinbank.vn", "agribank.com.vn",
+    "techcombank.com", "mbbank.com.vn", "sacombank.com.vn", "acb.com.vn", "vpbank.com.vn",
+    "vps.com.vn", "ssi.com.vn", "vndirect.com.vn", "momo.vn", "vnpay.vn", "zalopay.vn",
+
+    // Telco & ISP CDN
+    "viettel.com.vn", "vietteltelecom.vn", "vnpt.com.vn", "mobifone.vn", "vinaphone.com.vn",
+    "fpt.com.vn", "fptplay.vn", "fpt.vn",
+
+    // Games
+    "garena.vn", "lienquan.garena.vn", "fifaaddict.com", "roblox.com", "steamcommunity.com",
+    "steampowered.com", "pubgmobile.com", "moonton.com", "freefiremobile.com"
 ];
 
-function prewarmCache() {
-    console.log(`[Always-Hot Cache] Pre-warming memory cache with ${POPULAR_DOMAINS.length} popular domains...`);
-    POPULAR_DOMAINS.forEach(domain => {
-        [1, 28].forEach(qtype => {
-            const key = `${domain}_${qtype}`;
-            if (!dnsCache.has(key)) {
-                // Populate query weights to mark them as popular on startup
-                domainQueryWeights.set(domain, 3);
-                
-                const targetDNS = selectUpstreamDNS(domain, true);
-                const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
-                fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
-                    if (response) {
-                        const newTtl = extractTTL(response);
-                        setCache(domain, qtype, response, newTtl);
-                    }
-                }, true);
-            }
-        });
+const SUBDOMAINS = [
+    "www", "m", "api", "apis", "cdn", "static", "media", "img", "images", 
+    "assets", "video", "auth", "login", "accounts", "app", "status",
+    "chat", "dev", "shop", "portal", "news", "mail", "secure", "cloud", 
+    "download", "upload", "test", "register"
+];
+
+// Programmatically generate over 2,400 popular subdomains to populate memory cache
+const POPULAR_DOMAINS = [];
+BASE_POPULAR_DOMAINS.forEach(domain => {
+    POPULAR_DOMAINS.push(domain);
+    SUBDOMAINS.forEach(sub => {
+        POPULAR_DOMAINS.push(`${sub}.${domain}`);
     });
+});
+
+function prewarmCache() {
+    console.log(`[Always-Hot Cache] Starting rate-limited pre-warming of ${POPULAR_DOMAINS.length} popular domains...`);
+    
+    let index = 0;
+    const batchSize = 30; // 30 domains (60 records) per batch
+    const intervalMs = 1500; // every 1.5 seconds to prevent rate-limiting/overload
+    
+    function processBatch() {
+        const batch = POPULAR_DOMAINS.slice(index, index + batchSize);
+        if (batch.length === 0) {
+            console.log(`[Always-Hot Cache] Pre-warming fully completed. Current cache size: ${dnsCache.size}`);
+            return;
+        }
+        
+        batch.forEach(domain => {
+            [1, 28].forEach(qtype => {
+                const key = `${domain}_${qtype}`;
+                if (!dnsCache.has(key)) {
+                    // Populate query weights to mark them as popular on startup
+                    domainQueryWeights.set(domain, 3);
+                    
+                    const targetDNS = selectUpstreamDNS(domain, true);
+                    const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
+                    fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                        if (response) {
+                            const newTtl = extractTTL(response);
+                            setCache(domain, qtype, response, newTtl);
+                        }
+                    }, true);
+                }
+            });
+        });
+        
+        index += batchSize;
+        setTimeout(processBatch, intervalMs);
+    }
+    
+    processBatch();
 }
 
 function recordServerHealth(server, isSuccess) {
@@ -307,7 +368,7 @@ function getClientsList() {
 }
 
 // Upstream UDP Client Sockets Pool
-const SOCKET_POOL_SIZE = 30;
+const SOCKET_POOL_SIZE = 100;
 const upstreamSocketPool = [];
 let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
@@ -1544,7 +1605,7 @@ function loadConfig() {
                 minCacheTtlSeconds: 300,
                 latencyEMAWeight: 0.3,
                 quarantineDurationSeconds: 60,
-                staleCacheWindowSeconds: 86400,
+                staleCacheWindowSeconds: 604800,
                 ecsIPv4PrefixLength: 24
             };
             saveConfig();
@@ -1561,7 +1622,7 @@ function loadConfig() {
             minCacheTtlSeconds: 300,
             latencyEMAWeight: 0.3,
             quarantineDurationSeconds: 60,
-            staleCacheWindowSeconds: 86400,
+            staleCacheWindowSeconds: 604800,
             ecsIPv4PrefixLength: 24
         };
     }
@@ -1595,7 +1656,7 @@ function loadConfig() {
     config.minCacheTtlSeconds = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
     config.latencyEMAWeight = config.latencyEMAWeight !== undefined ? config.latencyEMAWeight : 0.3;
     config.quarantineDurationSeconds = config.quarantineDurationSeconds !== undefined ? config.quarantineDurationSeconds : 60;
-    config.staleCacheWindowSeconds = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 86400;
+    config.staleCacheWindowSeconds = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 604800;
     config.ecsIPv4PrefixLength = config.ecsIPv4PrefixLength !== undefined ? config.ecsIPv4PrefixLength : 24;
     config.llesThresholdMs = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
     config.pingIntervalSeconds = config.pingIntervalSeconds !== undefined ? config.pingIntervalSeconds : 3;
