@@ -180,7 +180,22 @@ function recordClientQuery(ip, userAgent, elapsed, domain, reqSize = 0, resSize 
 }
 
 function getClientsList() {
+    // Calculate average RTT of active clients who have clientToServerRTT
+    let sumRtt = 0;
+    let rttCount = 0;
+    for (const cl of clientRegistry.values()) {
+        if (cl.clientToServerRTT !== null && cl.clientToServerRTT !== undefined) {
+            sumRtt += cl.clientToServerRTT;
+            rttCount++;
+        }
+    }
+    const avgClientRtt = rttCount > 0 ? Math.round(sumRtt / rttCount) : 50; // default 50ms mobile baseline
+
     return Array.from(clientRegistry.values()).map(c => {
+        const effectiveRtt = (c.clientToServerRTT !== null && c.clientToServerRTT !== undefined) 
+            ? c.clientToServerRTT 
+            : avgClientRtt;
+
         const avgLat = c.queryCount > 0 ? Math.round(c.totalLatency / c.queryCount * 10) / 10 : 0;
         
         let qps = 0;
@@ -225,9 +240,9 @@ function getClientsList() {
         return {
             ip: maskIP(c.ip),
             queryCount: c.queryCount,
-            avgLatency: avgLat,
-            minLatency: c.minLatency !== undefined ? Math.round(c.minLatency * 10) / 10 : avgLat,
-            maxLatency: c.maxLatency !== undefined ? Math.round(c.maxLatency * 10) / 10 : avgLat,
+            avgLatency: Math.round((avgLat + effectiveRtt) * 10) / 10,
+            minLatency: Math.round(((c.minLatency !== undefined ? c.minLatency : avgLat) + effectiveRtt) * 10) / 10,
+            maxLatency: Math.round(((c.maxLatency !== undefined ? c.maxLatency : avgLat) + effectiveRtt) * 10) / 10,
             userAgent: c.userAgent,
             lastDomain: c.lastDomain,
             lastSeenAgoSeconds: Math.round((Date.now() - c.lastSeen) / 1000),
@@ -317,6 +332,26 @@ function checkExpiredQuarantines() {
             console.log(`[Upstream Autopilot] Quarantine expired for ${s.name} (${s.ip}). Entering stabilizing phase.`);
         }
     });
+
+    // Requirement 2: Emergency Recovery / Self-Healing
+    // If all servers are quarantined, offline, or stabilizing, reset them to prevent a complete outage.
+    const activeServers = pool.filter(s => s.online !== false && !s.quarantined && !s.stabilizing);
+    if (activeServers.length === 0 && pool.length > 0) {
+        console.warn(`[Upstream Autopilot] EMERGENCY: All upstream DNS servers are quarantined or offline! Triggering emergency recovery.`);
+        pool.forEach(s => {
+            s.online = true;
+            s.quarantined = false;
+            s.quarantineUntil = 0;
+            s.consecutiveFailures = 0;
+            s.stabilizing = false;
+            s.consecutiveStablePings = 0;
+            s.latency = Math.floor(Math.random() * 20) + 30; // Reset to a low baseline (30ms - 50ms) to trigger healthy probing
+            s.successRate = 100;
+            s.history = [];
+        });
+        changed = true;
+    }
+
     if (changed) {
         rebuildLlesRoutingPool();
         throttledBroadcastUpdate();
@@ -435,11 +470,40 @@ function isNetworkCongested() {
     return getCongestionLevel() > 70;
 }
 
+function isUpstreamCongested() {
+    const pool = config.upstreamPool || [];
+    const activeServers = pool.filter(s => s.online !== false && !s.quarantined);
+    if (activeServers.length === 0) return true; // All down/quarantined -> treated as congested/in crisis
+    
+    let sumLatency = 0;
+    let count = 0;
+    activeServers.forEach(s => {
+        if (typeof s.latency === 'number' && s.latency > 0 && s.latency < 9999) {
+            sumLatency += s.latency;
+            count++;
+        }
+    });
+    const avgUpstreamLatency = count > 0 ? (sumLatency / count) : 0;
+    return avgUpstreamLatency > 400;
+}
+
 function getWSUpdatePayload() {
+    // Calculate average RTT of active clients who have clientToServerRTT
+    let sumRtt = 0;
+    let rttCount = 0;
+    for (const cl of clientRegistry.values()) {
+        if (cl.clientToServerRTT !== null && cl.clientToServerRTT !== undefined) {
+            sumRtt += cl.clientToServerRTT;
+            rttCount++;
+        }
+    }
+    const avgClientRtt = rttCount > 0 ? Math.round(sumRtt / rttCount) : 50;
+
+    const baseAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
     const stats = {
         total: config.stats.total,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
-        avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
+        avgLatency: baseAvgLatency + avgClientRtt
     };
     
     const clientsList = getClientsList();
@@ -486,7 +550,7 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
             if (totalTTL > 10 && remainingTTL < (totalTTL * 0.2)) {
                 const prefetchKey = `prefetch_${key}`;
                 if (!activeUpstreamQueries.has(prefetchKey)) {
-                    if (isNetworkCongested()) {
+                    if (isNetworkCongested() || isUpstreamCongested()) {
                         // Skip prefetching to mitigate network/CPU congestion
                         return { responseBuffer: cached.responseBuffer, fromStale: false };
                     }
@@ -516,7 +580,7 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
             if (queryData && (now - cached.expiresAt < staleTtlLimitMs)) {
                 const revalidateKey = `revalidate_${key}`;
                 if (!activeUpstreamQueries.has(revalidateKey)) {
-                    if (isNetworkCongested()) {
+                    if (isNetworkCongested() || isUpstreamCongested()) {
                         // Serve stale directly without revalidating to reduce network queries
                         return { responseBuffer: cached.responseBuffer, fromStale: true };
                     }
@@ -1719,6 +1783,22 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
         clientResponse[1] = queryData[1];
         completeQuery(clientResponse, true, false, "", cachedResponseObj.fromStale ? "stale" : "cache");
     } else {
+        // Upstream Circuit Breaker: if upstreams are congested (>400ms) or all down,
+        // and we have a stale cache entry of any age, serve it immediately to bypass slow query overhead.
+        if (isUpstreamCongested()) {
+            const key = `${originalDomain.toLowerCase()}_${qtype}`;
+            const cached = dnsCache.get(key);
+            if (cached) {
+                config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
+                const clientResponse = Buffer.from(cached.responseBuffer);
+                clientResponse[0] = queryData[0];
+                clientResponse[1] = queryData[1];
+                console.warn(`[Circuit Breaker] Upstreams congested. Serving stale cache immediately for: ${originalDomain}`);
+                completeQuery(clientResponse, true, false, "", "stale", "");
+                return;
+            }
+        }
+
         // 2. Fetch from chosen upstream DNS (lazy-inject ECS on cache miss)
         let queryWithEcs = queryData;
         if (hasECS) {
@@ -1865,10 +1945,21 @@ app.get('/dns/mobileconfig', (req, res) => {
 
 // MARK: - Dashboard API Endpoints
 app.get('/dns/config', (req, res) => {
+    let sumRtt = 0;
+    let rttCount = 0;
+    for (const cl of clientRegistry.values()) {
+        if (cl.clientToServerRTT !== null && cl.clientToServerRTT !== undefined) {
+            sumRtt += cl.clientToServerRTT;
+            rttCount++;
+        }
+    }
+    const avgClientRtt = rttCount > 0 ? Math.round(sumRtt / rttCount) : 50;
+
+    const baseAvgLatency = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
     const stats = {
         total: config.stats.total,
         cacheHitRate: ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) > 0 ? ((config.stats.cacheHits || 0) / ((config.stats.cacheHits || 0) + (config.stats.cacheMisses || 0)) * 100) : 0,
-        avgLatency: latencyCount > 0 ? (totalLatency / latencyCount) : 0
+        avgLatency: baseAvgLatency + avgClientRtt
     };
     
     const clientsList = getClientsList();
