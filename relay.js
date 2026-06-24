@@ -34,8 +34,19 @@ const wsClients = new Set();
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
-const MAX_CACHE_SIZE = 15000;
+const MAX_CACHE_SIZE = 50000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
+
+// Event Loop Lag Monitor (Precise Process CPU Load Tracking)
+let eventLoopLag = 0;
+function measureEventLoopLag() {
+    const start = Date.now();
+    setImmediate(() => {
+        const lag = Date.now() - start;
+        eventLoopLag = eventLoopLag * 0.9 + lag * 0.1; // Exponential Moving Average (EMA)
+    });
+}
+setInterval(measureEventLoopLag, 1000);
 
 function recordServerHealth(server, isSuccess) {
     if (!server) return;
@@ -261,7 +272,7 @@ function getClientsList() {
 }
 
 // Upstream UDP Client Sockets Pool
-const SOCKET_POOL_SIZE = 15;
+const SOCKET_POOL_SIZE = 30;
 const upstreamSocketPool = [];
 let nextSocketIndex = 0;
 const pendingRequests = new Map(); // Key: upstreamTxId, Value: { callback, originalIDBytes, timer, timestamp }
@@ -436,20 +447,23 @@ function getServerStatus() {
     let status = "Ổn định";
     let statusClass = "stable"; // stable, warning, overloaded
     
-    if (memUsageMb > 400 || avgLat > 250) {
+    // Evaluate status using event loop lag as well
+    if (memUsageMb > 400 || avgLat > 250 || eventLoopLag > 100) {
         status = "Quá tải";
         statusClass = "overloaded";
-    } else if (memUsageMb > 250 || avgLat > 120) {
+    } else if (memUsageMb > 250 || avgLat > 120 || eventLoopLag > 30) {
         status = "Tải cao";
         statusClass = "warning";
     }
+    
+    const cpuLoadPct = Math.round(Math.min(100, (eventLoopLag / 50) * 100) * 10) / 10;
     
     return {
         status,
         statusClass,
         memoryUsage: memUsageMb,
         memoryLimit: 512,
-        cpuLoad: Math.round(os.loadavg()[0] * 100) / 100
+        cpuLoad: cpuLoadPct
     };
 }
 
@@ -457,11 +471,10 @@ function getCongestionLevel() {
     const memUsage = process.memoryUsage().heapUsed; // bytes
     const memUsageMb = Math.round(memUsage / 1024 / 1024);
     const avgLat = latencyCount > 0 ? (totalLatency / latencyCount) : 0;
-    const cpuLoad = os.loadavg()[0];
     
     const latCont = Math.min(100, (avgLat / 200) * 100);
     const ramCont = Math.min(100, (memUsageMb / 380) * 100);
-    const cpuCont = Math.min(100, (cpuLoad / 2.5) * 100);
+    const cpuCont = Math.min(100, (eventLoopLag / 50) * 100); // 50ms lag = 100% congestion
     
     return Math.round(Math.max(latCont, ramCont, cpuCont));
 }
@@ -609,7 +622,13 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
 function setCache(domain, qtype, responseBuffer, ttl) {
     const minTtl = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
     const parsedTtl = Number(ttl);
-    const finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
+    let finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
+
+    // Congestion-Adaptive TTL Boost: shield upstreams during congestion
+    if (isNetworkCongested() || isUpstreamCongested()) {
+        finalTtl = Math.min(3600, finalTtl * 2);
+    }
+
     const key = `${domain.toLowerCase()}_${qtype}`;
     if (dnsCache.has(key)) {
         dnsCache.delete(key);
