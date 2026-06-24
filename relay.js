@@ -36,7 +36,7 @@ const wsClients = new Set();
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
-let MAX_CACHE_SIZE = 250000;
+let MAX_CACHE_SIZE = 500000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
 
 // Event Loop Lag Monitor (Precise Process CPU Load Tracking)
@@ -113,13 +113,13 @@ function prewarmSubnetCache(clientIP) {
     if (!clientIP || subnet === "local" || prewarmedSubnets.has(subnet)) return;
     
     prewarmedSubnets.add(subnet);
-    console.log(`[Subnet Warm-up] New client subnet detected: ${subnet}. Pre-warming top 100 popular domains in RAM...`);
+    console.log(`[Subnet Warm-up] New client subnet detected: ${subnet}. Pre-warming all ${POPULAR_DOMAINS.length} popular domains in RAM...`);
     
-    // Warm up the top 100 domains to conserve resources while ensuring primary CDNs are warm
-    const domainsToWarm = POPULAR_DOMAINS.slice(0, 100);
+    // Warm up all popular domains programmatically generated
+    const domainsToWarm = POPULAR_DOMAINS;
     let index = 0;
-    const batchSize = 20;
-    const intervalMs = 300;
+    const batchSize = 25;
+    const intervalMs = 400;
     
     function processSubnetBatch() {
         const batch = domainsToWarm.slice(index, index + batchSize);
@@ -873,8 +873,9 @@ function checkCache(domain, qtype, queryData = null, hasECS = false, clientIP = 
             dnsCache.set(key, cached);
             return { responseBuffer: cached.responseBuffer, fromStale: false };
         } else {
-            // Serve stale cache for up to 12 hours (43200 seconds)
-            const staleTtlLimitMs = 12 * 3600 * 1000;
+            // Serve stale cache for up to config.staleCacheWindowSeconds
+            const staleWindowSecs = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 43200;
+            const staleTtlLimitMs = staleWindowSecs * 1000;
             if (queryData && (now - cached.expiresAt < staleTtlLimitMs)) {
                 const revalidateKey = `revalidate_${key}`;
                 if (!activeUpstreamQueries.has(revalidateKey)) {
@@ -905,13 +906,20 @@ function checkCache(domain, qtype, queryData = null, hasECS = false, clientIP = 
 }
 
 function setCache(domain, qtype, responseBuffer, ttl, clientIP = "") {
-    const minTtl = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
+    const minTtl = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 1800;
     const parsedTtl = Number(ttl);
     let finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
 
+    // Popular Domain TTL Stretching: stretch hot domains in RAM to 24 hours
+    const isPopular = POPULAR_DOMAINS.includes(domain.toLowerCase()) || 
+                     (domainQueryWeights.get(domain.toLowerCase()) || domainQueryWeights.get(domain) || 0) >= 2;
+    if (isPopular) {
+        finalTtl = Math.max(finalTtl, 86400);
+    }
+
     // Congestion-Adaptive TTL Boost: shield upstreams during congestion
     if (isNetworkCongested() || isUpstreamCongested()) {
-        finalTtl = Math.min(3600, finalTtl * 2);
+        finalTtl = Math.min(86400, finalTtl * 2);
     }
 
     const subnet = clientIP ? getClientSubnetPrefix(clientIP) : "local";
@@ -1884,7 +1892,7 @@ function loadConfig() {
     config.gslbRecords = config.gslbRecords || {};
     config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
     config.dnsRacingDelayMs = config.dnsRacingDelayMs !== undefined ? config.dnsRacingDelayMs : 15;
-    config.minCacheTtlSeconds = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
+    config.minCacheTtlSeconds = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 1800;
     config.latencyEMAWeight = config.latencyEMAWeight !== undefined ? config.latencyEMAWeight : 0.3;
     config.quarantineDurationSeconds = config.quarantineDurationSeconds !== undefined ? config.quarantineDurationSeconds : 60;
     config.staleCacheWindowSeconds = config.staleCacheWindowSeconds !== undefined ? config.staleCacheWindowSeconds : 604800;
@@ -2157,9 +2165,9 @@ function runRAMCacheOptimizer() {
     console.log(`[RAM Optimizer] Current RSS: ${rssMb}MB, Heap Used: ${heapUsedMb}MB, Cache Size: ${dnsCache.size}`);
     
     if (rssMb < 150) {
-        if (MAX_CACHE_SIZE < 1000000) {
-            MAX_CACHE_SIZE = 1000000;
-            console.log(`[RAM Optimizer] RSS is low (${rssMb}MB). Upgraded MAX_CACHE_SIZE to 1,000,000.`);
+        if (MAX_CACHE_SIZE < 2000000) {
+            MAX_CACHE_SIZE = 2000000;
+            console.log(`[RAM Optimizer] RSS is low (${rssMb}MB). Upgraded MAX_CACHE_SIZE to 2,000,000.`);
         }
         if (!config.staleCacheWindowSeconds || config.staleCacheWindowSeconds < 2592000) {
             config.staleCacheWindowSeconds = 2592000; // 30 days
@@ -2762,6 +2770,20 @@ app.post('/dns/cache/inject', (req, res) => {
     res.send(`Injected cache entry for ${domain} with expiresOffsetMs ${expiresOffsetMs}`);
 });
 
+app.get('/dns/cache/dump', (req, res) => {
+    const list = [];
+    for (const [key, value] of dnsCache.entries()) {
+        list.push({
+            key: key,
+            createdAt: value.createdAt,
+            expiresAt: value.expiresAt,
+            ttlSeconds: Math.round((value.expiresAt - value.createdAt) / 1000),
+            remainingTtlSeconds: Math.round((value.expiresAt - Date.now()) / 1000)
+        });
+    }
+    res.json(list);
+});
+
 app.post('/dns/toggle', (req, res) => {
     res.json({ running: true });
 });
@@ -2777,6 +2799,78 @@ function gracefulShutdown() {
 
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
+
+function reconstructClientIPFromSubnet(subnet) {
+    if (!subnet || subnet === "local") return "";
+    if (subnet.includes(':')) {
+        return subnet + ':1';
+    } else {
+        return subnet + '.1';
+    }
+}
+
+function startProactiveCacheRevalidation() {
+    if (process.env.NODE_ENV === 'test') {
+        console.log("[RAM Keep-Warm] Skipping proactive revalidation in test mode.");
+        return;
+    }
+    console.log("[RAM Keep-Warm] Initializing Proactive Cache Revalidation Daemon...");
+    
+    setInterval(() => {
+        const now = Date.now();
+        let prefetchCount = 0;
+        
+        for (const [key, cached] of dnsCache.entries()) {
+            const parts = key.split('_');
+            if (parts.length < 3) continue;
+            const domain = parts[0];
+            const qtype = parseInt(parts[1], 10);
+            const subnet = parts[2];
+            
+            const isPopular = POPULAR_DOMAINS.includes(domain.toLowerCase()) || 
+                             (domainQueryWeights.get(domain.toLowerCase()) || domainQueryWeights.get(domain) || 0) >= 2;
+            if (!isPopular) continue;
+            
+            const timeToLiveMs = cached.expiresAt - now;
+            const isExpiringSoon = timeToLiveMs > 0 && timeToLiveMs < 180000; // 3 minutes
+            const isStale = timeToLiveMs <= 0;
+            
+            if (isExpiringSoon || isStale) {
+                const prefetchKey = `proactive_${key}`;
+                if (!activeUpstreamQueries.has(prefetchKey)) {
+                    if (isNetworkCongested() || isUpstreamCongested()) continue;
+                    
+                    activeUpstreamQueries.set(prefetchKey, true);
+                    prefetchCount++;
+                    
+                    const hasECS = (subnet !== "local");
+                    const clientIP = reconstructClientIPFromSubnet(subnet);
+                    const targetDNS = selectUpstreamDNS(domain, hasECS, clientIP);
+                    
+                    let queryBuffer = buildQueryBufferForMeasure(domain);
+                    queryBuffer.writeUInt16BE(qtype, queryBuffer.length - 4);
+                    if (hasECS && clientIP) {
+                        queryBuffer = addECS(queryBuffer, clientIP);
+                    }
+                    
+                    fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                        activeUpstreamQueries.delete(prefetchKey);
+                        if (response) {
+                            const newTtl = extractTTL(response);
+                            setCache(domain, qtype, response, newTtl, clientIP);
+                        }
+                    }, hasECS, clientIP);
+                }
+            }
+        }
+        
+        if (prefetchCount > 0) {
+            console.log(`[RAM Keep-Warm] Proactively refreshed ${prefetchCount} popular DNS records in RAM.`);
+        }
+    }, 60000);
+}
+
+startProactiveCacheRevalidation();
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
