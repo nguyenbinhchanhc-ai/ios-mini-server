@@ -20,7 +20,10 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error("CRITICAL: Unhandled Rejection at:", promise, "reason:", reason);
 });
 
-const CONFIG_PATH = path.join(__dirname, 'dns_config.json');
+const CONFIG_PATH = process.env.NODE_ENV === 'test' 
+    ? path.join(__dirname, 'dns_config_test.json') 
+    : path.join(__dirname, 'dns_config.json');
+
 
 // State variables
 let config = {};
@@ -1841,7 +1844,7 @@ function loadConfig() {
                 stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
                 dnsRacingEnabled: true,
                 dnsRacingDelayMs: 15,
-                minCacheTtlSeconds: 300,
+                minCacheTtlSeconds: 1800,
                 latencyEMAWeight: 0.3,
                 quarantineDurationSeconds: 60,
                 staleCacheWindowSeconds: 604800,
@@ -1858,7 +1861,7 @@ function loadConfig() {
             stats: { total: 0, cacheHits: 0, cacheMisses: 0, racingWins: 0, racingTotal: 0 },
             dnsRacingEnabled: true,
             dnsRacingDelayMs: 15,
-            minCacheTtlSeconds: 300,
+            minCacheTtlSeconds: 1800,
             latencyEMAWeight: 0.3,
             quarantineDurationSeconds: 60,
             staleCacheWindowSeconds: 604800,
@@ -1866,13 +1869,26 @@ function loadConfig() {
         };
     }
     
-    config.stats = config.stats || {};
-    config.stats.total = config.stats.total || 0;
-    config.stats.cacheHits = config.stats.cacheHits || 0;
-    config.stats.cacheMisses = config.stats.cacheMisses || 0;
-    config.stats.racingWins = config.stats.racingWins || 0;
-    config.stats.racingTotal = config.stats.racingTotal || 0;
+    // Always track metrics in real-time starting from 0 on server boot
+    config.stats = {
+        total: 0,
+        cacheHits: 0,
+        cacheMisses: 0,
+        racingWins: 0,
+        racingTotal: 0
+    };
     config.upstreamPool = config.upstreamPool || [];
+    // Completely remove any MockDNS or loopback servers from the active pool in non-test mode
+    if (process.env.NODE_ENV !== 'test') {
+        config.upstreamPool = config.upstreamPool.filter(s => 
+            s.ip !== "127.0.0.1:3653" && 
+            s.ip !== "127.0.0.1:3654" && 
+            !s.ip.startsWith("127.0.0.1") && 
+            !s.ip.startsWith("localhost") && 
+            !s.name.toLowerCase().includes("mock")
+        );
+    }
+    
     // Ensure all defaultPool servers are present in the pool
     defaultPool.forEach(defaultServer => {
         if (!config.upstreamPool.some(s => s.ip === defaultServer.ip)) {
@@ -1880,7 +1896,7 @@ function loadConfig() {
         }
     });
     config.upstreamPool.forEach(server => {
-        server.queryCount = server.queryCount || 0;
+        server.queryCount = 0; // Force real-time query count tracking on startup/restart
         server.history = [];
         server.successRate = 100;
         if (server.ecsSupported === undefined) {
@@ -1904,7 +1920,33 @@ function loadConfig() {
 
 function saveConfig() {
     try {
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+        const configToSave = JSON.parse(JSON.stringify(config));
+        
+        // Strip stats from the saved configuration to keep it clean and prevent dynamic updates to git history
+        delete configToSave.stats;
+        
+        if (configToSave.upstreamPool) {
+            // Strip dynamic live state and mock servers in non-test mode before writing config.json to disk
+            configToSave.upstreamPool = configToSave.upstreamPool
+                .filter(s => {
+                    if (process.env.NODE_ENV !== 'test') {
+                        return s.ip !== "127.0.0.1:3653" && 
+                               s.ip !== "127.0.0.1:3654" && 
+                               !s.ip.startsWith("127.0.0.1") && 
+                               !s.ip.startsWith("localhost") && 
+                               !s.name.toLowerCase().includes("mock");
+                    }
+                    return true;
+                })
+                .map(s => {
+                    return {
+                        ip: s.ip,
+                        name: s.name,
+                        ecsSupported: s.ecsSupported !== undefined ? s.ecsSupported : true
+                    };
+                });
+        }
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(configToSave, null, 2), 'utf8');
     } catch (e) {
         console.error("Failed to save config:", e);
     }
@@ -2791,9 +2833,7 @@ app.post('/dns/toggle', (req, res) => {
 // Graceful shutdown hooks
 function gracefulShutdown() {
     console.log("Shutting down. Saving config...");
-    try {
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
-    } catch (e) {}
+    saveConfig();
     process.exit(0);
 }
 
