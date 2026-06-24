@@ -108,8 +108,8 @@ function prewarmCache() {
     console.log(`[Always-Hot Cache] Starting rate-limited pre-warming of ${POPULAR_DOMAINS.length} popular domains...`);
     
     let index = 0;
-    const batchSize = 30; // 30 domains (60 records) per batch
-    const intervalMs = 1500; // every 1.5 seconds to prevent rate-limiting/overload
+    const batchSize = 100; // 100 domains (200 records) per batch
+    const intervalMs = 800; // every 800ms for faster pre-warming using RAM
     
     function processBatch() {
         const batch = POPULAR_DOMAINS.slice(index, index + batchSize);
@@ -120,8 +120,9 @@ function prewarmCache() {
         
         batch.forEach(domain => {
             [1, 28].forEach(qtype => {
-                const key = `${domain}_${qtype}`;
-                if (!dnsCache.has(key)) {
+                const subnet = getClientSubnetPrefix(lastSeenClientIP || "115.79.0.1");
+                const cacheKey = `${domain}_${qtype}_${subnet}`;
+                if (!dnsCache.has(cacheKey)) {
                     // Populate query weights to mark them as popular on startup
                     domainQueryWeights.set(domain, 3);
                     
@@ -130,7 +131,7 @@ function prewarmCache() {
                     fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
                         if (response) {
                             const newTtl = extractTTL(response);
-                            setCache(domain, qtype, response, newTtl);
+                            setCache(domain, qtype, response, newTtl, lastSeenClientIP || "115.79.0.1");
                         }
                     }, true);
                 }
@@ -142,6 +143,58 @@ function prewarmCache() {
     }
     
     processBatch();
+}
+
+function getClientSubnetPrefix(ip) {
+    if (!ip || ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1" || ip.endsWith("127.0.0.1")) return "local";
+    if (ip.includes(':')) {
+        const parts = ip.split(':');
+        return parts.slice(0, 3).join(':'); // /48 prefix
+    } else {
+        const parts = ip.split('.');
+        if (parts.length === 4) {
+            return `${parts[0]}.${parts[1]}.${parts[2]}`; // /24 prefix
+        }
+        return ip;
+    }
+}
+
+const PREDICTIVE_MAP = {
+    "vnexpress.net": ["s.vnecdn.net", "e.vnecdn.net", "b.vnecdn.net", "s1.vnecdn.net", "vnecdn.net"],
+    "zingnews.vn": ["znews-static.zadn.vn", "znews-photo.zadn.vn", "zadn.vn"],
+    "zing.vn": ["znews-static.zadn.vn", "znews-photo.zadn.vn", "zadn.vn"],
+    "zalo.me": ["zalocdn.com", "wpa.zalo.me", "chat.zalo.me"],
+    "facebook.com": ["static.xx.fbcdn.net", "scontent.xx.fbcdn.net", "video.xx.fbcdn.net", "connect.facebook.net", "fbcdn.net"],
+    "youtube.com": ["ytimg.com", "i.ytimg.com", "s.ytimg.com", "ggpht.com", "googlevideo.com"],
+    "shopee.vn": ["cf.shopee.vn", "deo.shopeemobile.com", "shopeemobile.com"],
+    "lazada.vn": ["g.alicdn.com", "img.alicdn.com", "laz-img-cdn.alicdn.com", "sg-live-01.slatic.net"],
+    "tiktok.com": ["lf16-pkgcdn.pitcontent.com", "v16.tiktokcdn.com", "sf16-muse-va.ibytedtos.com"],
+    "google.com": ["gstatic.com", "apis.google.com", "googleusercontent.com", "dns.google"]
+};
+
+function triggerPredictivePrefetch(domain) {
+    if (!domain) return;
+    const d = domain.toLowerCase();
+    const assets = PREDICTIVE_MAP[d];
+    if (assets && assets.length > 0) {
+        console.log(`[Predictive Cache] Main domain ${domain} queried. Prefetching ${assets.length} associated asset domains...`);
+        assets.forEach(asset => {
+            [1, 28].forEach(qtype => {
+                const subnet = getClientSubnetPrefix(lastSeenClientIP || "115.79.0.1");
+                const cacheKey = `${asset}_${qtype}_${subnet}`;
+                if (!dnsCache.has(cacheKey)) {
+                    const targetDNS = selectUpstreamDNS(asset, true);
+                    const queryBuffer = addECS(buildQueryBufferForMeasure(asset), lastSeenClientIP || "115.79.0.1");
+                    fetchFromUpstreamDeduplicated(queryBuffer, asset, qtype, targetDNS, (response) => {
+                        if (response) {
+                            const newTtl = extractTTL(response);
+                            setCache(asset, qtype, response, newTtl, lastSeenClientIP || "115.79.0.1");
+                        }
+                    }, true);
+                }
+            });
+        });
+    }
 }
 
 function recordServerHealth(server, isSuccess) {
@@ -645,8 +698,9 @@ function getWSUpdatePayload() {
 
 
 // Local DNS Cache with prefetching and Stale-While-Revalidate (SWR)
-function checkCache(domain, qtype, queryData = null, hasECS = false) {
-    const key = `${domain.toLowerCase()}_${qtype}`;
+function checkCache(domain, qtype, queryData = null, hasECS = false, clientIP = "") {
+    const subnet = hasECS ? getClientSubnetPrefix(clientIP || lastSeenClientIP || "115.79.0.1") : "local";
+    const key = `${domain.toLowerCase()}_${qtype}_${subnet}`;
     const cached = dnsCache.get(key);
     if (cached) {
         const now = Date.now();
@@ -667,13 +721,13 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
                     console.log(`[Cache Prefetch] Triggering background prefetch for: ${domain} (remaining TTL: ${Math.round(remainingTTL)}s / ${Math.round(totalTTL)}s)`);
                     
                     const targetDNS = selectUpstreamDNS(domain, hasECS);
-                    const prefetchQueryBuffer = hasECS ? addECS(queryData || buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1") : (queryData ? Buffer.from(queryData) : buildQueryBufferForMeasure(domain));
+                    const prefetchQueryBuffer = hasECS ? addECS(queryData || buildQueryBufferForMeasure(domain), clientIP || lastSeenClientIP || "115.79.0.1") : (queryData ? Buffer.from(queryData) : buildQueryBufferForMeasure(domain));
                     
                     fetchFromUpstreamDeduplicated(prefetchQueryBuffer, domain, qtype, targetDNS, (response) => {
                         activeUpstreamQueries.delete(prefetchKey);
                         if (response) {
                             const newTtl = extractTTL(response);
-                            setCache(domain, qtype, response, newTtl);
+                            setCache(domain, qtype, response, newTtl, hasECS ? (clientIP || lastSeenClientIP || "115.79.0.1") : "");
                             console.log(`[Cache Prefetch] Asynchronously updated cache for: ${domain} (New TTL: ${newTtl}s)`);
                         }
                     }, hasECS);
@@ -697,13 +751,13 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
                     console.log(`[Cache SWR] Serving stale cache for: ${domain} (expired ${Math.round((now - cached.expiresAt) / 1000)}s ago). Triggering background revalidate...`);
                     
                     const targetDNS = selectUpstreamDNS(domain, hasECS);
-                    const revalidateQueryBuffer = hasECS ? addECS(queryData, lastSeenClientIP || "115.79.0.1") : Buffer.from(queryData);
+                    const revalidateQueryBuffer = hasECS ? addECS(queryData, clientIP || lastSeenClientIP || "115.79.0.1") : Buffer.from(queryData);
                     
                     fetchFromUpstreamDeduplicated(revalidateQueryBuffer, domain, qtype, targetDNS, (response) => {
                         activeUpstreamQueries.delete(revalidateKey);
                         if (response) {
                             const newTtl = extractTTL(response);
-                            setCache(domain, qtype, response, newTtl);
+                            setCache(domain, qtype, response, newTtl, hasECS ? (clientIP || lastSeenClientIP || "115.79.0.1") : "");
                             console.log(`[Cache SWR] Background revalidated cache for: ${domain} (New TTL: ${newTtl}s)`);
                         }
                     }, hasECS);
@@ -715,7 +769,7 @@ function checkCache(domain, qtype, queryData = null, hasECS = false) {
     return null;
 }
 
-function setCache(domain, qtype, responseBuffer, ttl) {
+function setCache(domain, qtype, responseBuffer, ttl, clientIP = "") {
     const minTtl = config.minCacheTtlSeconds !== undefined ? config.minCacheTtlSeconds : 300;
     const parsedTtl = Number(ttl);
     let finalTtl = (isNaN(parsedTtl) || parsedTtl < minTtl) ? minTtl : parsedTtl;
@@ -725,7 +779,8 @@ function setCache(domain, qtype, responseBuffer, ttl) {
         finalTtl = Math.min(3600, finalTtl * 2);
     }
 
-    const key = `${domain.toLowerCase()}_${qtype}`;
+    const subnet = clientIP ? getClientSubnetPrefix(clientIP) : "local";
+    const key = `${domain.toLowerCase()}_${qtype}_${subnet}`;
     if (dnsCache.has(key)) {
         dnsCache.delete(key);
     } else if (dnsCache.size >= MAX_CACHE_SIZE) {
@@ -1750,24 +1805,32 @@ function runPopularKeepAlive() {
     for (const [domain, count] of domainQueryWeights.entries()) {
         if (count >= minPopularThreshold) {
             [1, 28].forEach(qtype => {
-                const key = `${domain}_${qtype}`;
-                const cached = dnsCache.get(key);
-                if (cached) {
-                    const now = Date.now();
-                    const remainingTTL = (cached.expiresAt - now) / 1000;
-                    const totalTTL = (cached.expiresAt - cached.createdAt) / 1000;
-                    if (remainingTTL < (totalTTL * 0.3)) {
-                        console.log(`[Always-Hot Cache] Refreshing popular domain cache: ${domain} (Qtype: ${qtype}, Queries: ${count})`);
-                        // Pass true for hasECS because client queries benefit from local geo-routing
-                        const targetDNS = selectUpstreamDNS(domain, true);
-                        // Inject ECS using lastSeenClientIP to prevent US IP caching
-                        const queryBuffer = addECS(buildQueryBufferForMeasure(domain), lastSeenClientIP || "115.79.0.1");
-                        fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
-                            if (response) {
-                                const newTtl = extractTTL(response);
-                                setCache(domain, qtype, response, newTtl);
-                            }
-                        }, true);
+                const subnetsToRefresh = new Set(["local"]);
+                if (lastSeenClientIP) {
+                    subnetsToRefresh.add(getClientSubnetPrefix(lastSeenClientIP));
+                }
+                
+                for (const subnet of subnetsToRefresh) {
+                    const key = `${domain.toLowerCase()}_${qtype}_${subnet}`;
+                    const cached = dnsCache.get(key);
+                    if (cached) {
+                        const now = Date.now();
+                        const remainingTTL = (cached.expiresAt - now) / 1000;
+                        const totalTTL = (cached.expiresAt - cached.createdAt) / 1000;
+                        if (remainingTTL < (totalTTL * 0.3)) {
+                            console.log(`[Always-Hot Cache] Refreshing popular domain cache: ${domain} (Qtype: ${qtype}, Subnet: ${subnet}, Queries: ${count})`);
+                            const hasECS = subnet !== "local";
+                            const clientIPForEcs = hasECS ? (lastSeenClientIP || "115.79.0.1") : "";
+                            const targetDNS = selectUpstreamDNS(domain, hasECS, clientIPForEcs);
+                            const queryBuffer = hasECS ? addECS(buildQueryBufferForMeasure(domain), clientIPForEcs) : buildQueryBufferForMeasure(domain);
+                            
+                            fetchFromUpstreamDeduplicated(queryBuffer, domain, qtype, targetDNS, (response) => {
+                                if (response) {
+                                    const newTtl = extractTTL(response);
+                                    setCache(domain, qtype, response, newTtl, clientIPForEcs);
+                                }
+                            }, hasECS, clientIPForEcs);
+                        }
                     }
                 }
             });
@@ -1825,7 +1888,7 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
         }
     }
     
-    const hasECS = !!(clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1");
+    const hasECS = !!(clientIP && clientIP !== "127.0.0.1" && clientIP !== "::1" && clientIP !== "::ffff:127.0.0.1" && !clientIP.endsWith("127.0.0.1"));
     
     const completeQuery = (responseBuffer, fromCache = false, isGslb = false, gslbIPs = "", sourceOverride = "", targetDNS = "") => {
         const latency = Date.now() - startTime;
@@ -1906,8 +1969,11 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
     // Increment query popularity weight
     domainQueryWeights.set(originalDomain, (domainQueryWeights.get(originalDomain) || 0) + 1);
 
+    // Trigger predictive prefetch for associated CDN/asset domains asynchronously in background
+    triggerPredictivePrefetch(originalDomain);
+
     // 1. Check local cache (using raw queryData first, avoiding addECS overhead for hits)
-    const cachedResponseObj = checkCache(originalDomain, qtype, queryData, hasECS);
+    const cachedResponseObj = checkCache(originalDomain, qtype, queryData, hasECS, clientIP);
     if (cachedResponseObj) {
         config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
         const clientResponse = Buffer.from(cachedResponseObj.responseBuffer);
@@ -1918,7 +1984,8 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
         // Upstream Circuit Breaker: if upstreams are congested (>400ms) or all down,
         // and we have a stale cache entry of any age, serve it immediately to bypass slow query overhead.
         if (isUpstreamCongested()) {
-            const key = `${originalDomain.toLowerCase()}_${qtype}`;
+            const subnet = hasECS ? getClientSubnetPrefix(clientIP || lastSeenClientIP || "115.79.0.1") : "local";
+            const key = `${originalDomain.toLowerCase()}_${qtype}_${subnet}`;
             const cached = dnsCache.get(key);
             if (cached) {
                 config.stats.cacheHits = (config.stats.cacheHits || 0) + 1;
@@ -1956,7 +2023,7 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
                         ttl = 10; // Negative cache temporary failures for 10 seconds
                     }
                     
-                    setCache(originalDomain, qtype, response, ttl);
+                    setCache(originalDomain, qtype, response, ttl, hasECS ? clientIP : "");
                     completeQuery(response, false, false, "", "", targetDNS);
                 }
             } else {
@@ -1964,7 +2031,8 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
                     
                     // RFC 8767 Last-Resort Stale Cache Fallback:
-                    const key = `${originalDomain.toLowerCase()}_${qtype}`;
+                    const subnet = hasECS ? getClientSubnetPrefix(clientIP || lastSeenClientIP || "115.79.0.1") : "local";
+                    const key = `${originalDomain.toLowerCase()}_${qtype}_${subnet}`;
                     const cached = dnsCache.get(key);
                     if (cached) {
                         const clientResponse = Buffer.from(cached.responseBuffer);
@@ -1978,7 +2046,7 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
                     // Negative caching for timeouts: cache a synthetic SERVFAIL response for 10s
                     const servfailRes = buildServfailResponse(queryWithEcs);
                     if (servfailRes.length > 0) {
-                        setCache(originalDomain, qtype, servfailRes, 10);
+                        setCache(originalDomain, qtype, servfailRes, 10, hasECS ? clientIP : "");
                     }
                 }
                 completeQuery(Buffer.alloc(0), false, false, "", "", targetDNS);
@@ -2283,7 +2351,7 @@ app.post('/dns/cache/inject', (req, res) => {
     const dummyIps = ["1.2.3.4"];
     const responseBuffer = buildGslbResponse(queryBuffer, parsed.questionEndOffset, dummyIps);
     
-    const key = `${domain.toLowerCase()}_1`; // Qtype 1 (A)
+    const key = `${domain.toLowerCase()}_1_local`; // Qtype 1 (A) with local subnet
     
     dnsCache.set(key, {
         responseBuffer: responseBuffer,
