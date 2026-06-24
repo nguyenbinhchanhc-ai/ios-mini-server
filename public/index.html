@@ -1033,7 +1033,11 @@
                     
                     let rttElement = '';
                     if (c.clientToServerRTT !== null && c.clientToServerRTT !== undefined) {
-                        rttElement = `<span style="font-size: 0.7rem; color: #60a5fa; font-family: monospace; margin-top: 0.15rem;">⚡ RTT: ${c.clientToServerRTT}ms (Dashboard)</span>`;
+                        const fastPathBadge = c.fastPathActive 
+                            ? `<span style="background: rgba(16, 185, 129, 0.15); color: var(--success); padding: 0.05rem 0.25rem; border-radius: 3px; font-weight: bold; font-size: 0.65rem; margin-left: 0.5rem; border: 1px solid rgba(16, 185, 129, 0.3); display: inline-block; vertical-align: middle;">Fast Path Active</span>`
+                            : '';
+                        const color = c.clientToServerRTT > 120 ? '#f59e0b' : '#60a5fa';
+                        rttElement = `<span style="font-size: 0.7rem; color: ${color}; font-family: monospace; margin-top: 0.15rem; display: block;">⚡ RTT: ${c.clientToServerRTT}ms (Dashboard)${fastPathBadge}</span>`;
                     }
                     
                     let healthColor = 'var(--success)';

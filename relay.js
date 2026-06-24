@@ -248,6 +248,29 @@ function triggerPredictivePrefetch(domain) {
     }
 }
 
+function triggerDualStackPrewarm(domain, qtype, clientIP, hasECS) {
+    if (qtype !== 1 && qtype !== 28) return;
+    
+    const otherQtype = (qtype === 1) ? 28 : 1;
+    const subnet = hasECS ? getClientSubnetPrefix(clientIP) : "local";
+    const otherKey = `${domain.toLowerCase()}_${otherQtype}_${subnet}`;
+    
+    if (!dnsCache.has(otherKey)) {
+        const targetDNS = selectUpstreamDNS(domain, hasECS, clientIP);
+        const baseQueryBuffer = buildQueryBufferForMeasure(domain);
+        baseQueryBuffer.writeUInt16BE(otherQtype, baseQueryBuffer.length - 4);
+        const queryBuffer = hasECS ? addECS(baseQueryBuffer, clientIP) : baseQueryBuffer;
+        
+        fetchFromUpstreamDeduplicated(queryBuffer, domain, otherQtype, targetDNS, (response) => {
+            if (response) {
+                const newTtl = extractTTL(response);
+                setCache(domain, otherQtype, response, newTtl, hasECS ? clientIP : "");
+                console.log(`[Dual-Stack Prewarm] Speculatively cached ${otherQtype === 28 ? 'AAAA' : 'A'} record for ${domain} (${subnet})`);
+            }
+        }, hasECS, clientIP);
+    }
+}
+
 function recordServerHealth(server, isSuccess) {
     if (!server) return;
     if (!server.history) server.history = [];
@@ -466,7 +489,8 @@ function getClientsList() {
             qps: qps,
             prefUpstream: prefUpstream,
             healthScore: healthScore,
-            clientToServerRTT: c.clientToServerRTT !== undefined ? c.clientToServerRTT : null
+            clientToServerRTT: c.clientToServerRTT !== undefined ? c.clientToServerRTT : null,
+            fastPathActive: !!(c.clientToServerRTT && c.clientToServerRTT > 120)
         };
     }).sort((a, b) => b.queryCount - a.queryCount).slice(0, 50);
 }
@@ -919,6 +943,22 @@ function setCache(domain, qtype, responseBuffer, ttl, clientIP = "") {
         createdAt: Date.now(),
         expiresAt: Date.now() + (finalTtl * 1000)
     });
+
+    // Cross-Subnet Cache Replication: replicate this cache entry to all other active subnets in RAM
+    if (clientIP && subnet !== "local") {
+        prewarmedSubnets.forEach(activeSubnet => {
+            if (activeSubnet !== subnet) {
+                const replicaKey = `${domain.toLowerCase()}_${qtype}_${activeSubnet}`;
+                if (!dnsCache.has(replicaKey)) {
+                    dnsCache.set(replicaKey, {
+                        responseBuffer: responseBuffer,
+                        createdAt: Date.now(),
+                        expiresAt: Date.now() + (finalTtl * 1000)
+                    });
+                }
+            }
+        });
+    }
 }
 
 // Parse IP address to byte array (supports IPv4 and IPv6)
@@ -1519,8 +1559,17 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         
         // Evaluate client health score for dynamic racing optimization
         let bypassRacingDelay = false;
+        let fastPathActive = false;
         if (clientIP && clientRegistry.has(clientIP)) {
             const client = clientRegistry.get(clientIP);
+            
+            // Fast Path: If client-to-server RTT is high (> 120ms), trigger immediate racing to offset slow physical link
+            if (client.clientToServerRTT && client.clientToServerRTT > 120) {
+                bypassRacingDelay = true;
+                fastPathActive = true;
+                console.log(`[Fast Path] High RTT client detected (${client.clientToServerRTT}ms) for IP ${clientIP}. Bypassing racing delay.`);
+            }
+            
             let healthScore = 100;
             if (client.queryCount > 0) {
                 const errorRate = client.errorCount / client.queryCount;
@@ -1545,12 +1594,12 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         
         const congested = isNetworkCongested();
         
-        if (congested) {
+        if (congested && !fastPathActive) {
             // Under network congestion, increase racing delay to 150ms to prevent packet overhead
             racingDelay = Math.max(racingDelay * 4, 150);
         }
         
-        if (bypassRacingDelay && !congested) {
+        if (bypassRacingDelay && (!congested || fastPathActive)) {
             racingDelay = 2; // parallel query immediately with a 2ms gap
         }
         
@@ -2324,6 +2373,8 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
         clientResponse[0] = queryData[0];
         clientResponse[1] = queryData[1];
         completeQuery(clientResponse, true, false, "", cachedResponseObj.fromStale ? "stale" : "cache");
+        
+        triggerDualStackPrewarm(originalDomain, qtype, clientIP, hasECS);
     } else {
         // Upstream Circuit Breaker: if upstreams are congested (>400ms) or all down,
         // and we have a stale cache entry of any age, serve it immediately to bypass slow query overhead.
@@ -2370,6 +2421,8 @@ function handleDoH(queryData, clientIP, hostHeader, userAgent, callback) {
                     setCache(originalDomain, qtype, response, ttl, hasECS ? clientIP : "");
                     completeQuery(response, false, false, "", "", targetDNS);
                 }
+                
+                triggerDualStackPrewarm(originalDomain, qtype, clientIP, hasECS);
             } else {
                 if (!isSecondary) {
                     config.stats.cacheMisses = (config.stats.cacheMisses || 0) + 1;
