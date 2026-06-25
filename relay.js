@@ -39,7 +39,7 @@ const wsClients = new Set();
 
 // Performance Metrics & Local DNS Cache
 const dnsCache = new Map(); // Key: domain + '_' + qtype, Value: { responseBuffer, createdAt, expiresAt }
-let MAX_CACHE_SIZE = 500000;
+let MAX_CACHE_SIZE = 1000000;
 const activeUpstreamQueries = new Map(); // Key: domain + '_' + qtype, Value: Array of waiting client callbacks
 
 // Event Loop Lag Monitor (Precise Process CPU Load Tracking)
@@ -110,6 +110,14 @@ BASE_POPULAR_DOMAINS.forEach(domain => {
 });
 
 const prewarmedSubnets = new Set();
+
+// Common Vietnamese ISP subnets (Viettel, FPT, VNPT) to pre-warm and replicate in RAM on boot
+const VN_ISP_SUBNETS = [
+    "115.79.0", "171.244.0", "27.72.0", "116.109.0", "115.78.0", // Viettel
+    "1.53.0", "118.69.0", "210.245.0", "58.186.0",               // FPT
+    "113.161.0", "14.161.0", "123.21.0", "222.252.0", "14.162.0", // VNPT
+    "118.70.0", "123.20.0", "123.24.0", "123.25.0", "118.71.0"    // Others
+];
 
 function prewarmSubnetCache(clientIP) {
     const subnet = getClientSubnetPrefix(clientIP);
@@ -570,6 +578,48 @@ let totalLatency = 0;
 let latencyCount = 0;
 let averageLatencyEMA = 30; // Global real-time moving average latency (default 30ms)
 
+// Record upstream response performance in an in-memory sliding window
+function recordUpstreamResponse(server, latency, success) {
+    if (!server.latencyHistory) server.latencyHistory = [];
+    server.latencyHistory.push({ latency, success, timestamp: Date.now() });
+    if (server.latencyHistory.length > 50) {
+        server.latencyHistory.shift();
+    }
+    
+    const history = server.latencyHistory;
+    const successes = history.filter(h => h.success);
+    const count = history.length;
+    
+    if (count > 0) {
+        server.lossRate = (count - successes.length) / count;
+        if (successes.length > 0) {
+            const sum = successes.reduce((acc, h) => acc + h.latency, 0);
+            server.avgLatency = Math.round(sum / successes.length);
+            
+            const diffs = successes.map(h => Math.abs(h.latency - server.avgLatency));
+            const jitterSum = diffs.reduce((acc, d) => acc + d, 0);
+            server.jitter = Math.round(jitterSum / successes.length);
+        } else {
+            server.avgLatency = 9999;
+            server.jitter = 9999;
+        }
+    }
+}
+
+// Calculate upstream performance score based on dynamic memory metrics
+function getUpstreamScore(server) {
+    const avg = server.avgLatency !== undefined ? server.avgLatency : (server.latency || 30);
+    const jit = server.jitter !== undefined ? server.jitter : 5;
+    const loss = server.lossRate !== undefined ? server.lossRate : 0;
+    
+    let penalty = 1.0;
+    if (server.quarantined) penalty = 0.01;
+    else if (server.stabilizing) penalty = 0.2;
+    
+    // Score formula: higher score means faster & more stable server
+    return (1000 / (avg + 2 * jit + 500 * loss)) * penalty;
+}
+
 // Precalculated LLES routing pool to optimize selection performance to O(1)
 let precalculatedLlesPool = [];
 let precalculatedLlesTotalWeight = 0;
@@ -591,8 +641,9 @@ function rebuildLlesRoutingPool() {
     let minLatency = Infinity;
     for (let i = 0; i < onlinePool.length; i++) {
         const s = onlinePool[i];
-        if (typeof s.latency === 'number' && s.latency < minLatency && s.latency > 0) {
-            minLatency = s.latency;
+        const avg = s.avgLatency !== undefined ? s.avgLatency : (s.latency || 20);
+        if (avg < minLatency && avg > 0) {
+            minLatency = avg;
         }
     }
     if (minLatency === Infinity) minLatency = 20;
@@ -600,8 +651,15 @@ function rebuildLlesRoutingPool() {
     const threshold = config.llesThresholdMs !== undefined ? config.llesThresholdMs : 150;
     
     precalculatedLlesPool = onlinePool.map(s => {
-        const isLowLat = s.latency <= minLatency + threshold;
+        const avg = s.avgLatency !== undefined ? s.avgLatency : (s.latency || 20);
+        const isLowLat = avg <= minLatency + threshold;
         let weight = isLowLat ? 1.0 : 0.05;
+        
+        // Scale down weight based on real-time packet loss history in RAM
+        if (s.lossRate && s.lossRate > 0) {
+            weight *= (1 - s.lossRate);
+        }
+        
         if (s.stabilizing) {
             weight *= 0.2; // 80% penalty for stabilizing servers
         }
@@ -1257,6 +1315,7 @@ function initUpstreamSocketPool() {
                     server.latency = Math.round((server.latency || 0) * (1 - alpha) + elapsed * alpha);
                     server.online = true;
                     recordServerHealth(server, true);
+                    recordUpstreamResponse(server, elapsed, true);
                     
                     // Reset consecutive failures on success
                     server.consecutiveFailures = 0;
@@ -1367,6 +1426,7 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                  server.latency = 9999;
                  server.online = false;
                  recordServerHealth(server, false);
+                 recordUpstreamResponse(server, 9999, false);
                  
                  // Immediately downgrade to stabilizing
                  server.stabilizing = true;
@@ -1418,6 +1478,7 @@ function queryUpstream(dnsQueryBuffer, upstreamIP, callback, isClientQuery = fal
                     server.latency = 9999;
                     server.online = false;
                     recordServerHealth(server, false);
+                    recordUpstreamResponse(server, 9999, false);
                     
                     // Immediately downgrade to stabilizing
                     server.stabilizing = true;
@@ -1517,10 +1578,11 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         return;
     }
     
-    // Standard path with potential 2-server racing
+    // Standard path with dynamic 3-server cascading racing based on performance scores in RAM
     const otherOnlinePool = onlinePool.filter(s => s.ip !== upstreamDNS);
-    const sorted = [...otherOnlinePool].sort((a, b) => (a.latency || 0) - (b.latency || 0));
-    const secondUpstreamDNS = sorted.length > 0 ? sorted[0].ip : null;
+    const sortedOther = [...otherOnlinePool].sort((a, b) => getUpstreamScore(b) - getUpstreamScore(a));
+    const secondUpstreamDNS = sortedOther.length > 0 ? sortedOther[0].ip : null;
+    const thirdUpstreamDNS = sortedOther.length > 1 ? sortedOther[1].ip : null;
     
     let resolved = false;
     let queriesActive = 1;
@@ -1531,10 +1593,10 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
         if (response) {
             resolved = true;
             
-            // Check if secondary DNS or DoH won the race
-            if (secondUpstreamDNS && (respondingIP === secondUpstreamDNS || respondingIP.startsWith("DoH"))) {
+            // Check if an alternative resolver (secondary, tertiary, or DoH) won the race
+            if (respondingIP !== upstreamDNS) {
                 config.stats.racingWins = (config.stats.racingWins || 0) + 1;
-                console.log(`[DNS Racing] Secondary ${respondingIP} won the race against ${upstreamDNS}!`);
+                console.log(`[DNS Racing] Alternative resolver ${respondingIP} won the race against primary ${upstreamDNS}!`);
             }
 
             const winningServer = config.upstreamPool.find(s => s.ip === respondingIP);
@@ -1627,6 +1689,7 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
             racingDelay = Math.min(config.dnsRacingDelayMs || 15, adaptiveDelay);
         }
         
+        // Cascade 1: Secondary resolver racing (and DoH fallback)
         setTimeout(() => {
             if (!resolved) {
                 config.stats.racingTotal = (config.stats.racingTotal || 0) + 1;
@@ -1644,6 +1707,19 @@ function fetchFromUpstreamDeduplicated(queryData, domain, qtype, upstreamDNS, ca
                 queriesActive--;
             }
         }, racingDelay);
+        
+        // Cascade 2: Tertiary resolver racing (scheduled at 2x racing delay)
+        if (thirdUpstreamDNS) {
+            queriesActive++;
+            setTimeout(() => {
+                if (!resolved) {
+                    config.stats.racingTotal = (config.stats.racingTotal || 0) + 1;
+                    queryUpstream(queryData, thirdUpstreamDNS, (res) => onResponse(res, thirdUpstreamDNS), false);
+                } else {
+                    queriesActive--;
+                }
+            }, 2 * racingDelay);
+        }
     }
 }
 
@@ -1898,12 +1974,21 @@ function loadConfig() {
     config.upstreamPool.forEach(server => {
         server.queryCount = 0; // Force real-time query count tracking on startup/restart
         server.history = [];
+        server.latencyHistory = []; // Dynamic latency history in RAM
+        server.avgLatency = server.latency || 30;
+        server.jitter = 5;
+        server.lossRate = 0;
         server.successRate = 100;
         if (server.ecsSupported === undefined) {
             const noEcsIps = ["1.1.1.1", "1.0.0.1"];
             server.ecsSupported = !noEcsIps.includes(server.ip);
         }
     });
+    
+    // Register Vietnamese ISP subnets for pre-warming & replication on boot in non-test mode
+    if (process.env.NODE_ENV !== 'test') {
+        VN_ISP_SUBNETS.forEach(subnet => prewarmedSubnets.add(subnet));
+    }
     config.lbAlgorithm = config.lbAlgorithm || "least-latency";
     config.gslbRecords = config.gslbRecords || {};
     config.dnsRacingEnabled = config.dnsRacingEnabled !== undefined ? config.dnsRacingEnabled : true;
@@ -2207,9 +2292,9 @@ function runRAMCacheOptimizer() {
     console.log(`[RAM Optimizer] Current RSS: ${rssMb}MB, Heap Used: ${heapUsedMb}MB, Cache Size: ${dnsCache.size}`);
     
     if (rssMb < 150) {
-        if (MAX_CACHE_SIZE < 2000000) {
-            MAX_CACHE_SIZE = 2000000;
-            console.log(`[RAM Optimizer] RSS is low (${rssMb}MB). Upgraded MAX_CACHE_SIZE to 2,000,000.`);
+        if (MAX_CACHE_SIZE < 4000000) {
+            MAX_CACHE_SIZE = 4000000;
+            console.log(`[RAM Optimizer] RSS is low (${rssMb}MB). Upgraded MAX_CACHE_SIZE to 4,000,000.`);
         }
         if (!config.staleCacheWindowSeconds || config.staleCacheWindowSeconds < 2592000) {
             config.staleCacheWindowSeconds = 2592000; // 30 days
@@ -2224,15 +2309,15 @@ function runRAMCacheOptimizer() {
             triggerExtendedPrewarm();
         }
     } else if (rssMb < 300) {
-        if (MAX_CACHE_SIZE !== 500000) {
-            MAX_CACHE_SIZE = 500000;
-            console.log(`[RAM Optimizer] RSS is moderate (${rssMb}MB). Adjusted MAX_CACHE_SIZE to 500,000.`);
+        if (MAX_CACHE_SIZE !== 1000000) {
+            MAX_CACHE_SIZE = 1000000;
+            console.log(`[RAM Optimizer] RSS is moderate (${rssMb}MB). Adjusted MAX_CACHE_SIZE to 1,000,000.`);
         }
     } else if (rssMb >= 300 && rssMb < 400) {
-        if (MAX_CACHE_SIZE > 200000) {
-            MAX_CACHE_SIZE = 200000;
-            console.log(`[RAM Optimizer] RSS is high (${rssMb}MB). Reduced MAX_CACHE_SIZE to 200,000.`);
-            pruneCacheToSize(200000);
+        if (MAX_CACHE_SIZE > 500000) {
+            MAX_CACHE_SIZE = 500000;
+            console.log(`[RAM Optimizer] RSS is high (${rssMb}MB). Reduced MAX_CACHE_SIZE to 500,000.`);
+            pruneCacheToSize(500000);
         }
         if (config.staleCacheWindowSeconds > 86400) {
             config.staleCacheWindowSeconds = 86400; // 24 hours
